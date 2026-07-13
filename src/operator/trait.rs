@@ -1,0 +1,50 @@
+use std::borrow::Cow;
+
+use async_trait::async_trait;
+use serde_json::Value;
+use thiserror::Error;
+
+#[derive(Debug, Clone)]
+pub struct OperatorSpec {
+    pub type_name: String,
+    pub description: String,
+    pub iterate: bool,
+    pub cache: bool,
+}
+
+impl OperatorSpec {
+    pub fn new(type_name: impl Into<String>, description: impl Into<String>) -> Self {
+        OperatorSpec { type_name: type_name.into(), description: description.into(), iterate: false, cache: true }
+    }
+    pub fn with_iterate(mut self, yes: bool) -> Self {
+        self.iterate = yes;
+        self
+    }
+    pub fn with_cache(mut self, yes: bool) -> Self {
+        self.cache = yes;
+        self
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum OperatorError {
+    #[error("runtime error: {0}")]
+    Runtime(String),
+    #[error("config error: {0}")]
+    Config(String),
+    #[error("operator timeout")]
+    Timeout,
+}
+
+/// 算子 trait。data 是 executor 从 scope 零拷贝取出的 bytes，config 是 DSL 静态配置。
+/// 返回值 `Cow<[u8]>`：noop 等透传算子返回 Borrowed，其余返回 Owned。
+#[async_trait]
+pub trait Operator: Send + Sync {
+    fn spec(&self) -> OperatorSpec;
+
+    async fn run<'a>(
+        &self,
+        data: &'a [u8],
+        config: &Value,
+    ) -> Result<Cow<'a, [u8]>, OperatorError>;
+}

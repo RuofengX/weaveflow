@@ -1,0 +1,10 @@
+/target/
+.idea/
+weave-data/
+*.redb
+.DS_Store
+*.swp
+*.swo
+*~
+node_modules/
+.hermes/
