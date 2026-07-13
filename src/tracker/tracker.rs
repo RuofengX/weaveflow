@@ -2,15 +2,8 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::task::progress::{Progress, StepState, TaskStatus};
-use crate::task::TaskId;
-
-/// DAG 层的结构信息（用于前端渲染并行括号）。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct LayerInfo {
-    pub index: usize,
-    pub step_ids: Vec<String>,
-}
+use super::meta::TaskId;
+use super::state::{Progress, StepProgress, StepState, TaskStatus, LayerInfo};
 
 /// 对外暴露的 task 状态快照。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -21,7 +14,7 @@ pub struct TaskSnapshot {
     pub layers: Vec<LayerInfo>,
     /// Per-step progress — always present so TUI can render step states
     /// even after the task has completed or failed.
-    pub steps: Vec<crate::task::progress::StepProgress>,
+    pub steps: Vec<StepProgress>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub total_duration_ms: Option<u64>,

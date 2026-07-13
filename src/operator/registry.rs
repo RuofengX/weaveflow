@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::r#trait::Operator;
+use super::types::Operator;
 
 /// 返回所有内置算子（name → impl）。
 pub fn builtins() -> HashMap<String, Box<dyn Operator>> {

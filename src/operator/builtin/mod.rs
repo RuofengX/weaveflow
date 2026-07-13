@@ -51,3 +51,10 @@ pub fn register_all(ops: &mut HashMap<String, Box<dyn Operator>>) {
         ops.insert(name, op);
     }
 }
+
+/// 按名字查找内置算子。
+pub fn get_builtin(name: &str) -> Option<Box<dyn Operator>> {
+    let mut ops: HashMap<String, Box<dyn Operator>> = HashMap::new();
+    register_all(&mut ops);
+    ops.remove(name)
+}

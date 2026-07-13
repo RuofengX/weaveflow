@@ -2,7 +2,7 @@
 // DSL 解析器：YAML 字符串 → PipelineDef
 // ---------------------------------------------------------------------------
 
-use crate::dsl::schema::PipelineDef;
+use crate::dsl::pipeline::PipelineDef;
 
 /// 将 YAML 字符串解析为 `PipelineDef`。
 pub fn parse(yaml: &str) -> Result<PipelineDef, ParseError> {

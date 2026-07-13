@@ -1,12 +1,4 @@
-pub mod progress;
-pub mod scope;
-pub mod snapshot;
-pub mod tracker;
-
-pub use progress::{IterateProgress, Progress, StepProgress, StepState, TaskStatus};
-pub use scope::Scope;
-pub use snapshot::Snapshot;
-pub use tracker::{LayerInfo, TaskSnapshot, TaskTracker};
+use serde::{Deserialize, Serialize};
 
 /// Task ID（UUID v4，redb 表 key）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -59,7 +51,6 @@ impl std::fmt::Display for PipelineId {
 }
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 
 /// Task 元数据（存储在 redb task 表中）。创建后不可变。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +61,3 @@ pub struct TaskMeta {
     pub result_ttl_secs: i64,
     pub inputs: serde_json::Value,
 }
-
-// ── end of file ──
-

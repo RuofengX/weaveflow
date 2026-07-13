@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-
 /// 步骤执行进度。状态无关的元数据在外层，状态相关的数据在 StepState 中。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepProgress {
@@ -84,4 +83,11 @@ pub enum TaskStatus {
     Running(Progress),
     Completed(serde_json::Value),
     Failed(String),
+}
+
+/// DAG 层的结构信息（用于前端渲染并行括号）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LayerInfo {
+    pub index: usize,
+    pub step_ids: Vec<String>,
 }

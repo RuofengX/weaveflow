@@ -15,10 +15,10 @@ use tokio::sync::Mutex;
 use weave::dsl::parser::parse;
 use weave::dsl::validator::{validate, ValidateOptions};
 use weave::error::WeaveError;
-use weave::runtime::dag::Dag;
-use weave::runtime::Executor;
+use weave::engine::dag::Dag;
+use weave::engine::runner::Runner;
 use weave::store::{Database, PruneOptions};
-use weave::task::{LayerInfo, TaskId, TaskTracker};
+use weave::tracker::{LayerInfo, TaskId, TaskTracker};
 
 type DbRef = Arc<Mutex<Database>>;
 type TrackerRef = Arc<TaskTracker>;
@@ -95,7 +95,7 @@ async fn create_pipeline(
 
     let builtins = weave::operator::builtins();
     for step in &pipeline.steps {
-        if step.r#type != "js" && !builtins.contains_key(&step.r#type) {
+        if step.r#type != "js" && !builtins.contains_key(step.r#type.as_str()) {
             return Err(WeaveError::Validation(format!(
                 "未注册的步骤类型: {}（步骤: {}）",
                 step.r#type, step.id
@@ -146,7 +146,7 @@ async fn get_pipeline(
     let pipeline = if let Some((_, p)) = db.find_pipeline_by_name(&name_or_id)? {
         p
     } else if let Ok(uuid) = uuid::Uuid::parse_str(&name_or_id) {
-        let pid = weave::task::PipelineId(uuid);
+        let pid = weave::tracker::PipelineId(uuid);
         db.load_pipeline(&pid)?
             .ok_or_else(|| WeaveError::NotFound(format!("pipeline {name_or_id} not found")))?
     } else {
@@ -224,13 +224,13 @@ async fn run_pipeline(
     let pipeline_clone = pipeline.clone();
     tokio::spawn(async move {
         let _permit = permit; // hold the permit until this task finishes
-        let executor = Executor::new(
+        let runner = Runner::new(
             pipeline_clone,
             state_clone.db.clone(),
             state_clone.tracker.clone(),
         );
 
-        let _ = executor.run(task_id, inputs, 3600).await;
+        let _ = runner.run(task_id, inputs).await;
     });
 
     let response = serde_json::json!({
@@ -421,7 +421,7 @@ async fn ws_task(
 async fn handle_ws(
     mut socket: WebSocket,
     mut rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
-    initial: Option<weave::task::TaskSnapshot>,
+    initial: Option<weave::tracker::TaskSnapshot>,
 ) {
     // Send current snapshot first so the client sees the latest state immediately,
     // even if the task completed before the WS connection was established.

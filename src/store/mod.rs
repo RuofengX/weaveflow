@@ -8,11 +8,11 @@ use chrono::Utc;
 use redb::{Database as RedbDb, ReadableTable};
 use std::path::Path;
 
-use crate::dsl::schema::PipelineDef;
+use crate::dsl::pipeline::PipelineDef;
 use crate::error::{WeaveError, WeaveResult};
 use crate::store::database::{CACHE, OBJECT, PIPELINE, SNAPSHOT, TASK};
-use crate::task::snapshot::{Snapshot, SnapshotKey};
-use crate::task::{PipelineId, TaskId, TaskMeta};
+use crate::tracker::snapshot::{Snapshot, SnapshotKey};
+use crate::tracker::{PipelineId, TaskId, TaskMeta};
 
 /// weave 数据层入口。封装 redb。
 #[derive(Debug)]
@@ -543,7 +543,7 @@ impl Database {
             if let Some(ref name) = options.pipeline
                 && &task.pipeline_name != name { continue; }
             if !options.force {
-                let age = (now - task.created_at).num_seconds();
+                let age = now.signed_duration_since(task.created_at).num_seconds();
                 if age < task.result_ttl_secs { continue; }
             }
             to_delete.push(task);

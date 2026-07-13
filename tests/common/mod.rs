@@ -5,11 +5,11 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use weave::dsl::parser::parse;
 use weave::dsl::validator::{validate, ValidateOptions};
+use weave::engine::dag::Dag;
+use weave::engine::runner::Runner;
 use weave::error::WeaveResult;
-use weave::runtime::dag::Dag;
-use weave::runtime::Executor;
 use weave::store::Database;
-use weave::task::{LayerInfo, TaskTracker};
+use weave::tracker::{LayerInfo, TaskTracker};
 
 pub fn temp_db() -> (Database, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -53,8 +53,8 @@ pub fn run_yaml(yaml: &str, slots: HashMap<String, Value>) -> WeaveResult<Value>
         layer_infos,
     ));
 
-    let executor = Executor::new(def, db.clone(), tracker);
-    let result_bytes = rt.block_on(executor.run(task_id, slots, 3600))?;
+    let runner = Runner::new(def, db.clone(), tracker);
+    let result_bytes = rt.block_on(runner.run(task_id, slots))?;
     Ok(serde_json::from_slice(&result_bytes).unwrap_or(Value::Null))
 }
 

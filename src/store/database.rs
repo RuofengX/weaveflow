@@ -3,11 +3,11 @@ use redb::{Key as RedbKey, TableDefinition, TypeName};
 use redb::Value as RedbValue;
 use std::cmp::Ordering;
 
-use crate::dsl::schema::PipelineDef;
+use crate::dsl::pipeline::PipelineDef;
 use crate::store::object::ObjectDigest;
 use crate::store::object::ObjectValue;
-use crate::task::snapshot::{Snapshot, SnapshotKey};
-use crate::task::{PipelineId, TaskId, TaskMeta};
+use crate::tracker::snapshot::{Snapshot, SnapshotKey};
+use crate::tracker::{PipelineId, TaskId, TaskMeta};
 use uuid::Uuid;
 
 // ── TaskId（UUID v4，定长 16 字节） ───────────────────────────────────

@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use flexbuffers::{Blob, Builder, Reader};
 
-/// FlatBuffer-backed scope. Stores all step outputs as opaque bytes.
+/// FlexBuffer-backed runtime scope. Stores all step outputs as opaque bytes.
 /// Clone = clone the underlying FlexBuffer bytes.
 #[derive(Debug, Clone)]
 pub struct Scope {
@@ -17,13 +19,47 @@ impl Scope {
         Self { buf: b.take_buffer() }
     }
 
-    /// Get step output bytes. Returns owned bytes (FlexBuffers are not zero-copy).
+    /// Get step output bytes. Supports path traversal: if `step_id` contains
+    /// a dot, the first segment is the FlexBuffer key and remaining segments
+    /// are navigated as JSON fields on the blob value.
     pub fn get_output(&self, step_id: &str) -> Option<Vec<u8>> {
-        let r = Reader::get_root(self.buf.as_slice()).ok()?;
-        let map = r.as_map();
-        let val = map.index(step_id).ok()?;
-        let blob = val.get_blob().ok()?;
-        Some(blob.0.to_vec())
+        if let Some((key, path)) = step_id.split_once('.') {
+            let r = Reader::get_root(self.buf.as_slice()).ok()?;
+            let map = r.as_map();
+            let val = map.index(key).ok()?;
+            let blob = val.get_blob().ok()?;
+            let v: serde_json::Value = serde_json::from_slice(blob.0).ok()?;
+            let mut current = &v;
+            for part in path.split('.') {
+                current = current.get(part).unwrap_or(&serde_json::Value::Null);
+            }
+            Some(serde_json::to_vec(current).unwrap_or_default())
+        } else {
+            let r = Reader::get_root(self.buf.as_slice()).ok()?;
+            let map = r.as_map();
+            let val = map.index(step_id).ok()?;
+            let blob = val.get_blob().ok()?;
+            Some(blob.0.to_vec())
+        }
+    }
+
+    /// Return all non-slot entries in the scope.
+    pub fn all_outputs(&self) -> HashMap<String, Vec<u8>> {
+        let mut result = HashMap::new();
+        let r = match Reader::get_root(self.buf.as_slice()) {
+            Ok(r) => r,
+            Err(_) => return result,
+        };
+        let m = r.as_map();
+        for (k, v) in m.iter_keys().zip(m.iter_values()) {
+            if k == "slots" {
+                continue;
+            }
+            if let Ok(blob) = v.get_blob() {
+                result.insert(k.to_string(), blob.0.to_vec());
+            }
+        }
+        result
     }
 
     /// Get slots bytes. Returns owned bytes.

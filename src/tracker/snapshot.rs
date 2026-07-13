@@ -19,5 +19,5 @@ impl std::fmt::Display for SnapshotKey {
 pub struct Snapshot {
     pub seq: u64,
     pub step_id: String,
-    pub output: Vec<u8>, // raw output bytes
+    pub output: Vec<u8>,
 }

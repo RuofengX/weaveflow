@@ -60,3 +60,14 @@ impl Operator for JsOperator {
         }
     }
 }
+
+pub struct JsOperatorPlaceholder;
+#[async_trait]
+impl Operator for JsOperatorPlaceholder {
+    fn spec(&self) -> OperatorSpec {
+        OperatorSpec::new("js", "JS 自定义算子 (rquickjs)")
+    }
+    async fn run<'a>(&self, _data: &'a [u8], _config: &Value) -> Result<Cow<'a, [u8]>, OperatorError> {
+        Err(OperatorError::Config("js operator requires inline code".into()))
+    }
+}

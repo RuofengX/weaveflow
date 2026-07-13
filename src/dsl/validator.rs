@@ -2,7 +2,7 @@
 // DSL 校验器：解析后的 PipelineDef 做语义校验
 // ---------------------------------------------------------------------------
 
-use crate::dsl::schema::PipelineDef;
+use crate::dsl::pipeline::PipelineDef;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -374,7 +374,7 @@ fn check_output_ref(output: &str, all_ids: &HashSet<&str>, report: &mut Validati
 }
 
 fn check_iterate_config(
-    step: &crate::dsl::schema::StepDef,
+    step: &crate::dsl::pipeline::StepDef,
     report: &mut ValidationReport,
 ) {
     if let Some(ref cfg) = step.iterate
@@ -396,7 +396,7 @@ fn check_iterate_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsl::schema::*;
+    use crate::dsl::pipeline::*;
     use serde_json::json;
 
     fn valid_def() -> PipelineDef {

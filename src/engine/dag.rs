@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::dsl::schema::{PipelineDef, StepDef};
+use crate::dsl::pipeline::{PipelineDef, StepDef};
+use crate::vm::resolver::extract_code_template_deps;
 
-/// DAG 构建或执行中的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum DagError {
     #[error("cycle detected, remaining nodes: {0:?}")]
@@ -13,25 +13,16 @@ pub enum DagError {
     EmptyGraph,
 }
 
-/// 拓扑排序后的一层，可并行执行的步骤 ID 集合。
 pub type DagLayer = Vec<String>;
 
-/// DAG 拓扑结构。
 #[derive(Debug, Clone)]
 pub struct Dag {
-    /// 步骤定义，以 step_id 索引。
     steps: HashMap<String, StepDef>,
-    /// 每个步的入边（依赖它的前驱）。
     in_edges: HashMap<String, Vec<String>>,
-    /// 每个步的出边（它依赖的后继）。
     out_edges: HashMap<String, Vec<String>>,
 }
 
 impl Dag {
-    /// 从 PipelineDef 构建 DAG。
-    ///
-    /// 隐式依赖（变量引用 `{step_id.output.field}`）和显式依赖（`after`）均被解析为边。
-    /// 目前以 `after` 为主要依赖来源。
     pub fn from_pipeline(def: &PipelineDef) -> Result<Self, DagError> {
         if def.steps.is_empty() {
             return Err(DagError::EmptyGraph);
@@ -42,7 +33,6 @@ impl Dag {
         let mut in_edges: HashMap<String, Vec<String>> = HashMap::new();
         let mut out_edges: HashMap<String, Vec<String>> = HashMap::new();
 
-        // 收集所有 step id
         for step in &def.steps {
             if steps.contains_key(&step.id) {
                 continue;
@@ -53,28 +43,23 @@ impl Dag {
             out_edges.entry(step.id.clone()).or_default();
         }
 
-        // 解析 after 依赖
         for step in &def.steps {
             if let Some(ref after_list) = step.after {
                 for after_id in after_list {
                     if !steps.contains_key(after_id) {
                         return Err(DagError::RefNotFound(after_id.clone()));
                     }
-                    // after_id → step.id
                     out_edges.entry(after_id.clone()).or_default().push(step.id.clone());
                     in_edges.entry(step.id.clone()).or_default().push(after_id.clone());
                 }
             }
         }
 
-        // 解析隐式依赖：变量引用 `{step_id.output.field}` + iterate.over + code 中的 {{}}
         for step in &def.steps {
             let deps = extract_output_refs(&step.inputs, &step_ids);
-            // Also check iterate.over for dependencies
             let iterate_deps = step.iterate.as_ref()
                 .map(|cfg| extract_output_refs(&Some(serde_json::json!({"over": cfg.over})), &step_ids))
                 .unwrap_or_default();
-            // Also check code for {{step_id.output}} template refs
             let code_deps = step.code.as_deref()
                 .map(|c| extract_code_template_deps(c, &step_ids))
                 .unwrap_or_default();
@@ -94,10 +79,6 @@ impl Dag {
         Ok(Dag { steps, in_edges, out_edges })
     }
 
-    /// Kahn 拓扑排序，返回分层结果。
-    ///
-    /// 每一层中的步骤没有相互依赖，可以并行执行。
-    /// 返回 `Err` 表示存在环，无法完成拓扑排序。
     pub fn topological_sort(&self) -> Result<Vec<DagLayer>, DagError> {
         let mut in_degree: HashMap<&str, usize> = self.steps.keys()
             .map(|id| (id.as_str(), self.in_edges.get(id).map(|e| e.len()).unwrap_or(0)))
@@ -143,33 +124,27 @@ impl Dag {
         Ok(layers)
     }
 
-    /// 检查是否存在环。
     pub fn has_cycle(&self) -> bool {
         self.topological_sort().is_err()
     }
 
-    /// 返回所有 step id 列表。
     pub fn step_ids(&self) -> Vec<String> {
         self.steps.keys().cloned().collect()
     }
 
-    /// 返回某个 step 的定义。
     pub fn step(&self, id: &str) -> Option<&StepDef> {
         self.steps.get(id)
     }
 
-    /// 返回某个 step 的前驱（它依赖的步）。
     pub fn predecessors(&self, id: &str) -> Option<&[String]> {
         self.in_edges.get(id).map(|v| v.as_slice())
     }
 
-    /// 返回某个 step 的后继（依赖它的步）。
     pub fn successors(&self, id: &str) -> Option<&[String]> {
         self.out_edges.get(id).map(|v| v.as_slice())
     }
 }
 
-/// 从步骤的 inputs 中提取 `{step_id.output...}` 隐式依赖。
 fn extract_output_refs(
     inputs: &Option<serde_json::Value>,
     known_steps: &HashSet<String>,
@@ -183,23 +158,6 @@ fn extract_output_refs(
     refs
 }
 
-/// 从 code 中提取 `{{step_id.output}}` 双花括号模板引用中的 step_id。
-fn extract_code_template_deps(code: &str, known_steps: &HashSet<String>) -> Vec<String> {
-    let re = regex::Regex::new(r"\{\{([a-zA-Z_][\w.]*)\}\}").unwrap();
-    let mut deps = Vec::new();
-    for cap in re.captures_iter(code) {
-        let ref_expr = &cap[1];
-        if let Some(step_id) = ref_expr.split('.').next()
-            && known_steps.contains(step_id) {
-                deps.push(step_id.to_string());
-            }
-    }
-    deps.sort();
-    deps.dedup();
-    deps
-}
-
-/// 递归遍历 JSON Value，提取变量引用中指向已知 step 的依赖。
 fn collect_refs(
     val: &serde_json::Value,
     results: &mut Vec<String>,
@@ -212,13 +170,11 @@ fn collect_refs(
                 let brace_abs = start + brace;
                 if let Some(end) = s[brace_abs..].find('}') {
                     let inner = &s[brace_abs..brace_abs + end + 1];
-                    if let Some(var_ref) = crate::dsl::schema::parse_variable_ref(inner) {
-                        // 如果第一个路径段是已知 step_id → 隐式依赖
-                        if let Some(first) = var_ref.parts.first()
+                    if let Some(var_ref) = crate::dsl::pipeline::parse_variable_ref(inner)
+                        && let Some(first) = var_ref.parts.first()
                             && known_steps.contains(first.as_str()) {
                                 results.push(first.clone());
                             }
-                    }
                     start = brace_abs + end + 1;
                 } else {
                     break;
@@ -238,7 +194,7 @@ fn collect_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsl::schema::*;
+    use crate::dsl::pipeline::*;
 
     fn make_pipeline(steps: Vec<StepDef>) -> PipelineDef {
         PipelineDef {
@@ -309,7 +265,6 @@ mod tests {
         let dag = Dag::from_pipeline(&p).unwrap();
         let layers = dag.topological_sort().unwrap();
         assert_eq!(layers.len(), 2);
-        // Layer 0: a, b (order unspecified)
         assert_eq!(layers[0].len(), 2);
         assert!(layers[0].contains(&"a".to_string()));
         assert!(layers[0].contains(&"b".to_string()));
@@ -356,7 +311,6 @@ mod tests {
 
     #[test]
     fn implicit_dep_via_input_ref() {
-        // step "e" has inputs referencing "d.output"
         let s_e = StepDef {
             id: "e".into(),
             r#type: "noop".into(),
