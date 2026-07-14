@@ -15,7 +15,7 @@ use crate::dsl::raw::RawPipelineDef;
 /// `rust_yaml` 的解析错误（含行号、上下文）直接透传到 `ParseError` 返回给调用方。
 pub fn parse(yaml: &str) -> Result<PipelineDef, ParseError> {
     let raw: RawPipelineDef = rust_yaml::from_str(yaml)?;
-    Ok(raw.into())
+    PipelineDef::try_from(raw).map_err(|e| ParseError::Yaml(e.to_string()))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -33,7 +33,7 @@ impl From<rust_yaml::Error> for ParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsl::RefValue;
+    use crate::dsl::{RefValue, StepOp};
 
     fn minimal_yaml() -> &'static str {
         r#"
@@ -53,10 +53,10 @@ output: "{fetch.output}"
         assert_eq!(def.name, "minimal");
         assert_eq!(def.steps.len(), 1);
         assert_eq!(def.steps[0].id, "fetch");
-        assert_eq!(def.steps[0].r#type, "http");
+        assert_eq!(def.steps[0].op.op_type(), "http");
         assert!(matches!(def.output, RefValue::Ref(_)));
-        let inputs = def.steps[0].inputs.as_ref().unwrap();
-        assert!(matches!(inputs.get("url"), Some(RefValue::Ref(_))));
+        let StepOp::HttpClient(ref inputs) = def.steps[0].op else { panic!("expected http") };
+        assert!(matches!(inputs.url, RefValue::Ref(_)));
     }
 
     #[test]
@@ -65,13 +65,13 @@ output: "{fetch.output}"
 name: iterate_demo
 steps:
   - id: process
-    type: http
+    type: var
     iterate:
       over: "{slots.data}"
       as: "item"
       max_workers: 8
     inputs:
-      body: "{item}"
+      value: "{item}"
 output: "{process.output}"
 "#;
         let def = parse(yaml).unwrap();
@@ -137,18 +137,14 @@ output: "{fetch.output}"
 name: literal_test
 steps:
   - id: s
-    type: noop
+    type: var
     inputs:
-      key: "static_value"
-      count: 42
-      flag: true
+      value: "static_value"
 output: done
 "#;
         let def = parse(yaml).unwrap();
-        let inputs = def.steps[0].inputs.as_ref().unwrap();
-        assert!(matches!(inputs.get("key"), Some(RefValue::Literal(_))));
-        assert!(matches!(inputs.get("count"), Some(RefValue::Literal(_))));
-        assert!(matches!(inputs.get("flag"), Some(RefValue::Literal(_))));
+        let StepOp::VarOutput(ref v) = def.steps[0].op else { panic!("expected var") };
+        assert!(matches!(v.value, Some(RefValue::Literal(_))));
         assert!(matches!(def.output, RefValue::Literal(_)));
     }
 }

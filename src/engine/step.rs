@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::dsl::StepDef;
+use crate::dsl::StepOp;
 use crate::engine::cache::compute_cache_key;
 use crate::engine::iterate::execute_iterate;
 use crate::error::{WeaveError, WeaveResult};
@@ -28,7 +29,7 @@ pub async fn execute_step(
     if let Some(ref cfg) = step.iterate {
         let over_bytes = resolve_ref(scope, &cfg.over)?;
         let mut hasher = Sha256::new();
-        hasher.update(step.r#type.as_bytes());
+        hasher.update(step.op.op_type().as_bytes());
         hasher.update(b":");
         hasher.update(&data);
         hasher.update(b":");
@@ -63,7 +64,7 @@ pub async fn execute_step(
         return Ok(result);
     }
 
-    let cache_key = compute_cache_key(&step.r#type, &data, &config);
+    let cache_key = compute_cache_key(step.op.op_type(), &data, &config);
     {
         let db_lock = db.lock().await;
         if let Some(cached) = db_lock.check_cache_bytes(&cache_key)? {
@@ -89,7 +90,7 @@ pub async fn execute_step_static(
         ));
     }
 
-    let cache_key = compute_cache_key(&step.r#type, &data, &config);
+    let cache_key = compute_cache_key(step.op.op_type(), &data, &config);
     {
         let db_guard = db.lock().await;
         if let Some(cached) = db_guard.check_cache_bytes(&cache_key)? {
@@ -144,17 +145,15 @@ pub fn resolve_operator(
     step: &StepDef,
     scope: &Scope,
 ) -> WeaveResult<Box<dyn Operator>> {
-    let op_type = &step.r#type;
-
-    if op_type == "js" {
-        let code = step.code.as_deref().unwrap_or("").to_string();
-        let code = resolve_code_templates(&code, scope)?;
+    if let StepOp::JsScript(ref inputs) = step.op {
+        let code = resolve_code_templates(&inputs.code, scope)?;
         return Ok(Box::new(JsOperator {
             name: step.id.clone(),
             source: code,
         }));
     }
 
+    let op_type = step.op.op_type();
     get_builtin(op_type).ok_or_else(|| WeaveError::Internal(format!("未注册: {op_type}")))
 }
 

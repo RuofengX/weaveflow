@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -7,12 +5,12 @@ use super::pipeline::PipelineDef;
 use super::retry::RetryDef;
 use super::rule::RuleDef;
 use super::step::{BatchConfig, IterateConfig, StepDef};
+use super::step_op::StepOp;
 use super::storage::StorageDef;
 use super::variable::{parse_string_to_refvalue, RefValue, VariablePath};
 
 // ---------------------------------------------------------------------------
-// YAML 中间层类型 — 仅用于 YAML 字符串 ↔ PipelineDef 的转换，
-// 不参与 redb 持久化。
+// YAML 中间层类型 — 仅用于 YAML → PipelineDef 转换，不参与 redb 持久化
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -35,17 +33,16 @@ pub struct RawPipelineDef {
 pub struct RawStepDef {
     pub id: String,
     #[serde(rename = "type")]
-    pub r#type: String,
+    pub op_type: String,
     #[serde(default)]
     pub after: Option<Vec<String>>,
     #[serde(default)]
     pub iterate: Option<RawIterateConfig>,
-    pub inputs: Option<Value>,
     pub cache: Option<bool>,
     pub retry: Option<RetryDef>,
     pub timeout: Option<u64>,
     #[serde(default)]
-    pub code: Option<String>,
+    pub inputs: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -71,36 +68,76 @@ pub struct RawRuleDef {
 }
 
 // ---------------------------------------------------------------------------
-// Raw → Pipeline 转换：把 YAML 字符串中的模板语法 `{...}` 解析为 RefValue
+// Raw → PipelineDef / StepDef 转换
 // ---------------------------------------------------------------------------
 
-impl From<RawPipelineDef> for PipelineDef {
-    fn from(raw: RawPipelineDef) -> Self {
-        PipelineDef {
+impl TryFrom<RawPipelineDef> for PipelineDef {
+    type Error = ParseError;
+
+    fn try_from(raw: RawPipelineDef) -> Result<Self, Self::Error> {
+        Ok(PipelineDef {
             name: raw.name,
             description: raw.description,
             storage: raw.storage,
             slots: raw.slots,
-            steps: raw.steps.into_iter().map(StepDef::from).collect(),
+            steps: raw
+                .steps
+                .into_iter()
+                .map(StepDef::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
             output: parse_string_to_refvalue(&raw.output),
-            rules: raw.rules.into_iter().map(RuleDef::from).collect(),
-        }
+            rules: raw
+                .rules
+                .into_iter()
+                .map(|r| {
+                    Ok(RuleDef {
+                        id: r.id,
+                        r#type: r.r#type,
+                        inputs: r.inputs.map(value_to_inputs),
+                        code: r.code,
+                    })
+                })
+                .collect::<Result<Vec<_>, Self::Error>>()?,
+        })
     }
 }
 
-impl From<RawStepDef> for StepDef {
-    fn from(raw: RawStepDef) -> Self {
-        StepDef {
+impl TryFrom<RawStepDef> for StepDef {
+    type Error = ParseError;
+
+    fn try_from(raw: RawStepDef) -> Result<Self, Self::Error> {
+        let op: StepOp = match raw.op_type.as_str() {
+            "http" => StepOp::HttpClient(from_inputs(&raw.inputs, "http")?),
+            "js" => StepOp::JsScript(from_inputs(&raw.inputs, "js")?),
+            "filter" => StepOp::FilterData(from_inputs(&raw.inputs, "filter")?),
+            "sort" => StepOp::SortData(from_inputs(&raw.inputs, "sort")?),
+            "dedup" => StepOp::DedupData(from_inputs(&raw.inputs, "dedup")?),
+            "merge" => StepOp::MergeData(from_inputs(&raw.inputs, "merge")?),
+            "split" => StepOp::SplitData(from_inputs(&raw.inputs, "split")?),
+            "base64" => StepOp::Base64Data(from_inputs(&raw.inputs, "base64")?),
+            "noop" => StepOp::Noop,
+            "var" => StepOp::VarOutput(from_inputs(&raw.inputs, "var")?),
+            "file" => StepOp::FileReader(from_inputs(&raw.inputs, "file")?),
+            "command" => StepOp::CommandRun(from_inputs(&raw.inputs, "command")?),
+            "llm" => StepOp::LlmClient(from_inputs(&raw.inputs, "llm")?),
+            "fork" => StepOp::ForkFlow(from_inputs(&raw.inputs, "fork")?),
+            other => {
+                return Err(ParseError::Yaml(format!(
+                    "未注册的步骤类型: {other}（步骤: {}）",
+                    raw.id
+                )))
+            }
+        };
+
+        Ok(StepDef {
             id: raw.id,
-            r#type: raw.r#type,
             after: raw.after,
             iterate: raw.iterate.map(IterateConfig::from),
-            inputs: raw.inputs.map(value_to_inputs),
             cache: raw.cache,
             retry: raw.retry,
             timeout: raw.timeout,
-            code: raw.code,
-        }
+            op,
+        })
     }
 }
 
@@ -116,29 +153,52 @@ impl From<RawIterateConfig> for IterateConfig {
     }
 }
 
-impl From<RawRuleDef> for RuleDef {
-    fn from(raw: RawRuleDef) -> Self {
-        RuleDef {
-            id: raw.id,
-            r#type: raw.r#type,
-            inputs: raw.inputs.map(value_to_inputs),
-            code: raw.code,
-        }
+// ---------------------------------------------------------------------------
+// 输入转换：Value → 带模板检测 + 类型校验
+// ---------------------------------------------------------------------------
+
+use serde::de::DeserializeOwned;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    #[error("YAML 解析失败: {0}")]
+    Yaml(String),
+}
+
+impl From<rust_yaml::Error> for ParseError {
+    fn from(e: rust_yaml::Error) -> Self {
+        ParseError::Yaml(e.to_string())
     }
 }
 
-/// 将 YAML 反序列化出的 `Value` 对象转为 `HashMap<String, RefValue>`，
-/// 字符串值会检测是否为模板 `{...}`。
-fn value_to_inputs(val: Value) -> HashMap<String, RefValue> {
+impl From<serde_json::Error> for ParseError {
+    fn from(e: serde_json::Error) -> Self {
+        ParseError::Yaml(e.to_string())
+    }
+}
+
+/// 将 YAML 反序列化出的原始 `Value` 直接转为带模板检测 + 类型校验的 `T`。
+/// `RefValue` 的自定义 Deserialize 会在 `from_value` 中自动处理字符串 → 模板解析。
+fn from_inputs<T: DeserializeOwned>(val: &Option<Value>, op_name: &str) -> Result<T, ParseError> {
+    let raw = val.clone().unwrap_or(Value::Null);
+    serde_json::from_value(raw).map_err(|e| {
+        ParseError::Yaml(format!(
+            "算子 {} 的 inputs 配置错误: {e}",
+            op_name
+        ))
+    })
+}
+
+fn value_to_inputs(val: Value) -> std::collections::HashMap<String, RefValue> {
     match val {
         Value::Object(map) => {
-            let mut result = HashMap::new();
+            let mut result = std::collections::HashMap::new();
             for (k, v) in map {
                 result.insert(k, value_to_refvalue(v));
             }
             result
         }
-        _ => HashMap::new(),
+        _ => std::collections::HashMap::new(),
     }
 }
 

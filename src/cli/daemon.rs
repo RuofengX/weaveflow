@@ -95,10 +95,11 @@ async fn create_pipeline(
 
     let builtins = weave::operator::builtins();
     for step in &pipeline.steps {
-        if step.r#type != "js" && !builtins.contains_key(step.r#type.as_str()) {
+        let op_type = step.op.op_type();
+        if op_type != "js" && !builtins.contains_key(op_type) {
             return Err(WeaveError::Validation(format!(
                 "未注册的步骤类型: {}（步骤: {}）",
-                step.r#type, step.id
+                op_type, step.id
             )));
         }
     }

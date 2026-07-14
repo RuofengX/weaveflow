@@ -20,7 +20,11 @@ pub struct VariablePath {
 ///
 /// `Literal` — 普通的 JSON 值（数字、布尔、null、对象、数组、字符串）。
 /// `Ref` — 运行时从 scope 中解析的变量引用路径。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// # 反序列化
+/// Redb JSON 存储使用 externally tagged 格式 `{"Literal": ...}` / `{"Ref": {...}}`，
+/// YAML 转换路径以 plain string 输入，内部自动检测 `{...}` 模板语法。
+#[derive(Debug, Clone, Serialize)]
 pub enum RefValue {
     Literal(Value),
     Ref(VariablePath),
@@ -73,5 +77,93 @@ impl RefValue {
             RefValue::Literal(v) => v.clone(),
             RefValue::Ref(path) => Value::String(format!("{{{}}}", path.parts.join("."))),
         }
+    }
+}
+
+/// 自定义反序列化：兼容 redb JSON（externally tagged enum）和 YAML 转换路径（plain string/values）。
+impl<'de> Deserialize<'de> for RefValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Rfv;
+        impl<'de> serde::de::Visitor<'de> for Rfv {
+            type Value = RefValue;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "JSON 值或变量引用如 {{greet.output}}")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<RefValue, E> {
+                if let Some(path) = VariablePath::parse(s) {
+                    Ok(RefValue::Ref(path))
+                } else {
+                    Ok(RefValue::Literal(Value::String(s.to_owned())))
+                }
+            }
+
+            fn visit_string<E: serde::de::Error>(self, s: String) -> Result<RefValue, E> {
+                self.visit_str(&s)
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<RefValue, E> {
+                Ok(RefValue::Literal(serde_json::json!(v)))
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<RefValue, E> {
+                Ok(RefValue::Literal(serde_json::json!(v)))
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<RefValue, E> {
+                Ok(RefValue::Literal(serde_json::json!(v)))
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<RefValue, E> {
+                Ok(RefValue::Literal(Value::Null))
+            }
+
+            fn visit_seq<S: serde::de::SeqAccess<'de>>(
+                self,
+                mut access: S,
+            ) -> Result<RefValue, S::Error> {
+                let mut seq = Vec::new();
+                while let Some(elem) = access.next_element::<Value>()? {
+                    seq.push(elem);
+                }
+                Ok(RefValue::Literal(Value::Array(seq)))
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut access: M,
+            ) -> Result<RefValue, M::Error> {
+                let first_key: Option<String> = access.next_key()?;
+                let Some(first_key) = first_key else {
+                    return Ok(RefValue::Literal(Value::Object(Default::default())));
+                };
+                match first_key.as_str() {
+                    "Ref" => {
+                        let path: VariablePath = access.next_value()?;
+                        Ok(RefValue::Ref(path))
+                    }
+                    "Literal" => {
+                        let val: Value = access.next_value()?;
+                        Ok(RefValue::Literal(val))
+                    }
+                    _ => {
+                        let mut map = serde_json::Map::new();
+                        let first_val: Value = access.next_value()?;
+                        map.insert(first_key, first_val);
+                        while let Some((key, value)) =
+                            access.next_entry::<String, Value>()?
+                        {
+                            map.insert(key, value);
+                        }
+                        Ok(RefValue::Literal(Value::Object(map)))
+                    }
+                }
+            }
+        }
+        deserializer.deserialize_any(Rfv)
     }
 }

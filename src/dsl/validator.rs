@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::dsl::{PipelineDef, RefValue, VariablePath};
+use crate::dsl::{PipelineDef, RefValue, StepOp, VariablePath};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -103,10 +103,10 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
         }
 
         // 检查 inputs 中的变量引用
-        if let Some(ref inputs) = step.inputs {
-            for v in inputs.values() {
-                check_ref_in_refvalue(v, &all_step_ids, &step.id, &mut report);
-            }
+        {
+            let op_val =
+                serde_json::to_value(&step.op).unwrap_or(Value::Null);
+            check_ref_in_json(&op_val, &all_step_ids, &step.id, &mut report);
         }
         check_iterate_config(step, &all_step_ids, &mut report);
     }
@@ -174,11 +174,10 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
     // orphan step check
     let mut referenced_steps: HashSet<String> = HashSet::new();
     for step in &def.steps {
-        if let Some(ref inputs) = step.inputs {
-            for (prefix, _) in refs_in_inputs(inputs) {
-                if prefix != "slots" && prefix != "env" {
-                    referenced_steps.insert(prefix);
-                }
+        let op_val = serde_json::to_value(&step.op).unwrap_or(Value::Null);
+        for (prefix, _) in refs_in_json(&op_val) {
+            if prefix != "slots" && prefix != "env" {
+                referenced_steps.insert(prefix);
             }
         }
         if let Some(ref after) = step.after {
@@ -187,14 +186,14 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
             }
         }
     }
-    for (prefix, _) in refs_in_refvalue(&def.output) {
+    for (prefix, _) in output_refs(&def.output) {
         if prefix != "slots" && prefix != "env" {
             referenced_steps.insert(prefix);
         }
     }
 
     for step in &def.steps {
-        let is_output_target = refs_in_refvalue(&def.output)
+        let is_output_target = output_refs(&def.output)
             .iter()
             .any(|(p, _)| p == &step.id);
         let is_referenced = referenced_steps.contains(&step.id) || is_output_target;
@@ -208,8 +207,8 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
 
     // ---- 7. JS syntax check ----
     for step in &def.steps {
-        if step.r#type == "js" && let Some(ref code) = step.code {
-            check_js_syntax(&step.id, code, &mut report);
+        if let StepOp::JsScript(ref inputs) = step.op {
+            check_js_syntax(&step.id, &inputs.code, &mut report);
         }
     }
 
@@ -236,8 +235,9 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
                 upstream_deps.entry(sid).or_default().push(dep.clone());
             }
         }
-        if let Some(ref inputs) = step.inputs {
-            for (prefix, _) in refs_in_inputs(inputs) {
+        {
+            let op_val = serde_json::to_value(&step.op).unwrap_or(Value::Null);
+            for (prefix, _) in refs_in_json(&op_val) {
                 if prefix != "slots" && prefix != "env" {
                     upstream_deps.entry(sid).or_default().push(prefix);
                 }
@@ -268,21 +268,20 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
 }
 
 // ---------------------------------------------------------------------------
-// Helpers — RefValue-based ref extraction
+// Helpers — JSON-based ref extraction
 // ---------------------------------------------------------------------------
 
 fn collect_slots_used(def: &PipelineDef) -> HashSet<String> {
     let mut set = HashSet::new();
     for step in &def.steps {
-        if let Some(ref inputs) = step.inputs {
-            for (prefix, rest) in refs_in_inputs(inputs) {
-                if prefix == "slots" && !rest.is_empty() {
-                    set.insert(rest);
-                }
+        let op_val = serde_json::to_value(&step.op).unwrap_or(Value::Null);
+        for (prefix, rest) in refs_in_json(&op_val) {
+            if prefix == "slots" && !rest.is_empty() {
+                set.insert(rest);
             }
         }
     }
-    for (prefix, rest) in refs_in_refvalue(&def.output) {
+    for (prefix, rest) in output_refs(&def.output) {
         if prefix == "slots" && !rest.is_empty() {
             set.insert(rest);
         }
@@ -290,16 +289,8 @@ fn collect_slots_used(def: &PipelineDef) -> HashSet<String> {
     set
 }
 
-fn refs_in_inputs(inputs: &HashMap<String, RefValue>) -> Vec<(String, String)> {
-    let mut all = Vec::new();
-    for v in inputs.values() {
-        all.extend(refs_in_refvalue(v));
-    }
-    all
-}
-
-fn refs_in_refvalue(val: &RefValue) -> Vec<(String, String)> {
-    match val {
+fn output_refs(output: &RefValue) -> Vec<(String, String)> {
+    match output {
         RefValue::Ref(path) => {
             if path.parts.is_empty() {
                 return vec![];
@@ -323,7 +314,18 @@ fn refs_in_path(path: &VariablePath) -> Vec<(String, String)> {
 
 fn refs_in_json(val: &Value) -> Vec<(String, String)> {
     match val {
-        Value::String(s) => extract_refs(s),
+        Value::Object(map) if map.contains_key("Ref") => {
+            if let Some(ref_val) = map.get("Ref")
+                && let Ok(path) = serde_json::from_value::<VariablePath>(ref_val.clone())
+                && !path.parts.is_empty()
+            {
+                let prefix = path.parts[0].clone();
+                let rest = path.parts[1..].join(".");
+                vec![(prefix, rest)]
+            } else {
+                vec![]
+            }
+        }
         Value::Object(map) => {
             let mut all = Vec::new();
             for v in map.values() {
@@ -331,6 +333,7 @@ fn refs_in_json(val: &Value) -> Vec<(String, String)> {
             }
             all
         }
+        Value::String(s) => extract_refs(s),
         Value::Array(arr) => {
             let mut all = Vec::new();
             for v in arr {
@@ -369,29 +372,6 @@ fn extract_refs(s: &str) -> Vec<(String, String)> {
     refs
 }
 
-fn check_ref_in_refvalue(
-    val: &RefValue,
-    all_ids: &HashSet<&str>,
-    step_id: &str,
-    report: &mut ValidationReport,
-) {
-    match val {
-        RefValue::Ref(path) => {
-            if let Some(prefix) = path.parts.first()
-                && prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
-                    report.errors.push(ValidationError {
-                        code: "variable_ref_not_found".into(),
-                        message: format!(
-                            "步骤 {} 中引用了不存在的步骤: {}",
-                            step_id, prefix
-                        ),
-                    });
-            }
-        }
-        RefValue::Literal(lit) => check_ref_in_json(lit, all_ids, step_id, report),
-    }
-}
-
 fn check_ref_in_json(
     val: &Value,
     all_ids: &HashSet<&str>,
@@ -399,8 +379,11 @@ fn check_ref_in_json(
     report: &mut ValidationReport,
 ) {
     match val {
-        Value::String(s) => {
-            for (prefix, _path) in extract_refs(s) {
+        Value::Object(map) if map.contains_key("Ref") => {
+            if let Some(ref_val) = map.get("Ref")
+                && let Ok(path) = serde_json::from_value::<VariablePath>(ref_val.clone())
+                && let Some(prefix) = path.parts.first()
+            {
                 if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
                     report.errors.push(ValidationError {
                         code: "variable_ref_not_found".into(),
@@ -415,6 +398,19 @@ fn check_ref_in_json(
         Value::Object(map) => {
             for v in map.values() {
                 check_ref_in_json(v, all_ids, step_id, report);
+            }
+        }
+        Value::String(s) => {
+            for (prefix, _path) in extract_refs(s) {
+                if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
+                    report.errors.push(ValidationError {
+                        code: "variable_ref_not_found".into(),
+                        message: format!(
+                            "步骤 {} 中引用了不存在的步骤: {}",
+                            step_id, prefix
+                        ),
+                    });
+                }
             }
         }
         Value::Array(arr) => {
@@ -529,11 +525,37 @@ fn check_js_syntax(id: &str, code: &str, report: &mut ValidationReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dsl::step_op::*;
     use crate::dsl::*;
     use serde_json::json;
 
-    fn ref_inputs(m: Vec<(&str, RefValue)>) -> HashMap<String, RefValue> {
-        m.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    fn step_http(url: &str) -> StepDef {
+        StepDef {
+            id: "fetch".into(),
+            after: None,
+            iterate: None,
+            cache: None,
+            retry: None,
+            timeout: None,
+            op: StepOp::HttpClient(HttpInputs {
+                url: var_ref(url),
+                method: None,
+                headers: None,
+                body: None,
+            }),
+        }
+    }
+
+    fn step_noop(id: &str, after: Vec<&str>) -> StepDef {
+        StepDef {
+            id: id.into(),
+            after: if after.is_empty() { None } else { Some(after.into_iter().map(|s| s.into()).collect()) },
+            iterate: None,
+            cache: None,
+            retry: None,
+            timeout: None,
+            op: StepOp::Noop,
+        }
     }
 
     fn var_ref(s: &str) -> RefValue {
@@ -553,17 +575,7 @@ mod tests {
                 name: "url".into(),
                 schema: json!({"type": "string"}),
             }],
-            steps: vec![StepDef {
-                id: "fetch".into(),
-                r#type: "http".into(),
-                after: None,
-                iterate: None,
-                inputs: Some(ref_inputs(vec![("url", var_ref("{slots.url}"))])),
-                cache: None,
-                retry: None,
-                timeout: None,
-                code: None,
-            }],
+            steps: vec![step_http("{slots.url}")],
             output: var_ref("{fetch.output}"),
             rules: vec![],
         }
@@ -637,17 +649,7 @@ mod tests {
     #[test]
     fn after_duplicate_entry() {
         let mut def = valid_def();
-        def.steps.push(StepDef {
-            id: "step_b".into(),
-            r#type: "http".into(),
-            after: Some(vec!["fetch".into(), "fetch".into()]),
-            iterate: None,
-            inputs: None,
-            cache: None,
-            retry: None,
-            timeout: None,
-            code: None,
-        });
+        def.steps.push(step_noop("step_b", vec!["fetch", "fetch"]));
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.iter().any(|e| e.code == "duplicate_after_entry"));
     }
@@ -663,17 +665,7 @@ mod tests {
     #[test]
     fn after_ref_found() {
         let mut def = valid_def();
-        def.steps.push(StepDef {
-            id: "step_b".into(),
-            r#type: "http".into(),
-            after: Some(vec!["fetch".into()]),
-            iterate: None,
-            inputs: None,
-            cache: None,
-            retry: None,
-            timeout: None,
-            code: None,
-        });
+        def.steps.push(step_noop("step_b", vec!["fetch"]));
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
     }
@@ -681,8 +673,12 @@ mod tests {
     #[test]
     fn variable_ref_not_found() {
         let mut def = valid_def();
-        def.steps[0].inputs =
-            Some(ref_inputs(vec![("url", var_ref("{nonexistent.output}"))]));
+        def.steps[0].op = StepOp::HttpClient(HttpInputs {
+            url: var_ref("{nonexistent.output}"),
+            method: None,
+            headers: None,
+            body: None,
+        });
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
     }
@@ -698,10 +694,16 @@ mod tests {
     #[test]
     fn slots_env_refs_are_not_checked() {
         let mut def = valid_def();
-        def.steps[0].inputs = Some(ref_inputs(vec![
-            ("url", var_ref("{slots.source_url}")),
-            ("key", var_ref("{env.API_KEY}")),
-        ]));
+        def.steps[0].op = StepOp::HttpClient(HttpInputs {
+            url: var_ref("{slots.source_url}"),
+            method: None,
+            headers: Some({
+                let mut h = HashMap::new();
+                h.insert("Authorization".into(), var_ref("{env.API_KEY}"));
+                h
+            }),
+            body: None,
+        });
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
     }
@@ -751,10 +753,10 @@ mod tests {
     #[test]
     fn nested_ref_in_object() {
         let mut def = valid_def();
-        def.steps[0].inputs = Some(ref_inputs(vec![(
-            "headers",
-            literal(json!({ "Authorization": "{nonexistent.output}" })),
-        )]));
+        // Use VarOutput with a literal object containing a template string inside
+        def.steps[0].op = StepOp::VarOutput(VarInputs {
+            value: Some(literal(json!({ "Authorization": "{nonexistent.output}" }))),
+        });
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
     }

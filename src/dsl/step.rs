@@ -1,32 +1,28 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 use super::retry::RetryDef;
-use super::variable::{RefValue, VariablePath};
+use super::step_op::StepOp;
+use super::variable::VariablePath;
 
-/// 单个执行步骤的定义。
+/// 单个执行步骤的定义 —— 共享字段在 StepDef，算子专属 inputs 在 StepOp。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepDef {
     pub id: String,
-    #[serde(rename = "type")]
-    pub r#type: String,
+    #[serde(default)]
     pub after: Option<Vec<String>>,
     #[serde(default)]
     pub iterate: Option<IterateConfig>,
-    /// 传给算子的输入参数。值已在反序列化时解析为 `RefValue`。
-    pub inputs: Option<HashMap<String, RefValue>>,
     pub cache: Option<bool>,
     pub retry: Option<RetryDef>,
     pub timeout: Option<u64>,
-    #[serde(default)]
-    pub code: Option<String>,
+
+    #[serde(flatten)]
+    pub op: StepOp,
 }
 
 /// 迭代配置，放在 step 的 `iterate` 字段。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IterateConfig {
-    /// 模板引用，指向要遍历的数组，如 `{extract.output}`。
     pub over: VariablePath,
     #[serde(rename = "as")]
     pub as_name: String,
