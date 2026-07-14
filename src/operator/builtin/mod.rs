@@ -3,6 +3,7 @@ pub mod command;
 pub mod dedup;
 pub mod file;
 pub mod filter;
+pub mod fork;
 pub mod http;
 pub mod js;
 pub mod llm;
@@ -45,6 +46,7 @@ pub fn register_all(ops: &mut HashMap<String, Box<dyn Operator>>) {
         Box::new(command::CommandOperator),
         Box::new(llm::LlmOperator),
         Box::new(var::VarOperator),
+        Box::new(fork::ForkOperator),
     ];
     for op in list {
         let name = op.spec().type_name.to_string();

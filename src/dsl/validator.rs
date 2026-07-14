@@ -208,7 +208,32 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
         }
     }
 
-    // ---- 7. 无上游依赖检查 (warning) ----
+    // ---- 7. JS syntax check ----
+    for step in &def.steps {
+        if step.r#type == "js" {
+            if let Some(ref code) = step.code {
+                check_js_syntax(&step.id, code, &mut report);
+            }
+        }
+    }
+
+    // ---- 8. Rule validation ----
+    let mut seen_rule_ids = HashSet::new();
+    for rule in &def.rules {
+        if !seen_rule_ids.insert(rule.id.as_str()) {
+            report.errors.push(ValidationError {
+                code: "duplicate_rule_id".into(),
+                message: format!("规则 ID 重复: {}", rule.id),
+            });
+        }
+        if rule.r#type == "js" {
+            if let Some(ref code) = rule.code {
+                check_js_syntax(&rule.id, code, &mut report);
+            }
+        }
+    }
+
+    // ---- 9. 无上游依赖检查 (warning) ----
     // 收集每个 step 的上游依赖
     let mut upstream_deps: HashMap<&str, Vec<String>> = HashMap::new();
     for step in &def.steps {
@@ -389,6 +414,43 @@ fn check_iterate_config(
         }
 }
 
+fn check_js_syntax(id: &str, code: &str, report: &mut ValidationReport) {
+    let re = regex::Regex::new(r"\{\{[a-zA-Z_][\w.]*\}\}")
+        .expect("template regex");
+    let sanitized = re.replace_all(code, "\"__placeholder__\"");
+    let script = format!(
+        "{sanitized}\ntry {{ var __check__ = function(){{}}; }} catch(__e__) {{}}\n"
+    );
+    let rt = match rquickjs::Runtime::new() {
+        Ok(r) => r,
+        Err(_) => {
+            report.errors.push(ValidationError {
+                code: "js_runtime_error".into(),
+                message: format!("步骤/规则 {} 的 JS 运行时创建失败", id),
+            });
+            return;
+        }
+    };
+    let ctx = match rquickjs::Context::full(&rt) {
+        Ok(c) => c,
+        Err(_) => {
+            report.errors.push(ValidationError {
+                code: "js_runtime_error".into(),
+                message: format!("步骤/规则 {} 的 JS 上下文创建失败", id),
+            });
+            return;
+        }
+    };
+    ctx.with(|ctx| {
+        if let Err(e) = ctx.eval::<rquickjs::Value, _>(script.as_str()) {
+            report.errors.push(ValidationError {
+                code: "js_syntax_error".into(),
+                message: format!("步骤/规则 {} 的 JS 代码语法错误: {}", id, e),
+            });
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // 单元测试
 // ---------------------------------------------------------------------------
@@ -420,6 +482,7 @@ mod tests {
                 code: None,
             }],
             output: "{fetch.output}".into(),
+            rules: vec![],
         }
     }
 

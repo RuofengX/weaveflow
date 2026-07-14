@@ -1,3 +1,4 @@
 {
-    "chat.disableAIFeatures": true
+    "chat.disableAIFeatures": true,
+    "rust-analyzer.testExplorer": true
 }

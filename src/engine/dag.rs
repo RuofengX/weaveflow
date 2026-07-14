@@ -204,6 +204,7 @@ mod tests {
             slots: vec![],
             steps,
             output: "{}".into(),
+            rules: vec![],
         }
     }
 

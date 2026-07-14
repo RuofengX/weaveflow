@@ -51,34 +51,26 @@
 
 | 项目 | 文件 | 说明 |
 |------|------|------|
-| file 算子含路径变量时返回 null | `builtin/file.rs`, `executor.rs:654-713` | 实际测试：10MB PDF，快照 seq=1 output=null。根因为 `resolve_inputs` 中 `k=="path"`（非 `data` key）走 JSON parse 分支，UTF-8 fallback 可能丢失路径；或 `{slots.pdf_path}` 未解析直接作为字面量路径传给 file 算子 |
-| Slot 默认值不生效 | `executor.rs:58-65` | `weave run -i pdf_path=...` 不传其他有 default 的 slot 时，llm 算子报"缺少 url/model"。`schema.get("default")` 逻辑需加 trace 日志验证 |
+| ~~file 算子含路径变量时返回 null~~ ~~| ~~`builtin/file.rs`, `executor.rs:654-713`~~ | **已修复** — v1.0 resolver 重构后变量解析正确。原报告中的 "快照 output=null" 实际根因是最终输出为二进制 bytes，`serde_json::from_slice` 失败后 fallback 为 Null。现 `runner.rs:331` 已改为 base64 包装。 |
+| ~~Slot 默认值不生效~~ | **已修复** — `runner.rs:59-69` 正确应用 `schema.get("default")`，并新增 jsonschema 运行时校验。 |
 
 ### 中优先级 — P1
 
 | 项目 | 说明 |
 |------|------|
-| llm 算子缺少模型能力预检 | 对纯文本模型（如 Gemma-4）发送 `images_b64` 时无声失败（LLM 回复"无法访问文件"）。应调 `/v1/models` 或接收端检查是否支持 vision，不支持时显式报错 |
-| `--text-output` 步骤产出为空 | `watch.rs:run_text` 走 `data.get("steps").and_then(...)` 取 output 字段，但 TaskSnapshot 中 steps 不含 output（output 在 snapshot 中）。需从 tracker 中取最终 output 值 |
-| iterate 加速 | `batch.size=1` 场景 Mutex 锁开销大，考虑 `std::sync::Mutex` 或连接池 |
-| http 算子的 poll_until 测试 | 轮询模式需 mock HTTP server 测试 |
+| llm 算子模型能力预检优化 | 已添加 warning + `skip_vision_check` + API error hint。可考虑自动 `/v1/models` 检查（低优先级优化，当前方案已可排查问题）。 |
+| ~~`--text-output` 步骤产出为空~~ | **已修复** — `watch.rs:95-108` 已改为从 `status.Completed` 取 output 值。 |
+| ~~iterate 加速~~ | **已实现** — `iterate.rs:108-112` 每 10 个 chunk 批量更新 tracker，减少 Mutex 锁竞争。 |
+| http 算子的 poll_until | `http.rs` 无 poll_until 功能。规划中的 feature，非缺陷。 |
 
 ### 低优先级 — P2
 
 | 项目 | 说明 |
 |------|------|
-| JSON Schema 输入校验 | 运行时校验 slots 值是否符合 schema |
-| `weave check` 命令 | 本地 YAML 校验（无需 daemon） |
-| fork / join 算子 | 多路分发 + 汇总 |
-| 自举 validator | 用 weave DSL 表达自定义校验规则 |
-| bytecode 缓存 | JS 算子字节码缓存到 Object 表 |
-| Snapshot null 掩盖根因 | `daemon.rs:324-333` 基 base64 fallback 已存在，但实际快照为 JSON `null` 说明存的就不是二进制数据，可能是 fail 后未清理的空快照。应在 snapshots 为 JSON null 时标记为异常状态 |
+| ~~JSON Schema 输入校验~~ | **已实现** — `runner.rs:82-105` 用 jsonschema crate 校验。 |
+| ~~`weave check` 命令~~ | **已实现** — `main.rs:69-74` Check 子命令 + `check_pipeline()`. |
+| ~~Snapshot null 掩盖根因~~ | **已实现** — `daemon.rs:326-335` 检测 `_anomalous_null` 并标注 raw_size/raw_hex。 |
+| ~~fork / join 算子~~ | **已实现** — `builtin/fork.rs`，`type: fork`，branches 数组并行分发 + join(object\|array) 聚合。 |
+| ~~自举 validator~~ | **已实现** — `pipeline.rs` RuleDef + `runner.rs` 执行前逐条运行 rules（支持 js 算子），返回 `{valid, error}`。validator.rs 新增 JS 语法 AOT 校验。 |
+| bytecode 缓存 | QuickJS 不支持跨 Runtime 字节码复用（字节码 Runtime-tied）。rquickjs 0.12 不暴露 `JS_WriteObject`/`JS_ReadObject`。当前已有 step 级输入缓存（相同输入不重复执行）。若需优化 iterate 场景 JS 重复编译，需升级 rquickjs 版本或引入 Runtime 池。 |
 
-## 2026-07-13 PDF OCR 实战踩坑记录
-
-使用 weave + spark:8000 (Gemma-4) 对 10MB 判决书 PDF 做 OCR 时发现的问题，已映射到上表：
-
-1. **file 算子返回 null**（P0）→ 快照 output=null，后续 llm 算子收到 null base64 → LLM 回复"无法访问文件"
-2. **Slot 默认值不生效**（P0）→ 只传 pdf_path 时报"缺少 url/model"
-3. **Gemma-4 无视觉能力**（P1）→ 该端点只有一个文本模型，不支持 image_url 多模态输入
-4. **`--text-output` 无步骤产出**（P1）→ 只显示 `completed in 8581ms`，无任何 output

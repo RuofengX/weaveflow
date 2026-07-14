@@ -106,6 +106,28 @@ pub async fn run_inner(
 
     let slots_bytes = serde_json::to_vec(&slots)
         .map_err(|e| WeaveError::Internal(format!("slots serialize: {e}")))?;
+
+    for rule in &pipeline.rules {
+        let op = crate::engine::step::resolve_rule_operator(rule, None)?;
+        let rule_config = rule.inputs.clone().unwrap_or(Value::Null);
+        let output = op
+            .run(&slots_bytes, &rule_config)
+            .await
+            .map_err(|e| WeaveError::Internal(format!("rule '{}' execution error: {e}", rule.id)))?;
+        let output = output.into_owned();
+        let result: Value = serde_json::from_slice(&output).unwrap_or(Value::Null);
+        if let Some(obj) = result.as_object() {
+            if obj.get("valid").and_then(|v| v.as_bool()).unwrap_or(true) == false {
+                let err_msg = obj.get("error").and_then(|v| v.as_str()).unwrap_or("validation failed");
+                let hint = obj.get("hint").and_then(|v| v.as_str()).unwrap_or("");
+                return Err(WeaveError::Internal(format!(
+                    "rule '{}' failed: {err_msg}{}", if hint.is_empty() { "" } else { ": " },
+                    if hint.is_empty() { "" } else { hint }
+                )));
+            }
+        }
+    }
+
     let mut scope = Scope::new(&slots_bytes);
 
     let dag = Dag::from_pipeline(pipeline)
@@ -328,7 +350,18 @@ pub async fn run_inner(
         }
     };
 
-    let output_val: Value = serde_json::from_slice(&final_output).unwrap_or(Value::Null);
+    let output_val: Value = match serde_json::from_slice(&final_output) {
+        Ok(v) => v,
+        Err(_) => {
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&final_output);
+            serde_json::json!({
+                "_binary": true,
+                "_size": final_output.len(),
+                "_base64": b64,
+            })
+        }
+    };
     tracker.complete(&task_id, output_val).await;
 
     Ok(final_output)

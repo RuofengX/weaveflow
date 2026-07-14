@@ -21,5 +21,6 @@ pub fn builtins() -> std::collections::HashMap<&'static str, &'static dyn Operat
     m.insert("llm", &builtin::llm::LlmOperator as &dyn Operator);
     m.insert("var", &builtin::var::VarOperator as &dyn Operator);
     m.insert("js", &builtin::js::JsOperatorPlaceholder as &dyn Operator);
+    m.insert("fork", &builtin::fork::ForkOperator as &dyn Operator);
     m
 }

@@ -103,12 +103,24 @@ pub struct PipelineDef {
     #[serde(default)]
     pub steps: Vec<StepDef>,
     pub output: String,
+    #[serde(default)]
+    pub rules: Vec<RuleDef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlotDef {
     pub name: String,
     pub schema: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleDef {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub inputs: Option<Value>,
+    #[serde(default)]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

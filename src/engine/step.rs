@@ -162,3 +162,23 @@ pub fn resolve_operator(
 
     get_builtin(op_type).ok_or_else(|| WeaveError::Internal(format!("未注册: {op_type}")))
 }
+
+pub fn resolve_rule_operator(
+    rule: &crate::dsl::pipeline::RuleDef,
+    scope: Option<&Scope>,
+) -> WeaveResult<Box<dyn Operator>> {
+    let op_type = &rule.r#type;
+
+    if op_type == "js" {
+        let mut code = rule.code.as_deref().unwrap_or("").to_string();
+        if let Some(s) = scope {
+            code = resolve_code_templates(&code, s)?;
+        }
+        return Ok(Box::new(JsOperator {
+            name: rule.id.clone(),
+            source: code,
+        }));
+    }
+
+    get_builtin(op_type).ok_or_else(|| WeaveError::Internal(format!("未注册: {op_type}")))
+}
