@@ -82,7 +82,7 @@ async fn create_pipeline(
     State(state): State<Arc<AppState>>,
     body: String,
 ) -> Result<Json<Value>, WeaveError> {
-    let pipeline = parse(&body).map_err(|e| WeaveError::Parse(e.to_string()))?;
+    let pipeline = parse(&body)?;
     let report = validate(&pipeline, &ValidateOptions::default());
     if !report.is_ok() {
         let msgs: Vec<String> = report
@@ -178,11 +178,8 @@ async fn run_pipeline(
     let inputs = req.inputs.unwrap_or_default();
 
     // Build DAG layers for progress display
-    let dag = Dag::from_pipeline(&pipeline)
-        .map_err(|e| WeaveError::Internal(format!("DAG build: {e}")))?;
-    let layers = dag
-        .topological_sort()
-        .map_err(|e| WeaveError::Internal(format!("topo sort: {e}")))?;
+    let dag = Dag::from_pipeline(&pipeline)?;
+    let layers = dag.topological_sort()?;
     let all_step_ids: Vec<String> = layers.iter().flatten().cloned().collect();
     let layer_infos: Vec<LayerInfo> = layers
         .iter()

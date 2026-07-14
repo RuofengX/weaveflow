@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::dsl::pipeline::{PipelineDef, StepDef};
+use crate::dsl::{PipelineDef, RefValue, StepDef, VariablePath};
 use crate::vm::resolver::extract_code_template_deps;
 
 #[derive(Debug, thiserror::Error)]
@@ -58,7 +58,7 @@ impl Dag {
         for step in &def.steps {
             let deps = extract_output_refs(&step.inputs, &step_ids);
             let iterate_deps = step.iterate.as_ref()
-                .map(|cfg| extract_output_refs(&Some(serde_json::json!({"over": cfg.over})), &step_ids))
+                .map(|cfg| extract_refs_from_path(&cfg.over, &step_ids))
                 .unwrap_or_default();
             let code_deps = step.code.as_deref()
                 .map(|c| extract_code_template_deps(c, &step_ids))
@@ -146,19 +146,57 @@ impl Dag {
 }
 
 fn extract_output_refs(
-    inputs: &Option<serde_json::Value>,
+    inputs: &Option<HashMap<String, RefValue>>,
     known_steps: &HashSet<String>,
 ) -> Vec<String> {
     let mut refs = Vec::new();
-    if let Some(inputs_val) = inputs {
-        collect_refs(inputs_val, &mut refs, known_steps);
+    if let Some(inputs_map) = inputs {
+        collect_refs_from_map(inputs_map, &mut refs, known_steps);
     }
     refs.sort();
     refs.dedup();
     refs
 }
 
-fn collect_refs(
+fn extract_refs_from_path(
+    path: &VariablePath,
+    known_steps: &HashSet<String>,
+) -> Vec<String> {
+    let mut refs = Vec::new();
+    if let Some(first) = path.parts.first()
+        && known_steps.contains(first.as_str()) {
+            refs.push(first.clone());
+        }
+    refs
+}
+
+fn collect_refs_from_map(
+    map: &HashMap<String, RefValue>,
+    results: &mut Vec<String>,
+    known_steps: &HashSet<String>,
+) {
+    for v in map.values() {
+        collect_refs_from_value(v, results, known_steps);
+    }
+}
+
+fn collect_refs_from_value(
+    val: &RefValue,
+    results: &mut Vec<String>,
+    known_steps: &HashSet<String>,
+) {
+    match val {
+        RefValue::Ref(path) => {
+            if let Some(first) = path.parts.first()
+                && known_steps.contains(first.as_str()) {
+                    results.push(first.clone());
+                }
+        }
+        RefValue::Literal(lit) => collect_refs_from_json(lit, results, known_steps),
+    }
+}
+
+fn collect_refs_from_json(
     val: &serde_json::Value,
     results: &mut Vec<String>,
     known_steps: &HashSet<String>,
@@ -170,7 +208,7 @@ fn collect_refs(
                 let brace_abs = start + brace;
                 if let Some(end) = s[brace_abs..].find('}') {
                     let inner = &s[brace_abs..brace_abs + end + 1];
-                    if let Some(var_ref) = crate::dsl::pipeline::parse_variable_ref(inner)
+                    if let Some(var_ref) = VariablePath::parse(inner)
                         && let Some(first) = var_ref.parts.first()
                             && known_steps.contains(first.as_str()) {
                                 results.push(first.clone());
@@ -182,10 +220,14 @@ fn collect_refs(
             }
         }
         serde_json::Value::Array(arr) => {
-            for v in arr { collect_refs(v, results, known_steps); }
+            for v in arr {
+                collect_refs_from_json(v, results, known_steps);
+            }
         }
         serde_json::Value::Object(map) => {
-            for v in map.values() { collect_refs(v, results, known_steps); }
+            for v in map.values() {
+                collect_refs_from_json(v, results, known_steps);
+            }
         }
         _ => {}
     }
@@ -194,7 +236,7 @@ fn collect_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsl::pipeline::*;
+    use crate::dsl::*;
 
     fn make_pipeline(steps: Vec<StepDef>) -> PipelineDef {
         PipelineDef {
@@ -203,7 +245,7 @@ mod tests {
             storage: None,
             slots: vec![],
             steps,
-            output: "{}".into(),
+            output: RefValue::Literal(serde_json::json!("ok")),
             rules: vec![],
         }
     }
@@ -310,6 +352,15 @@ mod tests {
         assert_eq!(layers[0].len(), 4);
     }
 
+    fn ref_inputs(data_ref: &str) -> HashMap<String, RefValue> {
+        let mut m = HashMap::new();
+        m.insert(
+            "data".to_string(),
+            RefValue::Ref(VariablePath::parse(data_ref).unwrap()),
+        );
+        m
+    }
+
     #[test]
     fn implicit_dep_via_input_ref() {
         let s_e = StepDef {
@@ -317,7 +368,7 @@ mod tests {
             r#type: "noop".into(),
             after: None,
             iterate: None,
-            inputs: Some(serde_json::json!({"data": "{d.output.items}"})),
+            inputs: Some(ref_inputs("{d.output.items}")),
             cache: None,
             retry: None,
             timeout: None,
@@ -333,12 +384,17 @@ mod tests {
 
     #[test]
     fn implicit_dep_via_input_ref_nested() {
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "url".to_string(),
+            RefValue::Ref(VariablePath::parse("{a.output.url}").unwrap()),
+        );
         let s_b = StepDef {
             id: "b".into(),
             r#type: "noop".into(),
             after: None,
             iterate: None,
-            inputs: Some(serde_json::json!({"url": "{a.output.url}"})),
+            inputs: Some(inputs),
             cache: None,
             retry: None,
             timeout: None,

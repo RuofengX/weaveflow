@@ -5,7 +5,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use crate::dsl::pipeline::{parse_template, PipelineDef, RefValue};
+use crate::dsl::{PipelineDef, RefValue};
 use crate::engine::dag::Dag;
 use crate::engine::step::{execute_step, execute_step_static};
 use crate::error::{WeaveError, WeaveResult};
@@ -109,7 +109,17 @@ pub async fn run_inner(
 
     for rule in &pipeline.rules {
         let op = crate::engine::step::resolve_rule_operator(rule, None)?;
-        let rule_config = rule.inputs.clone().unwrap_or(Value::Null);
+        let rule_config = rule
+            .inputs
+            .as_ref()
+            .map(|m| {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in m {
+                    obj.insert(k.clone(), v.to_value());
+                }
+                Value::Object(obj)
+            })
+            .unwrap_or(Value::Null);
         let output = op
             .run(&slots_bytes, &rule_config)
             .await
@@ -130,11 +140,8 @@ pub async fn run_inner(
 
     let mut scope = Scope::new(&slots_bytes);
 
-    let dag = Dag::from_pipeline(pipeline)
-        .map_err(|e| WeaveError::Internal(format!("DAG build: {e}")))?;
-    let layers = dag
-        .topological_sort()
-        .map_err(|e| WeaveError::Internal(format!("topo sort: {e}")))?;
+    let dag = Dag::from_pipeline(pipeline)?;
+    let layers = dag.topological_sort()?;
 
     let all_step_ids: Vec<String> = layers.iter().flatten().cloned().collect();
 
@@ -316,31 +323,30 @@ pub async fn run_inner(
     }
 
     let final_output = {
-        let output_ref = parse_template(&pipeline.output);
-        match &output_ref {
+        match &pipeline.output {
             RefValue::Literal(v) => serde_json::to_vec(v)
                 .map_err(|e| WeaveError::Internal(format!("output serialize: {e}")))?,
-            RefValue::Ref(var) => {
-                if var.parts.is_empty() {
+            RefValue::Ref(path) => {
+                if path.parts.is_empty() {
                     return Err(WeaveError::Internal("empty output ref".into()));
                 }
-                let step_id = &var.parts[0];
+                let step_id = &path.parts[0];
                 let output_bytes = scope.get_output(step_id).ok_or_else(|| {
                     WeaveError::Internal(format!("output step {step_id} not found"))
                 })?;
 
-                if var.parts.len() <= 2 {
+                if path.parts.len() <= 2 {
                     output_bytes
                 } else {
                     let v: Value = serde_json::from_slice(&output_bytes)
                         .map_err(|e| WeaveError::Internal(format!("output parse: {e}")))?;
                     let mut current = &v;
-                    let start = if var.parts.len() >= 2 && var.parts[1] == "output" {
+                    let start = if path.parts.len() >= 2 && path.parts[1] == "output" {
                         2
                     } else {
                         1
                     };
-                    for part in &var.parts[start..] {
+                    for part in &path.parts[start..] {
                         current = current.get(part).unwrap_or(&Value::Null);
                     }
                     serde_json::to_vec(current)

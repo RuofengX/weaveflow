@@ -2,6 +2,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
+use crate::dsl::parser::ParseError;
+use crate::engine::dag::DagError;
+use crate::operator::OperatorError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum WeaveError {
     #[error("{0}")]
@@ -33,8 +37,8 @@ pub enum WeaveError {
     BadRequest(String),
 }
 
-impl From<serde_yaml::Error> for WeaveError {
-    fn from(e: serde_yaml::Error) -> Self {
+impl From<rust_yaml::Error> for WeaveError {
+    fn from(e: rust_yaml::Error) -> Self {
         WeaveError::Parse(format!("YAML: {e}"))
     }
 }
@@ -84,6 +88,24 @@ impl From<redb::CommitError> for WeaveError {
 impl From<redb::CompactionError> for WeaveError {
     fn from(e: redb::CompactionError) -> Self {
         WeaveError::Internal(format!("compaction: {e}"))
+    }
+}
+
+impl From<ParseError> for WeaveError {
+    fn from(e: ParseError) -> Self {
+        WeaveError::Parse(e.to_string())
+    }
+}
+
+impl From<DagError> for WeaveError {
+    fn from(e: DagError) -> Self {
+        WeaveError::Internal(format!("DAG: {e}"))
+    }
+}
+
+impl From<OperatorError> for WeaveError {
+    fn from(e: OperatorError) -> Self {
+        WeaveError::Operator(e.to_string())
     }
 }
 

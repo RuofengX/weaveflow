@@ -3,7 +3,7 @@ use redb::{Key as RedbKey, TableDefinition, TypeName};
 use redb::Value as RedbValue;
 use std::cmp::Ordering;
 
-use crate::dsl::pipeline::PipelineDef;
+use crate::dsl::PipelineDef;
 use crate::store::object::ObjectDigest;
 use crate::store::object::ObjectValue;
 use crate::tracker::snapshot::{Snapshot, SnapshotKey};

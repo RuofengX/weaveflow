@@ -1,10 +1,7 @@
-// ---------------------------------------------------------------------------
-// DSL 校验器：解析后的 PipelineDef 做语义校验
-// ---------------------------------------------------------------------------
-
-use crate::dsl::pipeline::PipelineDef;
-use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+
+use crate::dsl::{PipelineDef, RefValue, VariablePath};
+use serde_json::Value;
 
 // ---------------------------------------------------------------------------
 // 校验报告
@@ -107,9 +104,11 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
 
         // 检查 inputs 中的变量引用
         if let Some(ref inputs) = step.inputs {
-            check_ref_in_value(inputs, &all_step_ids, &step.id, &mut report);
-            check_iterate_config(step, &mut report);
+            for v in inputs.values() {
+                check_ref_in_refvalue(v, &all_step_ids, &step.id, &mut report);
+            }
         }
+        check_iterate_config(step, &all_step_ids, &mut report);
     }
 
     // ---- 2. slots ----
@@ -163,7 +162,6 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
 
     // ---- 6. 未使用声明 (warning) ----
     let used_slots = collect_slots_used(def);
-
     for slot in &def.slots {
         if !used_slots.contains(&slot.name) {
             report.warnings.push(ValidationWarning {
@@ -176,8 +174,8 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
     // orphan step check
     let mut referenced_steps: HashSet<String> = HashSet::new();
     for step in &def.steps {
-        if let Some(ref inputs_val) = step.inputs {
-            for (prefix, _) in refs_in_value(inputs_val) {
+        if let Some(ref inputs) = step.inputs {
+            for (prefix, _) in refs_in_inputs(inputs) {
                 if prefix != "slots" && prefix != "env" {
                     referenced_steps.insert(prefix);
                 }
@@ -189,14 +187,14 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
             }
         }
     }
-    for (prefix, _) in extract_refs(&def.output) {
+    for (prefix, _) in refs_in_refvalue(&def.output) {
         if prefix != "slots" && prefix != "env" {
             referenced_steps.insert(prefix);
         }
     }
 
     for step in &def.steps {
-        let is_output_target = extract_refs(&def.output)
+        let is_output_target = refs_in_refvalue(&def.output)
             .iter()
             .any(|(p, _)| p == &step.id);
         let is_referenced = referenced_steps.contains(&step.id) || is_output_target;
@@ -210,10 +208,8 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
 
     // ---- 7. JS syntax check ----
     for step in &def.steps {
-        if step.r#type == "js" {
-            if let Some(ref code) = step.code {
-                check_js_syntax(&step.id, code, &mut report);
-            }
+        if step.r#type == "js" && let Some(ref code) = step.code {
+            check_js_syntax(&step.id, code, &mut report);
         }
     }
 
@@ -226,35 +222,29 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
                 message: format!("规则 ID 重复: {}", rule.id),
             });
         }
-        if rule.r#type == "js" {
-            if let Some(ref code) = rule.code {
-                check_js_syntax(&rule.id, code, &mut report);
-            }
+        if rule.r#type == "js" && let Some(ref code) = rule.code {
+            check_js_syntax(&rule.id, code, &mut report);
         }
     }
 
     // ---- 9. 无上游依赖检查 (warning) ----
-    // 收集每个 step 的上游依赖
     let mut upstream_deps: HashMap<&str, Vec<String>> = HashMap::new();
     for step in &def.steps {
         let sid = step.id.as_str();
-        // after 依赖
         if let Some(ref after) = step.after {
             for dep in after {
                 upstream_deps.entry(sid).or_default().push(dep.clone());
             }
         }
-        // inputs 中的步骤引用
-        if let Some(ref inputs_val) = step.inputs {
-            for (prefix, _) in refs_in_value(inputs_val) {
+        if let Some(ref inputs) = step.inputs {
+            for (prefix, _) in refs_in_inputs(inputs) {
                 if prefix != "slots" && prefix != "env" {
                     upstream_deps.entry(sid).or_default().push(prefix);
                 }
             }
         }
-        // iterate.over 中的步骤引用
         if let Some(ref cfg) = step.iterate {
-            for (prefix, _) in extract_refs(&cfg.over) {
+            for (prefix, _) in refs_in_path(&cfg.over) {
                 if prefix != "slots" && prefix != "env" {
                     upstream_deps.entry(sid).or_default().push(prefix);
                 }
@@ -278,21 +268,21 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Helpers — RefValue-based ref extraction
 // ---------------------------------------------------------------------------
 
 fn collect_slots_used(def: &PipelineDef) -> HashSet<String> {
     let mut set = HashSet::new();
     for step in &def.steps {
-        if let Some(ref inputs_val) = step.inputs {
-            for (prefix, rest) in refs_in_value(inputs_val) {
+        if let Some(ref inputs) = step.inputs {
+            for (prefix, rest) in refs_in_inputs(inputs) {
                 if prefix == "slots" && !rest.is_empty() {
                     set.insert(rest);
                 }
             }
         }
     }
-    for (prefix, rest) in extract_refs(&def.output) {
+    for (prefix, rest) in refs_in_refvalue(&def.output) {
         if prefix == "slots" && !rest.is_empty() {
             set.insert(rest);
         }
@@ -300,20 +290,51 @@ fn collect_slots_used(def: &PipelineDef) -> HashSet<String> {
     set
 }
 
-fn refs_in_value(val: &Value) -> Vec<(String, String)> {
+fn refs_in_inputs(inputs: &HashMap<String, RefValue>) -> Vec<(String, String)> {
+    let mut all = Vec::new();
+    for v in inputs.values() {
+        all.extend(refs_in_refvalue(v));
+    }
+    all
+}
+
+fn refs_in_refvalue(val: &RefValue) -> Vec<(String, String)> {
+    match val {
+        RefValue::Ref(path) => {
+            if path.parts.is_empty() {
+                return vec![];
+            }
+            let prefix = path.parts[0].clone();
+            let rest = path.parts[1..].join(".");
+            vec![(prefix, rest)]
+        }
+        RefValue::Literal(lit) => refs_in_json(lit),
+    }
+}
+
+fn refs_in_path(path: &VariablePath) -> Vec<(String, String)> {
+    if path.parts.is_empty() {
+        return vec![];
+    }
+    let prefix = path.parts[0].clone();
+    let rest = path.parts[1..].join(".");
+    vec![(prefix, rest)]
+}
+
+fn refs_in_json(val: &Value) -> Vec<(String, String)> {
     match val {
         Value::String(s) => extract_refs(s),
         Value::Object(map) => {
             let mut all = Vec::new();
             for v in map.values() {
-                all.extend(refs_in_value(v));
+                all.extend(refs_in_json(v));
             }
             all
         }
         Value::Array(arr) => {
             let mut all = Vec::new();
             for v in arr {
-                all.extend(refs_in_value(v));
+                all.extend(refs_in_json(v));
             }
             all
         }
@@ -335,10 +356,7 @@ fn extract_refs(s: &str) -> Vec<(String, String)> {
             }
             if let Some(dot) = content.find('.') {
                 let prefix = content[..dot].trim();
-                if prefix.is_empty() {
-                    continue;
-                }
-                if !prefix.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                if prefix.is_empty() || !prefix.chars().all(|c| c.is_alphanumeric() || c == '_') {
                     continue;
                 }
                 let rest = content[dot + 1..].to_string();
@@ -351,7 +369,30 @@ fn extract_refs(s: &str) -> Vec<(String, String)> {
     refs
 }
 
-fn check_ref_in_value(
+fn check_ref_in_refvalue(
+    val: &RefValue,
+    all_ids: &HashSet<&str>,
+    step_id: &str,
+    report: &mut ValidationReport,
+) {
+    match val {
+        RefValue::Ref(path) => {
+            if let Some(prefix) = path.parts.first()
+                && prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
+                    report.errors.push(ValidationError {
+                        code: "variable_ref_not_found".into(),
+                        message: format!(
+                            "步骤 {} 中引用了不存在的步骤: {}",
+                            step_id, prefix
+                        ),
+                    });
+            }
+        }
+        RefValue::Literal(lit) => check_ref_in_json(lit, all_ids, step_id, report),
+    }
+}
+
+fn check_ref_in_json(
     val: &Value,
     all_ids: &HashSet<&str>,
     step_id: &str,
@@ -360,50 +401,68 @@ fn check_ref_in_value(
     match val {
         Value::String(s) => {
             for (prefix, _path) in extract_refs(s) {
-                if prefix != "slots" && prefix != "env"
-                    && !all_ids.contains(prefix.as_str()) {
-                        report.errors.push(ValidationError {
-                            code: "variable_ref_not_found".into(),
-                            message: format!(
-                                "步骤 {} 中引用了不存在的步骤: {}",
-                                step_id, prefix
-                            ),
-                        });
-                    }
+                if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
+                    report.errors.push(ValidationError {
+                        code: "variable_ref_not_found".into(),
+                        message: format!(
+                            "步骤 {} 中引用了不存在的步骤: {}",
+                            step_id, prefix
+                        ),
+                    });
+                }
             }
         }
         Value::Object(map) => {
             for v in map.values() {
-                check_ref_in_value(v, all_ids, step_id, report);
+                check_ref_in_json(v, all_ids, step_id, report);
             }
         }
         Value::Array(arr) => {
             for v in arr {
-                check_ref_in_value(v, all_ids, step_id, report);
+                check_ref_in_json(v, all_ids, step_id, report);
             }
         }
         _ => {}
     }
 }
 
-fn check_output_ref(output: &str, all_ids: &HashSet<&str>, report: &mut ValidationReport) {
-    for (prefix, _path) in extract_refs(output) {
-        if prefix != "slots" && prefix != "env"
-            && !all_ids.contains(prefix.as_str()) {
-                report.errors.push(ValidationError {
-                    code: "output_ref_not_found".into(),
-                    message: format!("output 引用了不存在的步骤: {}", prefix),
-                });
+fn check_output_ref(
+    output: &RefValue,
+    all_ids: &HashSet<&str>,
+    report: &mut ValidationReport,
+) {
+    match output {
+        RefValue::Ref(path) => {
+            if let Some(prefix) = path.parts.first()
+                && prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
+                    report.errors.push(ValidationError {
+                        code: "output_ref_not_found".into(),
+                        message: format!("output 引用了不存在的步骤: {}", prefix),
+                    });
             }
+        }
+        RefValue::Literal(lit) => {
+            if let Value::String(s) = lit {
+                for (prefix, _path) in extract_refs(s) {
+                    if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
+                        report.errors.push(ValidationError {
+                            code: "output_ref_not_found".into(),
+                            message: format!("output 引用了不存在的步骤: {}", prefix),
+                        });
+                    }
+                }
+            }
+        }
     }
 }
 
 fn check_iterate_config(
-    step: &crate::dsl::pipeline::StepDef,
+    step: &crate::dsl::StepDef,
+    all_step_ids: &HashSet<&str>,
     report: &mut ValidationReport,
 ) {
-    if let Some(ref cfg) = step.iterate
-        && cfg.max_workers == Some(0) {
+    if let Some(ref cfg) = step.iterate {
+        if cfg.max_workers == Some(0) {
             report.errors.push(ValidationError {
                 code: "invalid_iterate_config".into(),
                 message: format!(
@@ -412,6 +471,18 @@ fn check_iterate_config(
                 ),
             });
         }
+        // 检查 iterate.over 中引用的 step 是否存在
+        if let Some(prefix) = cfg.over.parts.first()
+            && prefix != "slots" && prefix != "env" && !all_step_ids.contains(prefix.as_str()) {
+                report.errors.push(ValidationError {
+                    code: "variable_ref_not_found".into(),
+                    message: format!(
+                        "步骤 {} 的 iterate.over 引用了不存在的步骤: {}",
+                        step.id, prefix
+                    ),
+                });
+        }
+    }
 }
 
 fn check_js_syntax(id: &str, code: &str, report: &mut ValidationReport) {
@@ -458,8 +529,20 @@ fn check_js_syntax(id: &str, code: &str, report: &mut ValidationReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsl::pipeline::*;
+    use crate::dsl::*;
     use serde_json::json;
+
+    fn ref_inputs(m: Vec<(&str, RefValue)>) -> HashMap<String, RefValue> {
+        m.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    }
+
+    fn var_ref(s: &str) -> RefValue {
+        RefValue::Ref(VariablePath::parse(s).unwrap())
+    }
+
+    fn literal(v: Value) -> RefValue {
+        RefValue::Literal(v)
+    }
 
     fn valid_def() -> PipelineDef {
         PipelineDef {
@@ -475,13 +558,13 @@ mod tests {
                 r#type: "http".into(),
                 after: None,
                 iterate: None,
-                inputs: Some(json!({"url": "{slots.url}"})),
+                inputs: Some(ref_inputs(vec![("url", var_ref("{slots.url}"))])),
                 cache: None,
                 retry: None,
                 timeout: None,
                 code: None,
             }],
-            output: "{fetch.output}".into(),
+            output: var_ref("{fetch.output}"),
             rules: vec![],
         }
     }
@@ -598,7 +681,8 @@ mod tests {
     #[test]
     fn variable_ref_not_found() {
         let mut def = valid_def();
-        def.steps[0].inputs = Some(json!({"url": "{nonexistent.output}"}));
+        def.steps[0].inputs =
+            Some(ref_inputs(vec![("url", var_ref("{nonexistent.output}"))]));
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
     }
@@ -606,7 +690,7 @@ mod tests {
     #[test]
     fn output_ref_not_found() {
         let mut def = valid_def();
-        def.output = "{nonexistent.output}".into();
+        def.output = var_ref("{nonexistent.output}");
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.iter().any(|e| e.code == "output_ref_not_found"));
     }
@@ -614,10 +698,10 @@ mod tests {
     #[test]
     fn slots_env_refs_are_not_checked() {
         let mut def = valid_def();
-        def.steps[0].inputs = Some(json!({
-            "url": "{slots.source_url}",
-            "key": "{env.API_KEY}"
-        }));
+        def.steps[0].inputs = Some(ref_inputs(vec![
+            ("url", var_ref("{slots.source_url}")),
+            ("key", var_ref("{env.API_KEY}")),
+        ]));
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
     }
@@ -634,7 +718,7 @@ mod tests {
     fn invalid_iterate_config() {
         let mut def = valid_def();
         def.steps[0].iterate = Some(IterateConfig {
-            over: "{slots.url}".into(),
+            over: VariablePath::parse("{slots.url}").unwrap(),
             as_name: "item".into(),
             max_workers: Some(0),
             batch: None,
@@ -647,7 +731,7 @@ mod tests {
     fn valid_iterate_config() {
         let mut def = valid_def();
         def.steps[0].iterate = Some(IterateConfig {
-            over: "{slots.url}".into(),
+            over: VariablePath::parse("{slots.url}").unwrap(),
             as_name: "item".into(),
             max_workers: Some(4),
             batch: None,
@@ -667,9 +751,10 @@ mod tests {
     #[test]
     fn nested_ref_in_object() {
         let mut def = valid_def();
-        def.steps[0].inputs = Some(json!({
-            "headers": { "Authorization": "{nonexistent.output}" }
-        }));
+        def.steps[0].inputs = Some(ref_inputs(vec![(
+            "headers",
+            literal(json!({ "Authorization": "{nonexistent.output}" })),
+        )]));
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
     }
@@ -679,7 +764,7 @@ mod tests {
         let mut def = valid_def();
         def.steps.push(def.steps[0].clone());
         def.steps[0].after = Some(vec!["ghost".into()]);
-        def.output = "{ghost.output}".into();
+        def.output = var_ref("{ghost.output}");
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.len() >= 2);
     }

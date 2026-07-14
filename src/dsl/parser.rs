@@ -2,12 +2,20 @@
 // DSL 解析器：YAML 字符串 → PipelineDef
 // ---------------------------------------------------------------------------
 
-use crate::dsl::pipeline::PipelineDef;
+use crate::dsl::PipelineDef;
+use crate::dsl::raw::RawPipelineDef;
 
 /// 将 YAML 字符串解析为 `PipelineDef`。
+///
+/// 解析分两步：
+/// 1. YAML → `RawPipelineDef`（所有字段保持原样，模板字符串尚未解析）
+/// 2. `RawPipelineDef` → `PipelineDef`（把 `{slots.x}` / `{step.output}` 等模板字符串
+///    转换为 `RefValue::Ref`）
+///
+/// `rust_yaml` 的解析错误（含行号、上下文）直接透传到 `ParseError` 返回给调用方。
 pub fn parse(yaml: &str) -> Result<PipelineDef, ParseError> {
-    let def: PipelineDef = serde_yaml::from_str(yaml)?;
-    Ok(def)
+    let raw: RawPipelineDef = rust_yaml::from_str(yaml)?;
+    Ok(raw.into())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -16,8 +24,8 @@ pub enum ParseError {
     Yaml(String),
 }
 
-impl From<serde_yaml::Error> for ParseError {
-    fn from(e: serde_yaml::Error) -> Self {
+impl From<rust_yaml::Error> for ParseError {
+    fn from(e: rust_yaml::Error) -> Self {
         Self::Yaml(e.to_string())
     }
 }
@@ -25,6 +33,7 @@ impl From<serde_yaml::Error> for ParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dsl::RefValue;
 
     fn minimal_yaml() -> &'static str {
         r#"
@@ -45,6 +54,9 @@ output: "{fetch.output}"
         assert_eq!(def.steps.len(), 1);
         assert_eq!(def.steps[0].id, "fetch");
         assert_eq!(def.steps[0].r#type, "http");
+        assert!(matches!(def.output, RefValue::Ref(_)));
+        let inputs = def.steps[0].inputs.as_ref().unwrap();
+        assert!(matches!(inputs.get("url"), Some(RefValue::Ref(_))));
     }
 
     #[test]
@@ -54,19 +66,19 @@ name: iterate_demo
 steps:
   - id: process
     type: http
+    iterate:
+      over: "{slots.data}"
+      as: "item"
+      max_workers: 8
     inputs:
-      iterate:
-        over: "{slots.data}"
-        as: "item"
-        max_workers: 8
+      body: "{item}"
 output: "{process.output}"
 "#;
         let def = parse(yaml).unwrap();
-        let inputs = def.steps[0].inputs.as_ref().unwrap();
-        let iterate = inputs.get("iterate").unwrap();
-        assert_eq!(iterate.get("over").unwrap(), "{slots.data}");
-        assert_eq!(iterate.get("as").unwrap(), "item");
-        assert_eq!(iterate.get("max_workers").unwrap(), 8);
+        let iter = def.steps[0].iterate.as_ref().unwrap();
+        assert_eq!(iter.over.parts, vec!["slots", "data"]);
+        assert_eq!(iter.as_name, "item");
+        assert_eq!(iter.max_workers, Some(8));
     }
 
     #[test]
@@ -117,5 +129,26 @@ output: "{fetch.output}"
         let def = parse(yaml).unwrap();
         assert_eq!(def.slots.len(), 1);
         assert_eq!(def.slots[0].name, "url");
+    }
+
+    #[test]
+    fn parse_literal_inputs() {
+        let yaml = r#"
+name: literal_test
+steps:
+  - id: s
+    type: noop
+    inputs:
+      key: "static_value"
+      count: 42
+      flag: true
+output: done
+"#;
+        let def = parse(yaml).unwrap();
+        let inputs = def.steps[0].inputs.as_ref().unwrap();
+        assert!(matches!(inputs.get("key"), Some(RefValue::Literal(_))));
+        assert!(matches!(inputs.get("count"), Some(RefValue::Literal(_))));
+        assert!(matches!(inputs.get("flag"), Some(RefValue::Literal(_))));
+        assert!(matches!(def.output, RefValue::Literal(_)));
     }
 }

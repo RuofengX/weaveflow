@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::dsl::pipeline::{parse_template, IterateConfig, RefValue, StepDef};
+use crate::dsl::{IterateConfig, StepDef};
 use crate::engine::step::resolve_operator;
 use crate::error::{WeaveError, WeaveResult};
 use crate::operator::Operator;
@@ -21,15 +21,7 @@ pub async fn execute_iterate(
     task_id: &TaskId,
     tracker: &TaskTracker,
 ) -> WeaveResult<Vec<u8>> {
-    let over_ref = parse_template(&cfg.over);
-    let over_bytes = match &over_ref {
-        RefValue::Ref(var) if !var.parts.is_empty() => resolve_ref(scope, var)?,
-        _ => {
-            return Err(WeaveError::Internal(
-                "iterate.over must be a reference".into(),
-            ));
-        }
-    };
+    let over_bytes = resolve_ref(scope, &cfg.over)?;
 
     let items: Vec<Value> = serde_json::from_slice(&over_bytes)
         .map_err(|e| WeaveError::Internal(format!("iterate parse array: {e}")))?;
@@ -91,8 +83,7 @@ pub async fn execute_iterate(
             batch_futures.push(async move {
                 let output = op
                     .run(&data_bytes, &config)
-                    .await
-                    .map_err(|e| WeaveError::Operator(e.to_string()))?;
+                    .await?;
                 let owned = output.into_owned();
 
                 let v: Value = serde_json::from_slice(&owned)

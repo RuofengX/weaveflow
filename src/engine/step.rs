@@ -4,7 +4,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
-use crate::dsl::pipeline::{parse_template, RefValue, StepDef};
+use crate::dsl::StepDef;
 use crate::engine::cache::compute_cache_key;
 use crate::engine::iterate::execute_iterate;
 use crate::error::{WeaveError, WeaveResult};
@@ -26,11 +26,7 @@ pub async fn execute_step(
     let op: Box<dyn Operator> = resolve_operator(step, scope)?;
 
     if let Some(ref cfg) = step.iterate {
-        let over_ref = parse_template(&cfg.over);
-        let over_bytes = match &over_ref {
-            RefValue::Ref(var) if !var.parts.is_empty() => resolve_ref(scope, var)?,
-            _ => Vec::new(),
-        };
+        let over_bytes = resolve_ref(scope, &cfg.over)?;
         let mut hasher = Sha256::new();
         hasher.update(step.r#type.as_bytes());
         hasher.update(b":");
@@ -104,8 +100,7 @@ pub async fn execute_step_static(
 
     let output = op
         .run(&data, &config)
-        .await
-        .map_err(|e| WeaveError::Operator(e.to_string()))?;
+        .await?;
     let owned = output.into_owned();
     scope.set_output(&step.id, &owned);
     {
@@ -139,7 +134,7 @@ pub async fn execute_with_retry(
             Err(_) if _attempt + 1 < max_attempts => {
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
-            Err(e) => return Err(WeaveError::Operator(e.to_string())),
+            Err(e) => return Err(e.into()),
         }
     }
     Err(WeaveError::Operator("retry exhausted".into()))
@@ -164,7 +159,7 @@ pub fn resolve_operator(
 }
 
 pub fn resolve_rule_operator(
-    rule: &crate::dsl::pipeline::RuleDef,
+    rule: &crate::dsl::RuleDef,
     scope: Option<&Scope>,
 ) -> WeaveResult<Box<dyn Operator>> {
     let op_type = &rule.r#type;

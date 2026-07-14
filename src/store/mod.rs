@@ -8,7 +8,7 @@ use chrono::Utc;
 use redb::{Database as RedbDb, ReadableTable};
 use std::path::Path;
 
-use crate::dsl::pipeline::PipelineDef;
+use crate::dsl::PipelineDef;
 use crate::error::{WeaveError, WeaveResult};
 use crate::store::database::{CACHE, OBJECT, PIPELINE, SNAPSHOT, TASK};
 use crate::tracker::snapshot::{Snapshot, SnapshotKey};

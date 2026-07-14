@@ -182,7 +182,7 @@ output: "{v.output}""#
 
 fn setup(
     rt: &tokio::runtime::Runtime,
-    def: &weave::dsl::pipeline::PipelineDef,
+    def: &weave::dsl::PipelineDef,
     db: Arc<Mutex<Database>>,
     slots: HashMap<String, serde_json::Value>,
 ) -> (Runner, TaskId, HashMap<String, serde_json::Value>) {
@@ -210,7 +210,7 @@ fn setup(
 
 fn run_once(
     rt: &tokio::runtime::Runtime,
-    def: &weave::dsl::pipeline::PipelineDef,
+    def: &weave::dsl::PipelineDef,
     db: Arc<Mutex<Database>>,
     slots: HashMap<String, serde_json::Value>,
 ) -> usize {
