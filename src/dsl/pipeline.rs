@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::rule::RuleDef;
 use super::step::StepDef;
 use super::storage::StorageDef;
 use super::variable::RefValue;
@@ -17,8 +16,6 @@ pub struct PipelineDef {
     #[serde(default)]
     pub steps: Vec<StepDef>,
     pub output: RefValue,
-    #[serde(default)]
-    pub rules: Vec<RuleDef>,
 }
 
 /// Pipeline 输入槽位声明。

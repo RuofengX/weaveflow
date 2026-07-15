@@ -246,7 +246,6 @@ mod tests {
             slots: vec![],
             steps,
             output: RefValue::Literal(serde_json::json!("ok")),
-            rules: vec![],
         }
     }
 

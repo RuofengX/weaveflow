@@ -5,7 +5,6 @@ use serde_json::Value;
 
 use super::pipeline::PipelineDef;
 use super::retry::RetryDef;
-use super::rule::RuleDef;
 use super::step::{BatchConfig, IterateConfig, StepDef};
 use super::step_op::{self, StepOp};
 use super::storage::StorageDef;
@@ -27,8 +26,6 @@ pub struct RawPipelineDef {
     #[serde(default)]
     pub steps: Vec<RawStepDef>,
     pub output: String,
-    #[serde(default)]
-    pub rules: Vec<RawRuleDef>,
 }
 
 #[derive(Deserialize)]
@@ -55,18 +52,6 @@ pub struct RawIterateConfig {
     #[serde(default)]
     pub batch: Option<BatchConfig>,
 }
-
-#[derive(Deserialize)]
-pub struct RawRuleDef {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub r#type: String,
-    #[serde(default)]
-    pub inputs: Option<Value>,
-    #[serde(default)]
-    pub code: Option<String>,
-}
-
 // ---------------------------------------------------------------------------
 // Raw step operators — one struct per operator, plain types only
 // ---------------------------------------------------------------------------
@@ -208,18 +193,6 @@ impl TryFrom<RawPipelineDef> for PipelineDef {
             slots: raw.slots,
             steps: raw.steps.into_iter().map(StepDef::from).collect(),
             output: parse_string_to_refvalue(&raw.output),
-            rules: raw
-                .rules
-                .into_iter()
-                .map(|r| {
-                    Ok(RuleDef {
-                        id: r.id,
-                        r#type: r.r#type,
-                        inputs: r.inputs.map(value_to_rule_inputs),
-                        code: r.code,
-                    })
-                })
-                .collect::<Result<Vec<_>, Self::Error>>()?,
         })
     }
 }
@@ -372,15 +345,6 @@ fn replace_template_strings(v: &Value) -> Value {
         _ => v.clone(),
     }
 }
-
-/// Convert raw rule inputs (catch-all Value object) to typed HashMap.
-fn value_to_rule_inputs(val: Value) -> HashMap<String, RefValue> {
-    match val {
-        Value::Object(map) => map.into_iter().map(|(k, v)| (k, yaml_to_refvalue(&v))).collect(),
-        _ => HashMap::new(),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------

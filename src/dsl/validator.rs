@@ -219,20 +219,6 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
         }
     }
 
-    // ---- 8. Rule validation ----
-    let mut seen_rule_ids = HashSet::new();
-    for rule in &def.rules {
-        if !seen_rule_ids.insert(rule.id.as_str()) {
-            report.errors.push(ValidationError {
-                code: "duplicate_rule_id".into(),
-                message: format!("规则 ID 重复: {}", rule.id),
-            });
-        }
-        if rule.r#type == "js" && let Some(ref code) = rule.code {
-            check_js_syntax(&rule.id, code, &mut report);
-        }
-    }
-
     // ---- 9. 无上游依赖检查 (warning) ----
     let mut upstream_deps: HashMap<&str, Vec<String>> = HashMap::new();
     for step in &def.steps {
@@ -589,7 +575,6 @@ mod tests {
             }],
             steps: vec![step_http("{slots.url}")],
             output: var_ref("{fetch.output}"),
-            rules: vec![],
         }
     }
 

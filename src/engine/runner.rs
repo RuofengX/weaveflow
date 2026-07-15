@@ -96,7 +96,7 @@ pub async fn run_inner(
                         let msgs: Vec<String> = errors
                             .map(|e| e.to_string())
                             .collect();
-                        return Err(WeaveError::Internal(format!(
+                        return Err(WeaveError::BadRequest(format!(
                             "slot '{}' validation failed: {}",
                             slot_def.name,
                             msgs.join("; ")
@@ -110,37 +110,6 @@ pub async fn run_inner(
                     )));
                 }
             }
-        }
-    }
-
-    // Rules validation
-    debug!(rules = pipeline.rules.len(), "evaluating rules");
-    for rule in &pipeline.rules {
-        let op = crate::engine::step::resolve_rule_operator(rule, None)?;
-        let rule_config = rule
-            .inputs
-            .as_ref()
-            .map(|m| {
-                let mut obj = serde_json::Map::new();
-                for (k, v) in m {
-                    obj.insert(k.clone(), v.to_value());
-                }
-                Value::Object(obj)
-            })
-            .unwrap_or(Value::Null);
-        let result = op
-            .run(&Value::Null, &rule_config)
-            .await
-            .map_err(|e| WeaveError::Internal(format!("rule '{}' execution error: {e}", rule.id)))?;
-        if let Some(obj) = result.as_object()
-            && !obj.get("valid").and_then(|v| v.as_bool()).unwrap_or(true)
-        {
-            let err_msg = obj.get("error").and_then(|v| v.as_str()).unwrap_or("validation failed");
-            let hint = obj.get("hint").and_then(|v| v.as_str()).unwrap_or("");
-            return Err(WeaveError::Internal(format!(
-                "rule '{}' failed: {err_msg}{}", if hint.is_empty() { "" } else { ": " },
-                if hint.is_empty() { "" } else { hint }
-            )));
         }
     }
 
