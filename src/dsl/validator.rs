@@ -383,16 +383,15 @@ fn check_ref_in_json(
             if let Some(ref_val) = map.get("Ref")
                 && let Ok(path) = serde_json::from_value::<VariablePath>(ref_val.clone())
                 && let Some(prefix) = path.parts.first()
+                && prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str())
             {
-                if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
-                    report.errors.push(ValidationError {
-                        code: "variable_ref_not_found".into(),
-                        message: format!(
-                            "步骤 {} 中引用了不存在的步骤: {}",
-                            step_id, prefix
-                        ),
-                    });
-                }
+                report.errors.push(ValidationError {
+                    code: "variable_ref_not_found".into(),
+                    message: format!(
+                        "步骤 {} 中引用了不存在的步骤: {}",
+                        step_id, prefix
+                    ),
+                });
             }
         }
         Value::Object(map) => {

@@ -126,15 +126,15 @@ pub async fn run_inner(
             .map_err(|e| WeaveError::Internal(format!("rule '{}' execution error: {e}", rule.id)))?;
         let output = output.into_owned();
         let result: Value = serde_json::from_slice(&output).unwrap_or(Value::Null);
-        if let Some(obj) = result.as_object() {
-            if obj.get("valid").and_then(|v| v.as_bool()).unwrap_or(true) == false {
-                let err_msg = obj.get("error").and_then(|v| v.as_str()).unwrap_or("validation failed");
-                let hint = obj.get("hint").and_then(|v| v.as_str()).unwrap_or("");
-                return Err(WeaveError::Internal(format!(
-                    "rule '{}' failed: {err_msg}{}", if hint.is_empty() { "" } else { ": " },
-                    if hint.is_empty() { "" } else { hint }
-                )));
-            }
+        if let Some(obj) = result.as_object()
+            && !obj.get("valid").and_then(|v| v.as_bool()).unwrap_or(true)
+        {
+            let err_msg = obj.get("error").and_then(|v| v.as_str()).unwrap_or("validation failed");
+            let hint = obj.get("hint").and_then(|v| v.as_str()).unwrap_or("");
+            return Err(WeaveError::Internal(format!(
+                "rule '{}' failed: {err_msg}{}", if hint.is_empty() { "" } else { ": " },
+                if hint.is_empty() { "" } else { hint }
+            )));
         }
     }
 

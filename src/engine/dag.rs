@@ -179,13 +179,12 @@ fn collect_refs(
     match val {
         serde_json::Value::Object(map) => {
             if map.len() == 1 && map.contains_key("Ref") {
-                if let Some(path_val) = map.get("Ref") {
-                    if let Ok(path) = serde_json::from_value::<VariablePath>(path_val.clone())
-                        && let Some(first) = path.parts.first()
-                            && known_steps.contains(first.as_str()) {
-                                results.push(first.clone());
-                            }
-                }
+                if let Some(path_val) = map.get("Ref")
+                    && let Ok(path) = serde_json::from_value::<VariablePath>(path_val.clone())
+                    && let Some(first) = path.parts.first()
+                        && known_steps.contains(first.as_str()) {
+                            results.push(first.clone());
+                        }
             } else if map.len() == 1 && map.contains_key("Literal") {
                 if let Some(lit) = map.get("Literal") {
                     collect_string_refs(lit, results, known_steps);

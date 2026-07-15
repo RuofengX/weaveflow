@@ -26,7 +26,7 @@ pub async fn execute_step(
     let (data, config) = resolve_inputs(scope, step)?;
     let op: Box<dyn Operator> = resolve_operator(step, scope)?;
 
-    if let Some(ref cfg) = step.iterate.as_ref() {
+    if let Some(cfg) = step.iterate.as_ref() {
         let over_bytes = resolve_ref(scope, &cfg.over)?;
         let mut hasher = Sha256::new();
         hasher.update(step.op.op_type().as_bytes());

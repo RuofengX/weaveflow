@@ -19,28 +19,14 @@ impl Scope {
         Self { buf: b.take_buffer() }
     }
 
-    /// Get step output bytes. Supports path traversal: if `step_id` contains
-    /// a dot, the first segment is the FlexBuffer key and remaining segments
-    /// are navigated as JSON fields on the blob value.
+    /// Get step output as raw bytes. Callers are responsible for parsing
+    /// if they need field-level navigation (outputs may not be JSON).
     pub fn get_output(&self, step_id: &str) -> Option<Vec<u8>> {
-        if let Some((key, path)) = step_id.split_once('.') {
-            let r = Reader::get_root(self.buf.as_slice()).ok()?;
-            let map = r.as_map();
-            let val = map.index(key).ok()?;
-            let blob = val.get_blob().ok()?;
-            let v: serde_json::Value = serde_json::from_slice(blob.0).ok()?;
-            let mut current = &v;
-            for part in path.split('.') {
-                current = current.get(part).unwrap_or(&serde_json::Value::Null);
-            }
-            Some(serde_json::to_vec(current).unwrap_or_default())
-        } else {
-            let r = Reader::get_root(self.buf.as_slice()).ok()?;
-            let map = r.as_map();
-            let val = map.index(step_id).ok()?;
-            let blob = val.get_blob().ok()?;
-            Some(blob.0.to_vec())
-        }
+        let r = Reader::get_root(self.buf.as_slice()).ok()?;
+        let map = r.as_map();
+        let val = map.index(step_id).ok()?;
+        let blob = val.get_blob().ok()?;
+        Some(blob.0.to_vec())
     }
 
     /// Return all non-slot entries in the scope.

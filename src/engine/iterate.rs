@@ -97,7 +97,7 @@ pub async fn execute_iterate(
             let (idx, val) = r?;
             results[idx] = val;
             done_count += 1;
-            if done_count % 10 == 0 || done_count == total_chunks {
+            if done_count.is_multiple_of(10) || done_count == total_chunks {
                 tracker
                     .update_iterate(task_id, &step.id, done_count, total_chunks)
                     .await;

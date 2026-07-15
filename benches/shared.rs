@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -5,7 +7,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::json;
 use tokio::sync::Mutex;
-use weave::dsl::parser::parse;
 use weave::engine::dag::Dag;
 use weave::engine::runner::Runner;
 use weave::store::Database;
