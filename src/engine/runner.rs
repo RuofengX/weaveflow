@@ -118,9 +118,7 @@ pub async fn run_inner(
     let dag = Dag::from_pipeline(pipeline)?;
     let layers = dag.topological_sort()?;
 
-    let all_step_ids: Vec<String> = layers.iter().flatten().cloned().collect();
-
-    for step_id in &all_step_ids {
+    for step_id in layers.iter().flatten(){
         tracker
             .update_step(&task_id, step_id, StepState::Pending)
             .await;
