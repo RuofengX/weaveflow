@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use serde_json::Value;
 use tracing::{debug, warn};
@@ -10,58 +11,51 @@ use crate::vm::Scope;
 pub fn resolve_inputs(
     scope: &Scope,
     step: &crate::dsl::StepDef,
-) -> WeaveResult<(Vec<u8>, Value)> {
+) -> WeaveResult<(Arc<Value>, Value)> {
     let as_name = step.iterate.as_ref().map(|c| c.as_name.as_str());
 
-    // 将 step.op 序列化为 Value，然后递归解析其中的 RefValue
     let op_value = serde_json::to_value(&step.op)
         .map_err(|e| WeaveError::Internal(format!("step op serialize: {e}")))?;
 
     resolve_value_tree(scope, &op_value, as_name)
 }
 
-/// 递归遍历 Value 树，解析 RefValue 模式，收集到 data + config 中。
 fn resolve_value_tree(
     scope: &Scope,
     val: &Value,
     as_name: Option<&str>,
-) -> WeaveResult<(Vec<u8>, Value)> {
+) -> WeaveResult<(Arc<Value>, Value)> {
     match val {
         Value::Object(map) => {
-            // 先检查是否为 RefValue::Ref / RefValue::Literal 的序列化格式
             if map.len() == 1 && map.contains_key("Ref") {
                 let path: VariablePath = serde_json::from_value(map["Ref"].clone())
                     .map_err(|e| WeaveError::Internal(format!("ref parse: {e}")))?;
-                // iterate 中的元素变量跳过解析
                 if let Some(as_name) = as_name
                     && path.parts.first().map(|p| p.as_str()) == Some(as_name)
                 {
-                    return Ok((vec![], Value::String(format!("{{{}}}", path.parts.join(".")))));
+                    return Ok((Arc::new(Value::Null), Value::String(format!("{{{}}}", path.parts.join(".")))));
                 }
-                let bytes = resolve_ref(scope, &path)?;
-                let v = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-                    Value::String(String::from_utf8_lossy(&bytes).into_owned())
-                });
-                return Ok((bytes, v));
+                let value = resolve_ref(scope, &path)?;
+                let resolved = (*value).clone();
+                return Ok((value, resolved));
             }
 
             if map.len() == 1 && map.contains_key("Literal") {
                 let lit = &map["Literal"];
                 let (d, resolved) = resolve_value_tree(scope, lit, as_name)?;
                 let data = if resolved.is_null() {
-                    vec![]
+                    Arc::new(Value::Null)
+                } else if d.is_null() {
+                    Arc::new(resolved.clone())
                 } else {
-                    serde_json::to_vec(&resolved).unwrap_or_default()
+                    d
                 };
-                let data = if d.is_empty() { data } else { d };
                 return Ok((data, resolved));
             }
 
-            // 顶层对象：特殊处理 "inputs" / "data" key
-            let mut data: Vec<u8> = Vec::new();
+            let mut data: Arc<Value> = Arc::new(Value::Null);
             let mut config_map = serde_json::Map::new();
 
-            // 如果存在 "inputs" key，展开它（StepOp 的 content = "inputs" 格式）
             if let Some(inputs_val) = map.get("inputs") {
                 if let Value::Object(inputs_map) = inputs_val {
                     for (k, v) in inputs_map {
@@ -76,7 +70,6 @@ fn resolve_value_tree(
                 return Ok((data, Value::Object(config_map)));
             }
 
-            // 普通对象
             for (k, v) in map {
                 let (d, resolved) = resolve_value_tree(scope, v, as_name)?;
                 if k == "data" {
@@ -91,30 +84,21 @@ fn resolve_value_tree(
                 .iter()
                 .map(|v| resolve_value_tree(scope, v, as_name).map(|(_, val)| val))
                 .collect::<Result<_, _>>()?;
-            Ok((vec![], Value::Array(resolved)))
+            Ok((Arc::new(Value::Null), Value::Array(resolved)))
         }
-        other => Ok((vec![], other.clone())),
+        other => Ok((Arc::new(Value::Null), other.clone())),
     }
 }
 
-pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Vec<u8>> {
+pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Arc<Value>> {
     if path.parts.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Arc::new(Value::Null));
     }
 
     match path.parts[0].as_str() {
         "slots" => {
-            let slots_bytes = scope.slots().unwrap_or_default();
-            if slots_bytes.is_empty() {
-                warn!(
-                    "scope has no slots bytes, resolving ref {}",
-                    path.parts.join(".")
-                );
-                return Ok(Vec::new());
-            }
-            let v: Value = serde_json::from_slice(&slots_bytes)
-                .map_err(|e| WeaveError::Internal(format!("slots parse: {e}")))?;
-            let mut current = &v;
+            let slots_val = scope.slots();
+            let mut current = &*slots_val;
             for part in &path.parts[1..] {
                 let next = current.get(part);
                 if next.is_none() {
@@ -132,8 +116,7 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Vec<u8>> {
                 resolved = %serde_json::to_string(current).unwrap_or_default(),
                 "resolved slot ref"
             );
-            serde_json::to_vec(current)
-                .map_err(|e| WeaveError::Internal(format!("ref serialize: {e}")))
+            Ok(Arc::new(current.clone()))
         }
         "env" => {
             let val = if path.parts.len() >= 2 {
@@ -141,20 +124,18 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Vec<u8>> {
             } else {
                 String::new()
             };
-            Ok(val.into_bytes())
+            Ok(Arc::new(Value::String(val)))
         }
         _ => {
             let step_id = &path.parts[0];
-            let bytes = scope.get_output(step_id).ok_or_else(|| {
+            let value = scope.get_output(step_id).ok_or_else(|| {
                 WeaveError::Internal(format!("step {step_id} not found in scope"))
             })?;
 
             if path.parts.len() == 1 || (path.parts.len() == 2 && path.parts[1] == "output") {
-                Ok(bytes)
+                Ok(value)
             } else {
-                let v: Value = serde_json::from_slice(&bytes)
-                    .map_err(|e| WeaveError::Internal(format!("step output parse: {e}")))?;
-                let mut current = &v;
+                let mut current = &*value;
                 let start = if path.parts.len() >= 2 && path.parts[1] == "output" {
                     2
                 } else {
@@ -163,8 +144,7 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Vec<u8>> {
                 for part in &path.parts[start..] {
                     current = current.get(part).unwrap_or(&Value::Null);
                 }
-                serde_json::to_vec(current)
-                    .map_err(|e| WeaveError::Internal(format!("field serialize: {e}")))
+                Ok(Arc::new(current.clone()))
             }
         }
     }
@@ -182,7 +162,7 @@ pub fn resolve_code_templates(code: &str, scope: &Scope) -> WeaveResult<String> 
             continue;
         }
         let step_id = parts[0];
-        let bytes = scope.get_output(step_id).ok_or_else(|| {
+        let value = scope.get_output(step_id).ok_or_else(|| {
             WeaveError::Internal(format!(
                 "code 模板 {{}} 引用了不存在的步骤: {step_id}"
             ))
@@ -190,16 +170,12 @@ pub fn resolve_code_templates(code: &str, scope: &Scope) -> WeaveResult<String> 
 
         let resolved =
             if parts.len() <= 1 || (parts.len() == 2 && parts[1] == "output") {
-                String::from_utf8(bytes).map_err(|e| {
-                    WeaveError::Internal(format!(
-                        "code 模板 {step_id}.output 不是 UTF-8: {e}"
-                    ))
-                })?
+                match &*value {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                }
             } else {
-                let v: Value = serde_json::from_slice(&bytes).map_err(|e| {
-                    WeaveError::Internal(format!("code 模板 {step_id} JSON 解析: {e}"))
-                })?;
-                let mut current = &v;
+                let mut current = &*value;
                 let start = if parts[1] == "output" { 2 } else { 1 };
                 for part in &parts[start..] {
                     current = current.get(part).unwrap_or(&Value::Null);

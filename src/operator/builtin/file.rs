@@ -1,34 +1,76 @@
-use std::borrow::Cow;
-
+use base64::Engine;
 use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
-/// 文件读取算子。读本地文件或远程 URL，产出原始二进制 bytes。
-///
-/// 与 `http` 算子的区分：
-/// - `http`：REST API 交互，返回 `{status, body}` JSON
-/// - `file`：纯粹二进制获取，返回原始 bytes
 pub struct FileOperator;
+
+fn extension_to_mimetype(ext: &str) -> &'static str {
+    match ext.to_lowercase().as_str() {
+        "txt" => "text/plain",
+        "md" => "text/markdown",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" => "application/javascript",
+        "json" => "application/json",
+        "yaml" | "yml" => "application/yaml",
+        "xml" => "application/xml",
+        "csv" => "text/csv",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "tar" => "application/x-tar",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "webm" => "video/webm",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        _ => "application/octet-stream",
+    }
+}
+
+fn detect_mimetype(path: &str) -> &'static str {
+    if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+        extension_to_mimetype(ext)
+    } else {
+        "application/octet-stream"
+    }
+}
 
 #[async_trait]
 impl Operator for FileOperator {
     fn spec(&self) -> OperatorSpec {
-        OperatorSpec::new("file", "读取本地文件或远程 URL，产出原始 bytes").with_cache(false)
+        OperatorSpec::new("file", "读取本地文件或远程 URL，产出 JSON 对象").with_cache(false)
     }
 
-    async fn run<'a>(
+    async fn run(
         &self,
-        _data: &'a [u8],
+        _data: &Value,
         config: &Value,
-    ) -> Result<Cow<'a, [u8]>, OperatorError> {
+    ) -> Result<Value, OperatorError> {
         // 本地路径优先
         if let Some(path) = config.get("path").and_then(|v| v.as_str()) {
             let bytes = tokio::fs::read(path)
                 .await
                 .map_err(|e| OperatorError::Runtime(format!("读取文件 {path}: {e}")))?;
-            return Ok(Cow::Owned(bytes));
+            let mimetype = detect_mimetype(path);
+            let size = bytes.len();
+            let content = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            return Ok(serde_json::json!({
+                "content": content,
+                "mimetype": mimetype,
+                "size": size,
+            }));
         }
 
         // 远程 URL
@@ -42,11 +84,23 @@ impl Operator for FileOperator {
                     "HTTP GET {url} → {status}"
                 )));
             }
+            let mimetype = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .to_string();
             let bytes = resp
                 .bytes()
                 .await
                 .map_err(|e| OperatorError::Runtime(format!("读取响应体 {url}: {e}")))?;
-            return Ok(Cow::Owned(bytes.to_vec()));
+            let size = bytes.len();
+            let content = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            return Ok(serde_json::json!({
+                "content": content,
+                "mimetype": mimetype,
+                "size": size,
+            }));
         }
 
         Err(OperatorError::Config(

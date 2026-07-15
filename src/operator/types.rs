@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
@@ -36,15 +34,13 @@ pub enum OperatorError {
     Timeout,
 }
 
-/// 算子 trait。data 是 executor 从 scope 零拷贝取出的 bytes，config 是 DSL 静态配置。
-/// 返回值 `Cow<[u8]>`：noop 等透传算子返回 Borrowed，其余返回 Owned。
 #[async_trait]
 pub trait Operator: Send + Sync {
     fn spec(&self) -> OperatorSpec;
 
-    async fn run<'a>(
+    async fn run(
         &self,
-        data: &'a [u8],
+        data: &Value,
         config: &Value,
-    ) -> Result<Cow<'a, [u8]>, OperatorError>;
+    ) -> Result<Value, OperatorError>;
 }

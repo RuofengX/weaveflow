@@ -20,11 +20,13 @@ pub async fn execute_iterate(
     cfg: &IterateConfig,
     task_id: &TaskId,
     tracker: &TaskTracker,
-) -> WeaveResult<Vec<u8>> {
-    let over_bytes = resolve_ref(scope, &cfg.over)?;
+) -> WeaveResult<Value> {
+    let over_ref = resolve_ref(scope, &cfg.over)?;
 
-    let items: Vec<Value> = serde_json::from_slice(&over_bytes)
-        .map_err(|e| WeaveError::Internal(format!("iterate parse array: {e}")))?;
+    let items: Vec<Value> = match &*over_ref {
+        Value::Array(arr) => arr.clone(),
+        other => vec![other.clone()],
+    };
 
     let batched = cfg.batch.is_some();
     let batch_size = cfg.batch.as_ref().map(|b| b.size as usize);
@@ -70,25 +72,19 @@ pub async fn execute_iterate(
         let mut batch_futures = Vec::new();
 
         for (idx, chunk) in batch {
-            let data_bytes = if batched {
-                serde_json::to_vec(&chunk)
+            let data = if batched {
+                Value::Array(chunk)
             } else {
-                serde_json::to_vec(&chunk[0])
+                chunk.into_iter().next().unwrap_or(Value::Null)
             };
-            let data_bytes = data_bytes
-                .map_err(|e| WeaveError::Internal(format!("iterate data serialize: {e}")))?;
             let op: Box<dyn Operator> = resolve_operator(step, scope)?;
             let config = config.clone();
 
             batch_futures.push(async move {
                 let output = op
-                    .run(&data_bytes, &config)
+                    .run(&data, &config)
                     .await?;
-                let owned = output.into_owned();
-
-                let v: Value = serde_json::from_slice(&owned)
-                    .map_err(|e| WeaveError::Internal(format!("iterate output parse: {e}")))?;
-                Ok::<_, WeaveError>((idx, v))
+                Ok::<_, WeaveError>((idx, output))
             });
         }
 
@@ -105,18 +101,18 @@ pub async fn execute_iterate(
         }
     }
 
-    let final_result: Vec<Value> = if batched {
-        results
-            .into_iter()
-            .flat_map(|v| v.as_array().cloned().unwrap_or_default())
-            .collect()
+    let final_result: Value = if batched {
+        Value::Array(
+            results
+                .into_iter()
+                .flat_map(|v| v.as_array().cloned().unwrap_or_default())
+                .collect()
+        )
     } else {
-        results
+        Value::Array(results)
     };
 
-    let final_bytes = serde_json::to_vec(&final_result)
-        .map_err(|e| WeaveError::Internal(format!("iterate final serialize: {e}")))?;
-    scope.set_output(&step.id, &final_bytes);
+    scope.set_output(&step.id, final_result.clone());
 
     let completed_at = chrono::Utc::now().timestamp_millis();
     tracker
@@ -133,5 +129,5 @@ pub async fn execute_iterate(
         )
         .await;
 
-    Ok(final_bytes)
+    Ok(final_result)
 }

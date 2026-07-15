@@ -188,22 +188,35 @@ JS 运行时规范：
 
 ## file — 读取文件
 
-读本地文件或远程 URL，产出原始 bytes。
+读本地文件或远程 URL，产出 JSON 对象。
 
 | 输入 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `path` | RefValue | — | — | 本地文件路径（file:// 前缀） |
+| `path` | RefValue | — | — | 本地文件路径 |
 | `url` | RefValue | — | — | 远程 URL（http/https） |
 
 > 二选一：`path` 或 `url`，不可同时为空。
 
-> 二进制文件 >10MB 在 JS 算子中返回 null（quickjs 限制），请先用 `base64` 算子 encode。
+**输出格式：**
+```json
+{
+  "content": "<base64 编码内容>",
+  "mimetype": "text/plain",
+  "size": 12345
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `content` | string | 文件内容的 base64 编码 |
+| `mimetype` | string | MIME 类型，URL 模式取 Content-Type header，path 模式按扩展名检测，默认 `application/octet-stream` |
+| `size` | number | 文件大小（字节） |
 
 ```yaml
 - id: read_config
   type: file
   inputs:
-    path: "file:///etc/config.json"
+    path: "./config.json"
 ```
 
 ---

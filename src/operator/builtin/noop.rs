@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -13,11 +11,11 @@ impl Operator for NoopOperator {
         OperatorSpec::new("noop", "直接透传输入")
     }
 
-    async fn run<'a>(
+    async fn run(
         &self,
-        data: &'a [u8],
+        data: &Value,
         _config: &Value,
-    ) -> Result<Cow<'a, [u8]>, OperatorError> {
-        Ok(Cow::Borrowed(data))
+    ) -> Result<Value, OperatorError> {
+        Ok(data.clone())
     }
 }

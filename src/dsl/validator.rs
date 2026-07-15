@@ -74,6 +74,12 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
                 message: "步骤 ID 不能为空".into(),
             });
         }
+        if ["slots", "env"].contains(&step.id.as_str())  {
+            report.errors.push(ValidationError {
+                code: "reserved_step_id".into(),
+                message: format!("步骤 ID 不能使用保留名称: {}", step.id),
+            });
+        }
         if !step.id.is_empty() && !seen_ids.insert(&step.id) {
             report.errors.push(ValidationError {
                 code: "duplicate_step_id".into(),
@@ -608,6 +614,14 @@ mod tests {
         def.steps[0].id = "".into();
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.iter().any(|e| e.code == "empty_step_id"));
+    }
+
+    #[test]
+    fn reserved_step_id_slots() {
+        let mut def = valid_def();
+        def.steps[0].id = "slots".into();
+        let report = validate(&def, &ValidateOptions::default());
+        assert!(report.errors.iter().any(|e| e.code == "reserved_step_id"));
     }
 
     #[test]

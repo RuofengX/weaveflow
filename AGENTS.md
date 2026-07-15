@@ -37,7 +37,7 @@ src/
 │   ├── registry.rs       OperatorRegistry (compile-time registration)
 │   └── builtin/          14 builtin operators
 ├── vm/                  # Variable resolution & scope
-│   ├── scope.rs          Scope (FlexBuffer-backed)
+│   ├── scope.rs          Scope (HashMap<String, Arc<Value>> backed)
 │   └── resolver.rs       resolve_value_tree — bfs ResolveRefs → replace into cloned JSON
 ├── tracker/             # In-memory runtime state + WS broadcast
 │   ├── tracker.rs        TaskTracker (HashMap<TaskId, RunState> + broadcast)
@@ -63,7 +63,7 @@ src/
 | Step config | `StepOp` tagged enum (`#[serde(tag = "type", content = "inputs", rename_all = "lowercase")]`) — 14 variants, each with typed Inputs struct |
 | Input model | Pipeline-level `slots` (placeholders), step-level `inputs` (per-operator typed structs) |
 | Raw → Pipeline conversion | `raw.rs` uses `Raw*Inputs` structs with plain types (no RefValue); `From<RawStepOp> for StepOp` explicitly converts `"{...}"` strings to `RefValue::Ref` |
-| Scope | FlexBuffer bytes — self-describing binary |
+| Scope | HashMap<String, Arc<Value>> — O(1) get/set, clone = refcount inc |
 | Storage | redb — all values inline, no external spill files |
 | Cache | SHA256(resolved input bytes) content-addressed dedup |
 | Variables | `{slots.name}` / `{env.KEY}` / `{step_id.output}` / `{step_id.output.field}` |
@@ -136,12 +136,11 @@ pub struct IterateConfig {
 #[async_trait]
 pub trait Operator: Send + Sync {
     fn spec(&self) -> OperatorSpec;
-    async fn run<'a>(&self, data: &'a [u8], config: &Value)
-        -> Result<Cow<'a, [u8]>, OperatorError>;
+    async fn run(&self, data: &Value, config: &Value)
+        -> Result<Value, OperatorError>;
 }
-```
 
-Return `Cow<[u8]>`: `Borrowed` for noop passthrough, `Owned` otherwise.
+Return `Value` — all operator outputs are JSON. Scope natively stores `Arc<Value>`.
 
 ### Builtin operators (12)
 
@@ -221,6 +220,6 @@ The validator serializes each step's op via `serde_json::to_value(&step.op)` and
 
 ## Caveats
 
-- `file` operator: binary files >10MB return null in JS snapshots (quickjs/rquickjs limitation). Encode with `base64` operator first for PDF/binary scenarios.
+- All operator outputs are JSON `Value` — Scope natively stores `Arc<Value>`.
 - JS operator: `input.config.<key>` and `input.<key>` have different semantics. The `code` field supports `{{step_id.output}}` double-brace templates resolved before evaluation.
 - When adding a new step type to `StepOp`, you MUST also add the corresponding `Raw*Inputs` struct + `RawStepOp` variant + `From` conversion arm in `src/dsl/raw.rs`. Missing any of these = compile error at the `From<RawStepOp> for StepOp` match.

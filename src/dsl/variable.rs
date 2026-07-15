@@ -30,22 +30,24 @@ impl VariablePath {
     /// 尝试将字符串解析为变量路径 `{...}`。
     pub fn parse(s: &str) -> Option<VariablePath> {
         let s = s.trim();
-        if s.starts_with('{') && s.ends_with('}') {
-            let inner = &s[1..s.len() - 1];
-            if inner.is_empty() {
-                return None;
-            }
-            let parts: Vec<String> = inner.split('.').map(|p| p.trim().to_string()).collect();
-            if parts.is_empty() {
-                return None;
-            }
-            if parts.iter().any(|p| p.is_empty() || p.contains(char::is_whitespace)) {
-                return None;
-            }
-            Some(VariablePath { parts })
+        let inner = if s.starts_with("{{") && s.ends_with("}}") {
+            &s[2..s.len() - 2]
+        } else if s.starts_with('{') && s.ends_with('}') {
+            &s[1..s.len() - 1]
         } else {
-            None
+            return None;
+        };
+        if inner.is_empty() {
+            return None;
         }
+        let parts: Vec<String> = inner.split('.').map(|p| p.trim().to_string()).collect();
+        if parts.is_empty() {
+            return None;
+        }
+        if parts.iter().any(|p| p.is_empty() || p.contains(char::is_whitespace)) {
+            return None;
+        }
+        Some(VariablePath { parts })
     }
 }
 

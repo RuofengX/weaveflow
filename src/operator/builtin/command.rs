@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -13,11 +11,11 @@ impl Operator for CommandOperator {
         OperatorSpec::new("command", "执行 shell 命令").with_cache(false)
     }
 
-    async fn run<'a>(
+    async fn run(
         &self,
-        _data: &'a [u8],
+        _data: &Value,
         config: &Value,
-    ) -> Result<Cow<'a, [u8]>, OperatorError> {
+    ) -> Result<Value, OperatorError> {
         let cmd = config
             .get("command")
             .or_else(|| config.get("cmd"))
@@ -60,15 +58,11 @@ impl Operator for CommandOperator {
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let result = serde_json::json!({
+        Ok(serde_json::json!({
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": output.status.code().unwrap_or(-1),
             "success": output.status.success(),
-        });
-
-        let bytes = serde_json::to_vec(&result)
-            .map_err(|e| OperatorError::Runtime(format!("command serialize: {e}")))?;
-        Ok(Cow::Owned(bytes))
+        }))
     }
 }

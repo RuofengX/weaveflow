@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -13,14 +11,13 @@ impl Operator for MergeOperator {
         OperatorSpec::new("merge", "合并两个对象")
     }
 
-    async fn run<'a>(
+    async fn run(
         &self,
-        data: &'a [u8],
+        data: &Value,
         config: &Value,
-    ) -> Result<Cow<'a, [u8]>, OperatorError> {
-        let a = if !data.is_empty() {
-            serde_json::from_slice(data)
-                .map_err(|e| OperatorError::Config(format!("merge parse: {e}")))?
+    ) -> Result<Value, OperatorError> {
+        let a = if !data.is_null() {
+            data.clone()
         } else {
             config.get("a").cloned().unwrap_or(Value::Null)
         };
@@ -34,9 +31,7 @@ impl Operator for MergeOperator {
                 for (k, v) in ob {
                     merged.insert(k.clone(), v.clone());
                 }
-                let bytes = serde_json::to_vec(&Value::Object(merged))
-                    .map_err(|e| OperatorError::Runtime(format!("merge serialize: {e}")))?;
-                Ok(Cow::Owned(bytes))
+                Ok(Value::Object(merged))
             }
             _ => Err(OperatorError::Config("a 和 b 必须是对象".into())),
         }

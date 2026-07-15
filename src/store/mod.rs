@@ -436,8 +436,8 @@ impl Database {
         Ok(())
     }
 
-    /// Bytes-based cache: check if output is cached. Returns raw output bytes.
-    pub fn check_cache_bytes(&self, key: &[u8]) -> WeaveResult<Option<Vec<u8>>> {
+    /// Value-based cache: check if output is cached. Returns the output Value.
+    pub fn check_cache_bytes(&self, key: &[u8]) -> WeaveResult<Option<serde_json::Value>> {
         let digest = ObjectDigest::compute(key);
         let ck = CacheKey(digest);
         let txn = self.db.begin_read().map_err(|e| WeaveError::Database {
@@ -452,8 +452,7 @@ impl Database {
                 })? {
                     Some(guard) => {
                         let output_digest = guard.value();
-                        let obj = self.load_object(&output_digest)?;
-                        Ok(obj.map(|v| serde_json::to_vec(&v).unwrap_or_default()))
+                        self.load_object(&output_digest)
                     }
                     None => Ok(None),
                 }
@@ -462,11 +461,9 @@ impl Database {
         }
     }
 
-    /// Bytes-based cache: store output bytes with cache key.
-    pub fn set_cache_bytes(&self, key: &[u8], output: &[u8]) -> WeaveResult<()> {
-        let value: serde_json::Value = serde_json::from_slice(output)
-            .unwrap_or(serde_json::Value::Null);
-        let output_digest = self.store_object(&value)?;
+    /// Value-based cache: store output Value with cache key.
+    pub fn set_cache_bytes(&self, key: &[u8], output: &serde_json::Value) -> WeaveResult<()> {
+        let output_digest = self.store_object(output)?;
         let ck = CacheKey(ObjectDigest::compute(key));
         let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
             operation: "set_cache_bytes begin_write",

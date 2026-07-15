@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use async_trait::async_trait;
 use rayon::prelude::*;
 use serde_json::Value;
@@ -35,21 +33,19 @@ impl Operator for FilterOperator {
         OperatorSpec::new("filter", "按条件过滤数组元素")
     }
 
-    async fn run<'a>(
+    async fn run(
         &self,
-        data: &'a [u8],
+        data: &Value,
         config: &Value,
-    ) -> Result<Cow<'a, [u8]>, OperatorError> {
+    ) -> Result<Value, OperatorError> {
         let field = config.get("field").and_then(|v| v.as_str()).unwrap_or("");
         let operator = config.get("operator").and_then(|v| v.as_str()).unwrap_or("eq");
         let ref_value = config.get("value").unwrap_or(&Value::Null);
 
-        let value: Value = serde_json::from_slice(data)
-            .map_err(|e| OperatorError::Config(format!("filter parse: {e}")))?;
-        let is_array = value.is_array();
-        let arr: Vec<Value> = match value {
-            Value::Array(a) => a,
-            other => vec![other],
+        let is_array = data.is_array();
+        let arr: Vec<Value> = match data {
+            Value::Array(a) => a.clone(),
+            other => vec![other.clone()],
         };
 
         let result: Vec<Value> = arr
@@ -59,14 +55,11 @@ impl Operator for FilterOperator {
             })
             .collect();
 
-        // 裸对象入 → 裸对象出；数组入 → 数组出
         let output = if is_array {
             Value::Array(result)
         } else {
             result.into_iter().next().unwrap_or(Value::Null)
         };
-        let bytes = serde_json::to_vec(&output)
-            .map_err(|e| OperatorError::Runtime(format!("filter serialize: {e}")))?;
-        Ok(Cow::Owned(bytes))
+        Ok(output)
     }
 }

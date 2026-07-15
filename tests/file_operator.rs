@@ -26,8 +26,10 @@ output: "{{read.output}}"
 "#
     );
     let result = run_yaml(&yaml, HashMap::new()).expect("run");
-    // file 算子输出的原始 bytes 不是合法 JSON，serde_json 解析为 Null
-    assert!(result.is_null() || result.is_string());
+    assert!(result.is_object(), "expected object, got {}", result);
+    assert!(result["content"].is_string());
+    assert!(result["mimetype"].is_string());
+    assert!(result["size"].as_u64().unwrap() > 0);
 }
 
 #[test]
@@ -51,16 +53,19 @@ steps:
       code: |
         function run(data) {{
           return {{
-            has_base64: typeof data.data_base64 === "string",
-            length: data.data_base64 ? data.data_base64.length : 0
+            has_content: typeof data.content === "string",
+            length: data.content ? data.content.length : 0,
+            mimetype: data.mimetype,
+            size: data.size
           }};
         }}
 output: "{{check.output}}"
 "#
     );
     let result = run_yaml(&yaml, HashMap::new()).expect("run");
-    assert_eq!(result["has_base64"], json!(true));
+    assert_eq!(result["has_content"], json!(true));
     assert!(result["length"].as_u64().unwrap() > 0);
+    assert!(result["mimetype"].is_string());
 }
 
 #[test]

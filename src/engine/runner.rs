@@ -104,9 +104,7 @@ pub async fn run_inner(
         }
     }
 
-    let slots_bytes = serde_json::to_vec(&slots)
-        .map_err(|e| WeaveError::Internal(format!("slots serialize: {e}")))?;
-
+    // Rules validation
     for rule in &pipeline.rules {
         let op = crate::engine::step::resolve_rule_operator(rule, None)?;
         let rule_config = rule
@@ -120,12 +118,10 @@ pub async fn run_inner(
                 Value::Object(obj)
             })
             .unwrap_or(Value::Null);
-        let output = op
-            .run(&slots_bytes, &rule_config)
+        let result = op
+            .run(&Value::Null, &rule_config)
             .await
             .map_err(|e| WeaveError::Internal(format!("rule '{}' execution error: {e}", rule.id)))?;
-        let output = output.into_owned();
-        let result: Value = serde_json::from_slice(&output).unwrap_or(Value::Null);
         if let Some(obj) = result.as_object()
             && !obj.get("valid").and_then(|v| v.as_bool()).unwrap_or(true)
         {
@@ -138,7 +134,7 @@ pub async fn run_inner(
         }
     }
 
-    let mut scope = Scope::new(&slots_bytes);
+    let mut scope = Scope::new(slots);
 
     let dag = Dag::from_pipeline(pipeline)?;
     let layers = dag.topological_sort()?;
@@ -182,14 +178,14 @@ pub async fn run_inner(
             .await
             {
                 Ok(output) => {
-                    scope.set_output(step_id, &output);
+                    scope.set_output(step_id, output.clone());
                     {
                         let db_lock = db.lock().await;
                         save_step_snapshot(
                             &db_lock,
                             &task_id,
                             step_id,
-                            output.clone(),
+                            &output,
                             Some(step_id.as_str()) == last_step_id.as_deref(),
                         );
                     }
@@ -260,7 +256,7 @@ pub async fn run_inner(
             });
         }
 
-        let results: Vec<(String, i64, WeaveResult<Vec<u8>>)> =
+        let results: Vec<(String, i64, WeaveResult<Value>)> =
             futures::future::join_all(futures).await;
 
         let mut layer_failed = false;
@@ -269,14 +265,14 @@ pub async fn run_inner(
         for (step_id, started_at, result) in results {
             match result {
                 Ok(output) => {
-                    scope.set_output(&step_id, &output);
+                    scope.set_output(&step_id, output.clone());
                     {
                         let db_lock = db.lock().await;
                         save_step_snapshot(
                             &db_lock,
                             &task_id,
                             &step_id,
-                            output,
+                            &output,
                             Some(step_id.as_str()) == last_step_id.as_deref(),
                         );
                     }
@@ -331,16 +327,15 @@ pub async fn run_inner(
                     return Err(WeaveError::Internal("empty output ref".into()));
                 }
                 let step_id = &path.parts[0];
-                let output_bytes = scope.get_output(step_id).ok_or_else(|| {
+                let value = scope.get_output(step_id).ok_or_else(|| {
                     WeaveError::Internal(format!("output step {step_id} not found"))
                 })?;
 
                 if path.parts.len() <= 2 {
-                    output_bytes
+                    serde_json::to_vec(&*value)
+                        .map_err(|e| WeaveError::Internal(format!("output serialize: {e}")))?
                 } else {
-                    let v: Value = serde_json::from_slice(&output_bytes)
-                        .map_err(|e| WeaveError::Internal(format!("output parse: {e}")))?;
-                    let mut current = &v;
+                    let mut current = &*value;
                     let start = if path.parts.len() >= 2 && path.parts[1] == "output" {
                         2
                     } else {
@@ -359,13 +354,7 @@ pub async fn run_inner(
     let output_val: Value = match serde_json::from_slice(&final_output) {
         Ok(v) => v,
         Err(_) => {
-            use base64::Engine;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&final_output);
-            serde_json::json!({
-                "_binary": true,
-                "_size": final_output.len(),
-                "_base64": b64,
-            })
+            serde_json::json!(final_output)
         }
     };
     tracker.complete(&task_id, output_val).await;
@@ -377,13 +366,14 @@ fn save_step_snapshot(
     db: &Database,
     task_id: &TaskId,
     step_id: &str,
-    output: Vec<u8>,
+    output: &Value,
     is_last: bool,
 ) {
+    let bytes = serde_json::to_vec(output).unwrap_or_default();
     let snap = Snapshot {
         seq: 0,
         step_id: step_id.to_string(),
-        output,
+        output: bytes,
     };
     let _ = if is_last {
         db.save_snapshot_durable(task_id, snap)

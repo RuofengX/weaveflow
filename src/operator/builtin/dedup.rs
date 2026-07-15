@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -14,18 +12,16 @@ impl Operator for DedupOperator {
         OperatorSpec::new("dedup", "按字段去重数组")
     }
 
-    async fn run<'a>(
+    async fn run(
         &self,
-        data: &'a [u8],
+        data: &Value,
         config: &Value,
-    ) -> Result<Cow<'a, [u8]>, OperatorError> {
+    ) -> Result<Value, OperatorError> {
         let field = config.get("field").and_then(|v| v.as_str()).unwrap_or("");
-        let value: Value = serde_json::from_slice(data)
-            .map_err(|e| OperatorError::Config(format!("dedup parse: {e}")))?;
-        let is_array = value.is_array();
-        let arr: Vec<Value> = match value {
-            Value::Array(a) => a,
-            other => vec![other],
+        let is_array = data.is_array();
+        let arr: Vec<Value> = match data {
+            Value::Array(a) => a.clone(),
+            other => vec![other.clone()],
         };
 
         let mut seen = std::collections::HashSet::new();
@@ -46,8 +42,6 @@ impl Operator for DedupOperator {
         } else {
             result.into_iter().next().unwrap_or(Value::Null)
         };
-        let bytes = serde_json::to_vec(&output)
-            .map_err(|e| OperatorError::Runtime(format!("dedup serialize: {e}")))?;
-        Ok(Cow::Owned(bytes))
+        Ok(output)
     }
 }

@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use async_trait::async_trait;
 use serde_json::Value;
 use tracing::warn;
@@ -7,23 +5,8 @@ use tracing::warn;
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
 /// LLM 算子：调用 OpenAI 兼容的 chat completions API，直接返回文本内容。
-///
-/// # Config 字段
-/// - `url` (string, 必需): API endpoint，如 `http://spark:8000/v1/chat/completions`
-/// - `model` (string, 必需): 模型名
-/// - `prompt` (string, 必需): 用户提示词
-/// - `system` (string, 可选): 系统提示词
-/// - `images_b64` 或 `image_base64` (string 或 string[], 可选): base64 图片列表
-/// - `image_type` (string, 可选, 默认 "image/jpeg"): data URI 的 MIME type，如 "application/pdf"
-/// - `max_tokens` (u64, 可选, 默认 4096)
-/// - `temperature` (f64, 可选, 默认 0.0)
-/// - `skip_vision_check` (bool, 可选, 默认 false): 跳过视觉模型能力预检
-///
-/// # 输出
-/// 返回 choices[0].message.content 文本的 JSON 字符串。
 pub struct LlmOperator;
 
-/// 提取图片 base64 列表，兼容 `images_b64` 和 `image_base64` 两个字段名。
 fn extract_images(config: &Value) -> (Vec<&str>, bool) {
     let mut found = false;
 
@@ -46,11 +29,11 @@ impl Operator for LlmOperator {
         OperatorSpec::new("llm", "OpenAI 兼容的 LLM 推理，返回文本内容").with_cache(false)
     }
 
-    async fn run<'a>(
+    async fn run(
         &self,
-        _data: &'a [u8],
+        _data: &Value,
         config: &Value,
-    ) -> Result<Cow<'a, [u8]>, OperatorError> {
+    ) -> Result<Value, OperatorError> {
         let url = config
             .get("url")
             .and_then(|v| v.as_str())
@@ -68,7 +51,6 @@ impl Operator for LlmOperator {
 
         let system = config.get("system").and_then(|v| v.as_str());
 
-        // images_b64 / image_base64: string → 单张，array → 多张
         let (images, has_images) = extract_images(config);
         let skip_vision_check = config
             .get("skip_vision_check")
@@ -95,14 +77,12 @@ impl Operator for LlmOperator {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
 
-        // ── 构造 messages ──
         let mut messages: Vec<Value> = Vec::new();
 
         if let Some(sys) = system {
             messages.push(serde_json::json!({ "role": "system", "content": sys }));
         }
 
-        // user message: text + optional images
         let mut user_content: Vec<Value> =
             vec![serde_json::json!({ "type": "text", "text": prompt })];
 
@@ -118,7 +98,6 @@ impl Operator for LlmOperator {
             "content": user_content
         }));
 
-        // ── 构造请求体 ──
         let body = serde_json::json!({
             "model": model,
             "messages": messages,
@@ -129,7 +108,6 @@ impl Operator for LlmOperator {
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| OperatorError::Runtime(format!("llm serialize body: {e}")))?;
 
-        // ── HTTP POST ──
         let client = reqwest::Client::new();
         let resp = client
             .post(url)
@@ -152,7 +130,6 @@ impl Operator for LlmOperator {
             )));
         }
 
-        // ── 解析响应 ──
         let resp_json: Value = serde_json::from_str(&body_text).map_err(|e| {
             OperatorError::Runtime(format!("llm parse response: {e}"))
         })?;
@@ -170,10 +147,7 @@ impl Operator for LlmOperator {
                     || msg.contains("multimodal")
                     || code.contains("invalid_request"))
             {
-                format!(
-                    " — hint: model '{}' may not support vision/image inputs. "
-                    , model
-                )
+                format!(" — hint: model '{}' may not support vision/image inputs. ", model)
             } else {
                 String::new()
             };
@@ -193,10 +167,6 @@ impl Operator for LlmOperator {
                 OperatorError::Runtime("llm response missing choices[0].message.content".into())
             })?;
 
-        let result = serde_json::Value::String(content.to_string());
-        let bytes = serde_json::to_vec(&result)
-            .map_err(|e| OperatorError::Runtime(format!("llm serialize output: {e}")))?;
-
-        Ok(Cow::Owned(bytes))
+        Ok(Value::String(content.to_string()))
     }
 }

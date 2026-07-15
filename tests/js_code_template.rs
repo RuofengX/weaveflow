@@ -37,12 +37,16 @@ steps:
     type: file
     inputs:
       path: "PATH_PLACEHOLDER"
+  - id: decode_util
+    type: base64
+    inputs:
+      data: "{{load_util.output.content}}"
+      mode: decode
   - id: use_util
     type: js
     inputs:
-      data: "{load_util.output}"
       code: |
-        {{load_util.output}}
+        {{decode_util.output}}
 
         function run(data) {
           return { msg: greet('Weave') };
@@ -102,9 +106,9 @@ steps:
       data: "{read.output}"
       code: |
         function run(data) {
-          var decoded = __native__.atob(data.data_base64);
+          var decoded = __native__.atob(data.content);
           return {
-            has_base64: typeof data.data_base64 === "string",
+            has_base64: typeof data.content === "string",
             bytes_len: decoded.length,
             byte0: decoded[0],
             byte1: decoded[1]

@@ -30,7 +30,6 @@ dirs-next = "2"
 base64 = "0.22"
 tokio-tungstenite = "0.24"
 tungstenite = "0.24"
-flexbuffers = "25"
 rquickjs = "0.12"
 clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
