@@ -108,7 +108,7 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
                 serde_json::to_value(&step.op).unwrap_or(Value::Null);
             check_ref_in_json(&op_val, &all_step_ids, &step.id, &mut report);
         }
-        check_iterate_config(step, &all_step_ids, &mut report);
+        check_iterate_config(step.op.iterate(), &step.id, &all_step_ids, &mut report);
     }
 
     // ---- 2. slots ----
@@ -207,7 +207,7 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
 
     // ---- 7. JS syntax check ----
     for step in &def.steps {
-        if let StepOp::JsScript(ref inputs) = step.op {
+        if let StepOp::Js(ref inputs) = step.op {
             check_js_syntax(&step.id, &inputs.code, &mut report);
         }
     }
@@ -243,7 +243,7 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
                 }
             }
         }
-        if let Some(ref cfg) = step.iterate {
+        if let Some(ref cfg) = step.op.iterate() {
             for (prefix, _) in refs_in_path(&cfg.over) {
                 if prefix != "slots" && prefix != "env" {
                     upstream_deps.entry(sid).or_default().push(prefix);
@@ -453,28 +453,28 @@ fn check_output_ref(
 }
 
 fn check_iterate_config(
-    step: &crate::dsl::StepDef,
+    cfg: Option<&crate::dsl::IterateConfig>,
+    step_id: &str,
     all_step_ids: &HashSet<&str>,
     report: &mut ValidationReport,
 ) {
-    if let Some(ref cfg) = step.iterate {
+    if let Some(cfg) = cfg {
         if cfg.max_workers == Some(0) {
             report.errors.push(ValidationError {
                 code: "invalid_iterate_config".into(),
                 message: format!(
                     "步骤 {} 的 iterate.max_workers 不能为 0（省缺可移除该字段）",
-                    step.id
+                    step_id
                 ),
             });
         }
-        // 检查 iterate.over 中引用的 step 是否存在
         if let Some(prefix) = cfg.over.parts.first()
             && prefix != "slots" && prefix != "env" && !all_step_ids.contains(prefix.as_str()) {
                 report.errors.push(ValidationError {
                     code: "variable_ref_not_found".into(),
                     message: format!(
                         "步骤 {} 的 iterate.over 引用了不存在的步骤: {}",
-                        step.id, prefix
+                        step_id, prefix
                     ),
                 });
         }
@@ -533,15 +533,15 @@ mod tests {
         StepDef {
             id: "fetch".into(),
             after: None,
-            iterate: None,
             cache: None,
             retry: None,
             timeout: None,
-            op: StepOp::HttpClient(HttpInputs {
+            op: StepOp::Http(HttpInputs {
                 url: var_ref(url),
                 method: None,
                 headers: None,
                 body: None,
+                iterate: None,
             }),
         }
     }
@@ -550,7 +550,6 @@ mod tests {
         StepDef {
             id: id.into(),
             after: if after.is_empty() { None } else { Some(after.into_iter().map(|s| s.into()).collect()) },
-            iterate: None,
             cache: None,
             retry: None,
             timeout: None,
@@ -673,11 +672,12 @@ mod tests {
     #[test]
     fn variable_ref_not_found() {
         let mut def = valid_def();
-        def.steps[0].op = StepOp::HttpClient(HttpInputs {
+        def.steps[0].op = StepOp::Http(HttpInputs {
             url: var_ref("{nonexistent.output}"),
             method: None,
             headers: None,
             body: None,
+            iterate: None,
         });
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn slots_env_refs_are_not_checked() {
         let mut def = valid_def();
-        def.steps[0].op = StepOp::HttpClient(HttpInputs {
+        def.steps[0].op = StepOp::Http(HttpInputs {
             url: var_ref("{slots.source_url}"),
             method: None,
             headers: Some({
@@ -703,6 +703,7 @@ mod tests {
                 h
             }),
             body: None,
+            iterate: None,
         });
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
@@ -719,12 +720,14 @@ mod tests {
     #[test]
     fn invalid_iterate_config() {
         let mut def = valid_def();
-        def.steps[0].iterate = Some(IterateConfig {
-            over: VariablePath::parse("{slots.url}").unwrap(),
-            as_name: "item".into(),
-            max_workers: Some(0),
-            batch: None,
-        });
+        if let StepOp::Http(ref mut inputs) = def.steps[0].op {
+            inputs.iterate = Some(IterateConfig {
+                over: VariablePath::parse("{slots.url}").unwrap(),
+                as_name: "item".into(),
+                max_workers: Some(0),
+                batch: None,
+            });
+        }
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.iter().any(|e| e.code == "invalid_iterate_config"));
     }
@@ -732,12 +735,14 @@ mod tests {
     #[test]
     fn valid_iterate_config() {
         let mut def = valid_def();
-        def.steps[0].iterate = Some(IterateConfig {
-            over: VariablePath::parse("{slots.url}").unwrap(),
-            as_name: "item".into(),
-            max_workers: Some(4),
-            batch: None,
-        });
+        if let StepOp::Http(ref mut inputs) = def.steps[0].op {
+            inputs.iterate = Some(IterateConfig {
+                over: VariablePath::parse("{slots.url}").unwrap(),
+                as_name: "item".into(),
+                max_workers: Some(4),
+                batch: None,
+            });
+        }
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
     }
@@ -754,7 +759,7 @@ mod tests {
     fn nested_ref_in_object() {
         let mut def = valid_def();
         // Use VarOutput with a literal object containing a template string inside
-        def.steps[0].op = StepOp::VarOutput(VarInputs {
+        def.steps[0].op = StepOp::Var(VarInputs {
             value: Some(literal(json!({ "Authorization": "{nonexistent.output}" }))),
         });
         let report = validate(&def, &ValidateOptions::default());

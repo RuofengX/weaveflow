@@ -16,9 +16,10 @@ steps:
   - id: s1
     type: var
     inputs:
-      msg: "hello"
-      code: 200
-output: "{s1.output.msg}"
+      value:
+        msg: "hello"
+        code: 200
+output: "{s1.output.value.msg}"
 "#;
     let result = run_yaml(yaml, HashMap::new()).expect("run");
     assert_eq!(result, json!("hello"));

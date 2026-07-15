@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::step::IterateConfig;
 use super::variable::RefValue;
 
 // ---------------------------------------------------------------------------
@@ -9,55 +10,50 @@ use super::variable::RefValue;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "inputs")]
+#[serde(tag = "type", content = "inputs", rename_all = "lowercase")]
 pub enum StepOp {
-    #[serde(rename = "http")]
-    HttpClient(HttpInputs),
-    #[serde(rename = "js")]
-    JsScript(JsInputs),
-    #[serde(rename = "filter")]
-    FilterData(FilterInputs),
-    #[serde(rename = "sort")]
-    SortData(SortInputs),
-    #[serde(rename = "dedup")]
-    DedupData(DedupInputs),
-    #[serde(rename = "merge")]
-    MergeData(MergeInputs),
-    #[serde(rename = "split")]
-    SplitData(SplitInputs),
-    #[serde(rename = "base64")]
-    Base64Data(Base64Inputs),
-    #[serde(rename = "noop")]
+    Http(HttpInputs),
+    Js(JsInputs),
+    Filter(FilterInputs),
+    Sort(SortInputs),
+    Dedup(DedupInputs),
+    Merge(MergeInputs),
+    Split(SplitInputs),
+    Base64(Base64Inputs),
     Noop,
-    #[serde(rename = "var")]
-    VarOutput(VarInputs),
-    #[serde(rename = "file")]
-    FileReader(FileInputs),
-    #[serde(rename = "command")]
-    CommandRun(CommandInputs),
-    #[serde(rename = "llm")]
-    LlmClient(LlmInputs),
-    #[serde(rename = "fork")]
-    ForkFlow(ForkInputs),
+    Var(VarInputs),
+    File(FileInputs),
+    Command(CommandInputs),
+    Llm(LlmInputs),
+    Fork(ForkInputs),
 }
 
 impl StepOp {
     pub fn op_type(&self) -> &'static str {
         match self {
-            StepOp::HttpClient(_) => "http",
-            StepOp::JsScript(_) => "js",
-            StepOp::FilterData(_) => "filter",
-            StepOp::SortData(_) => "sort",
-            StepOp::DedupData(_) => "dedup",
-            StepOp::MergeData(_) => "merge",
-            StepOp::SplitData(_) => "split",
-            StepOp::Base64Data(_) => "base64",
+            StepOp::Http(_) => "http",
+            StepOp::Js(_) => "js",
+            StepOp::Filter(_) => "filter",
+            StepOp::Sort(_) => "sort",
+            StepOp::Dedup(_) => "dedup",
+            StepOp::Merge(_) => "merge",
+            StepOp::Split(_) => "split",
+            StepOp::Base64(_) => "base64",
             StepOp::Noop => "noop",
-            StepOp::VarOutput(_) => "var",
-            StepOp::FileReader(_) => "file",
-            StepOp::CommandRun(_) => "command",
-            StepOp::LlmClient(_) => "llm",
-            StepOp::ForkFlow(_) => "fork",
+            StepOp::Var(_) => "var",
+            StepOp::File(_) => "file",
+            StepOp::Command(_) => "command",
+            StepOp::Llm(_) => "llm",
+            StepOp::Fork(_) => "fork",
+        }
+    }
+
+    pub fn iterate(&self) -> Option<&IterateConfig> {
+        match self {
+            StepOp::Http(i) => i.iterate.as_ref(),
+            StepOp::Filter(i) => i.iterate.as_ref(),
+            StepOp::Llm(i) => i.iterate.as_ref(),
+            _ => None,
         }
     }
 }
@@ -75,6 +71,8 @@ pub struct HttpInputs {
     pub headers: Option<HashMap<String, RefValue>>,
     #[serde(default)]
     pub body: Option<RefValue>,
+    #[serde(default)]
+    pub iterate: Option<IterateConfig>,
 }
 
 /// JS 算子的 code 字段在 inputs.code 中。
@@ -82,16 +80,22 @@ pub struct HttpInputs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsInputs {
     pub code: String,
+    #[serde(default)]
+    pub data: Option<RefValue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilterInputs {
+    #[serde(default)]
+    pub data: Option<RefValue>,
     #[serde(default = "default_filter_operator")]
     pub operator: String,
     #[serde(default)]
     pub field: Option<String>,
     #[serde(default)]
     pub value: Option<RefValue>,
+    #[serde(default)]
+    pub iterate: Option<IterateConfig>,
 }
 
 fn default_filter_operator() -> String {
@@ -100,6 +104,8 @@ fn default_filter_operator() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SortInputs {
+    #[serde(default)]
+    pub data: Option<RefValue>,
     #[serde(default)]
     pub field: Option<String>,
     #[serde(default = "default_sort_order")]
@@ -113,6 +119,8 @@ fn default_sort_order() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DedupInputs {
     #[serde(default)]
+    pub data: Option<RefValue>,
+    #[serde(default)]
     pub field: Option<String>,
 }
 
@@ -125,6 +133,8 @@ pub struct MergeInputs {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SplitInputs {
+    #[serde(default)]
+    pub data: Option<RefValue>,
     #[serde(default = "default_split_size")]
     pub size: u32,
 }
@@ -135,6 +145,8 @@ fn default_split_size() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Base64Inputs {
+    #[serde(default)]
+    pub data: Option<RefValue>,
     #[serde(default)]
     pub mode: Option<String>,
 }
@@ -173,6 +185,8 @@ pub struct LlmInputs {
     pub temperature: Option<f64>,
     #[serde(default)]
     pub skip_vision_check: Option<bool>,
+    #[serde(default)]
+    pub iterate: Option<IterateConfig>,
 }
 
 fn default_max_tokens() -> u64 {

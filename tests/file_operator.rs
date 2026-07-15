@@ -48,13 +48,13 @@ steps:
     type: js
     inputs:
       data: "{{read.output}}"
-    code: |
-      function run(input) {{
-        return {{
-          has_base64: typeof input.data_base64 === "string",
-          length: input.data_base64 ? input.data_base64.length : 0
-        }};
-      }}
+      code: |
+        function run(data) {{
+          return {{
+            has_base64: typeof data.data_base64 === "string",
+            length: data.data_base64 ? data.data_base64.length : 0
+          }};
+        }}
 output: "{{check.output}}"
 "#
     );

@@ -10,14 +10,14 @@ use std::io::Write;
 
 #[test]
 fn code_template_basic() {
-    // 纯 JS（无模板引用），验证正常运行
     let yaml2 = r#"
 name: no_template
 steps:
   - id: greet
     type: js
-    code: |
-      function run(input) { return { msg: "hello" }; }
+    inputs:
+      code: |
+        function run(data) { return { msg: "hello" }; }
 output: "{greet.output}"
 "#;
     let result = run_yaml(yaml2, HashMap::new()).expect("run");
@@ -30,27 +30,25 @@ fn code_template_with_file() {
     f.write_all(b"function greet(name) { return 'Hi, ' + name; }").expect("write");
     let path = f.path().to_string_lossy().to_string();
 
-    let yaml = format!(
-        r#"
+    let yaml = r#"
 name: code_template_file
 steps:
   - id: load_util
     type: file
     inputs:
-      path: "{path}"
+      path: "PATH_PLACEHOLDER"
   - id: use_util
     type: js
     inputs:
-      data: "{{load_util.output}}"
-    code: |
-      {{{{load_util.output}}}}
+      data: "{load_util.output}"
+      code: |
+        {{load_util.output}}
 
-      function run(input) {{
-        return {{ msg: greet('Weave') }};
-      }}
-output: "{{use_util.output}}"
-"#
-    );
+        function run(data) {
+          return { msg: greet('Weave') };
+        }
+output: "{use_util.output}"
+"#.replace("PATH_PLACEHOLDER", &path);
     let result = run_yaml(&yaml, HashMap::new()).expect("run");
     assert_eq!(result["msg"], json!("Hi, Weave"));
 }
@@ -63,18 +61,20 @@ steps:
   - id: util_code
     type: var
     inputs:
-      code: |
-        function add(a, b) {
-          return a + b;
-        }
+      value:
+        code: |
+          function add(a, b) {
+            return a + b;
+          }
   - id: use_util
     type: js
-    code: |
-      {{util_code.output.code}}
+    inputs:
+      code: |
+        {{util_code.output.value.code}}
 
-      function run(input) {
-        return { sum: add(1, 2) };
-      }
+        function run(data) {
+          return { sum: add(1, 2) };
+        }
 output: "{use_util.output}"
 "#;
     let result = run_yaml(yaml, HashMap::new()).expect("run");
@@ -89,31 +89,29 @@ fn js_binary_from_file_has_base64() {
     f.write_all(b"\x00\xFF\x42\x00\x7F").expect("write");
     let path = f.path().to_string_lossy().to_string();
 
-    let yaml = format!(
-        r#"
+    let yaml = r#"
 name: file_binary_js
 steps:
   - id: read
     type: file
     inputs:
-      path: "{path}"
+      path: "PATH_PLACEHOLDER"
   - id: check
     type: js
     inputs:
-      data: "{{read.output}}"
-    code: |
-      function run(input) {{
-        var decoded = __native__.atob(input.data_base64);
-        return {{
-          has_base64: typeof input.data_base64 === "string",
-          bytes_len: decoded.length,
-          byte0: decoded[0],
-          byte1: decoded[1]
-        }};
-      }}
-output: "{{check.output}}"
-"#
-    );
+      data: "{read.output}"
+      code: |
+        function run(data) {
+          var decoded = __native__.atob(data.data_base64);
+          return {
+            has_base64: typeof data.data_base64 === "string",
+            bytes_len: decoded.length,
+            byte0: decoded[0],
+            byte1: decoded[1]
+          };
+        }
+output: "{check.output}"
+"#.replace("PATH_PLACEHOLDER", &path);
     let result = run_yaml(&yaml, HashMap::new()).expect("run");
     assert_eq!(result["has_base64"], json!(true));
     assert_eq!(result["bytes_len"], json!(5));
@@ -135,31 +133,30 @@ fn js_native_inflate() {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&compressed);
 
-    let yaml = format!(
-        r#"
+    let yaml = r#"
 name: js_inflate
 steps:
   - id: setup
     type: var
     inputs:
-      b64: "{b64}"
+      value:
+        b64: "B64_PLACEHOLDER"
   - id: inflate_test
     type: js
     inputs:
-      data: "{{setup.output}}"
-    code: |
-      function run(input) {{
-        var raw = __native__.atob(input.data.b64);
-        var decompressed = __native__.inflate(raw);
-        var s = "";
-        for (var i = 0; i < decompressed.length; i++) {{
-          s += String.fromCharCode(decompressed[i]);
-        }}
-        return {{ text: s }};
-      }}
-output: "{{inflate_test.output}}"
-"#
-    );
+      data: "{setup.output}"
+      code: |
+        function run(data) {
+          var raw = __native__.atob(data.value.b64);
+          var decompressed = __native__.inflate(raw);
+          var s = "";
+          for (var i = 0; i < decompressed.length; i++) {
+            s += String.fromCharCode(decompressed[i]);
+          }
+          return { text: s };
+        }
+output: "{inflate_test.output}"
+"#.replace("B64_PLACEHOLDER", &b64);
     let result = run_yaml(&yaml, HashMap::new()).expect("run");
     assert_eq!(result["text"], json!("Hello, weave!"));
 }
@@ -171,17 +168,18 @@ name: js_b64_roundtrip
 steps:
   - id: r
     type: js
-    code: |
-      function run() {
-        var original = "Hello, QuickJS!";
-        var bytes = [];
-        for (var i = 0; i < original.length; i++) bytes.push(original.charCodeAt(i));
-        var encoded = __native__.btoa(bytes);
-        var decoded = __native__.atob(encoded);
-        var restored = "";
-        for (var i = 0; i < decoded.length; i++) restored += String.fromCharCode(decoded[i]);
-        return { encoded: encoded, restored: restored };
-      }
+    inputs:
+      code: |
+        function run() {
+          var original = "Hello, QuickJS!";
+          var bytes = [];
+          for (var i = 0; i < original.length; i++) bytes.push(original.charCodeAt(i));
+          var encoded = __native__.btoa(bytes);
+          var decoded = __native__.atob(encoded);
+          var restored = "";
+          for (var i = 0; i < decoded.length; i++) restored += String.fromCharCode(decoded[i]);
+          return { encoded: encoded, restored: restored };
+        }
 output: "{r.output}"
 "#;
     let result = run_yaml(yaml, HashMap::new()).expect("run");

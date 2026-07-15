@@ -26,10 +26,7 @@ steps:                      # 必填，至少 1 步
       max_workers: 4
       batch:
         size: 100
-    inputs:                  # 算子输入
-      key: value
-    code: |                  # 仅 type="js" 时可用，内联 JS 源码
-      function run(input) { ... }
+    inputs:                  # 算子输入（JS 的 code 字段也在内）
     cache: true
     retry:
       max_attempts: 3
@@ -72,8 +69,7 @@ slots:
 | `type` | string | ✓ | — | 算子类型（内置名 或 `"js"`） |
 | `after` | string[] | — | — | 顺序依赖（不需要数据） |
 | `iterate` | object | — | — | 迭代配置（step 根级） |
-| `inputs` | object | — | — | 算子输入 |
-| `code` | string | — | — | 内联 JS 源码（`type="js"` 时） |
+| `inputs` | object | — | — | 算子输入（JS 算子的 `code` 字段也在此） |
 | `cache` | bool | — | 算子默认 | 是否启用缓存 |
 | `retry` | object | — | — | 重试策略 |
 | `timeout` | u64 | — | — | 超时秒数 |
@@ -116,18 +112,18 @@ slots:
 
 ### 内联 JS（`type: js`）
 
-无需预注册，直接在 DSL 中写 JS 源码：
+无需预注册，直接在 DSL 中写 JS 源码。`code` 字段写在 `inputs` 内部：
 
 ```yaml
 - id: custom_filter
   type: js
-  code: |
-    function run(input) {
-      return input.data.filter(function(o) {
-        return o.status === 'paid';
-      });
-    }
   inputs:
+    code: |
+      function run(input) {
+        return input.data.filter(function(o) {
+          return o.status === 'paid';
+        });
+      }
     data: "{slots.orders}"
 ```
 
@@ -149,7 +145,13 @@ slots:
 | `base64` | Base64 编解码 | ✅ |
 | `noop` | 直接返回输入（测试用） | ✅ |
 | `var` | 变量占位——接受任意 inputs 原样输出 | ✅ |
-| `js` | 内联 QuickJS 沙箱（`code` 字段） | ✅ |
+| `file` | 读取本地文件或远程 URL | ✅ |
+| `command` | 执行 Shell 命令 | ✅ |
+| `llm` | OpenAI 兼容的 LLM 推理 | ✅ |
+| `js` | 内联 QuickJS 沙箱（`code` 字段写入 `inputs` 内） | ✅ |
+| `fork` | 并行多路分发，按分支 id 或数组聚合结果 | ✅ |
+
+各算子的输入字段、默认值、配置示例详见 [operators.md](operators.md)。
 
 ## 校验
 
@@ -204,14 +206,14 @@ steps:
 
   - id: enrich
     type: js
-    code: |
-      function run(input) {
-        return input.data.map(function(record) {
-          record.processed = true;
-          return record;
-        });
-      }
     inputs:
+      code: |
+        function run(input) {
+          return input.data.map(function(record) {
+            record.processed = true;
+            return record;
+          });
+        }
       data: "{filter_adults.output}"
 
   - id: upload

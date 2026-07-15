@@ -55,7 +55,7 @@ output: "{fetch.output}"
         assert_eq!(def.steps[0].id, "fetch");
         assert_eq!(def.steps[0].op.op_type(), "http");
         assert!(matches!(def.output, RefValue::Ref(_)));
-        let StepOp::HttpClient(ref inputs) = def.steps[0].op else { panic!("expected http") };
+        let StepOp::Http(ref inputs) = def.steps[0].op else { panic!("expected http") };
         assert!(matches!(inputs.url, RefValue::Ref(_)));
     }
 
@@ -65,17 +65,17 @@ output: "{fetch.output}"
 name: iterate_demo
 steps:
   - id: process
-    type: var
-    iterate:
-      over: "{slots.data}"
-      as: "item"
-      max_workers: 8
+    type: http
     inputs:
-      value: "{item}"
+      url: "{slots.data}"
+      iterate:
+        over: "{slots.data}"
+        as: "item"
+        max_workers: 8
 output: "{process.output}"
 "#;
         let def = parse(yaml).unwrap();
-        let iter = def.steps[0].iterate.as_ref().unwrap();
+        let iter = def.steps[0].op.iterate().unwrap();
         assert_eq!(iter.over.parts, vec!["slots", "data"]);
         assert_eq!(iter.as_name, "item");
         assert_eq!(iter.max_workers, Some(8));
@@ -143,7 +143,7 @@ steps:
 output: done
 "#;
         let def = parse(yaml).unwrap();
-        let StepOp::VarOutput(ref v) = def.steps[0].op else { panic!("expected var") };
+        let StepOp::Var(ref v) = def.steps[0].op else { panic!("expected var") };
         assert!(matches!(v.value, Some(RefValue::Literal(_))));
         assert!(matches!(def.output, RefValue::Literal(_)));
     }

@@ -16,8 +16,9 @@ steps:
   - id: s1
     type: var
     inputs:
-      key: "{env.WEAVE_TEST_ENV}"
-output: "{s1.output}"
+      value:
+        key: "{env.WEAVE_TEST_ENV}"
+output: "{s1.output.value}"
 "#;
     let result = run_yaml(yaml, HashMap::new()).expect("run");
     assert_eq!(result["key"], json!("env_val"));

@@ -11,7 +11,7 @@ pub fn resolve_inputs(
     scope: &Scope,
     step: &crate::dsl::StepDef,
 ) -> WeaveResult<(Vec<u8>, Value)> {
-    let as_name = step.iterate.as_ref().map(|c| c.as_name.as_str());
+    let as_name = step.op.iterate().map(|c| c.as_name.as_str());
 
     // 将 step.op 序列化为 Value，然后递归解析其中的 RefValue
     let op_value = serde_json::to_value(&step.op)
@@ -39,11 +39,22 @@ fn resolve_value_tree(
                     return Ok((vec![], Value::String(format!("{{{}}}", path.parts.join(".")))));
                 }
                 let bytes = resolve_ref(scope, &path)?;
-                return Ok((bytes, Value::Null));
+                let v = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                    Value::String(String::from_utf8_lossy(&bytes).into_owned())
+                });
+                return Ok((bytes, v));
             }
 
             if map.len() == 1 && map.contains_key("Literal") {
-                return Ok((vec![], map["Literal"].clone()));
+                let lit = &map["Literal"];
+                let (d, resolved) = resolve_value_tree(scope, lit, as_name)?;
+                let data = if resolved.is_null() {
+                    vec![]
+                } else {
+                    serde_json::to_vec(&resolved).unwrap_or_default()
+                };
+                let data = if d.is_empty() { data } else { d };
+                return Ok((data, resolved));
             }
 
             // 顶层对象：特殊处理 "inputs" / "data" key
@@ -70,9 +81,8 @@ fn resolve_value_tree(
                 let (d, resolved) = resolve_value_tree(scope, v, as_name)?;
                 if k == "data" {
                     data = d;
-                } else {
-                    config_map.insert(k.clone(), resolved);
                 }
+                config_map.insert(k.clone(), resolved);
             }
             Ok((data, Value::Object(config_map)))
         }

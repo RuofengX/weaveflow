@@ -15,15 +15,16 @@ steps:
   - id: src
     type: var
     inputs:
-      items:
-        - { x: 3, k: "c" }
-        - { x: 1, k: "a" }
-        - { x: 2, k: "c" }
-        - { x: 5, k: "b" }
+      value:
+        items:
+          - { x: 3, k: "c" }
+          - { x: 1, k: "a" }
+          - { x: 2, k: "c" }
+          - { x: 5, k: "b" }
   - id: flt
     type: filter
     inputs:
-      data: "{src.output.items}"
+      data: "{src.output.value.items}"
       field: "x"
       operator: "gte"
       value: 2

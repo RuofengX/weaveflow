@@ -15,10 +15,11 @@ steps:
   - id: s1
     type: var
     inputs:
-      result:
-        data:
-          count: 42
-output: "{s1.output.result.data.count}"
+      value:
+        result:
+          data:
+            count: 42
+output: "{s1.output.value.result.data.count}"
 "#;
     let result = run_yaml(yaml, HashMap::new()).expect("run");
     assert_eq!(result, json!(42));

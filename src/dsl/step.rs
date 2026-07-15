@@ -4,14 +4,11 @@ use super::retry::RetryDef;
 use super::step_op::StepOp;
 use super::variable::VariablePath;
 
-/// 单个执行步骤的定义 —— 共享字段在 StepDef，算子专属 inputs 在 StepOp。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepDef {
     pub id: String,
     #[serde(default)]
     pub after: Option<Vec<String>>,
-    #[serde(default)]
-    pub iterate: Option<IterateConfig>,
     pub cache: Option<bool>,
     pub retry: Option<RetryDef>,
     pub timeout: Option<u64>,

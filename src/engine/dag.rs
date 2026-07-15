@@ -57,11 +57,11 @@ impl Dag {
 
         for step in &def.steps {
             let deps = extract_output_refs_from_step(step, &step_ids);
-            let iterate_deps = step.iterate.as_ref()
+            let iterate_deps = step.op.iterate()
                 .map(|cfg| extract_refs_from_path(&cfg.over, &step_ids))
                 .unwrap_or_default();
             let code_deps = match &step.op {
-                StepOp::JsScript(inputs) => extract_code_template_deps(&inputs.code, &step_ids),
+                StepOp::Js(inputs) => extract_code_template_deps(&inputs.code, &step_ids),
                 _ => vec![],
             };
             let all_deps: Vec<String> = deps.into_iter()
@@ -251,7 +251,6 @@ mod tests {
         StepDef {
             id: id.into(),
             after: if after.is_empty() { None } else { Some(after.into_iter().map(|s| s.into()).collect()) },
-            iterate: None,
             cache: None,
             retry: None,
             timeout: None,
@@ -352,11 +351,10 @@ mod tests {
         let s_e = StepDef {
             id: "e".into(),
             after: None,
-            iterate: None,
             cache: None,
             retry: None,
             timeout: None,
-            op: StepOp::VarOutput(step_op::VarInputs {
+            op: StepOp::Var(step_op::VarInputs {
                 value: Some(RefValue::Ref(VariablePath::parse("{d.output.items}").unwrap())),
             }),
         };
@@ -373,15 +371,15 @@ mod tests {
         let s_b = StepDef {
             id: "b".into(),
             after: None,
-            iterate: None,
             cache: None,
             retry: None,
             timeout: None,
-            op: StepOp::HttpClient(step_op::HttpInputs {
+            op: StepOp::Http(step_op::HttpInputs {
                 url: RefValue::Ref(VariablePath::parse("{a.output.url}").unwrap()),
                 method: None,
                 headers: None,
                 body: None,
+                iterate: None,
             }),
         };
         let p = make_pipeline(vec![step("a", vec![]), s_b]);

@@ -19,7 +19,7 @@ pub fn temp_db() -> (Database, tempfile::TempDir) {
 }
 
 pub fn run_yaml(yaml: &str, slots: HashMap<String, Value>) -> WeaveResult<Value> {
-    let def = parse(yaml).expect("parse");
+    let def = parse(yaml)?;
     let report = validate(&def, &ValidateOptions::default());
     assert!(report.is_ok(), "validation: {:?}", report.errors);
 

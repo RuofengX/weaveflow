@@ -6,6 +6,7 @@
 //! Run: cargo bench
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -20,6 +21,24 @@ use weave::store::Database;
 use weave::tracker::{LayerInfo, TaskId, TaskTracker};
 
 const DATA_SIZE: usize = 2_000;
+
+/// 生命周期托管临时目录：Drop 时自动清理。
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(prefix: &str) -> Self {
+        let n = std::process::id();
+        let path = std::env::temp_dir().join(format!("weave-bench-{prefix}-{n}"));
+        let _ = std::fs::create_dir_all(&path);
+        TempDir(path)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 fn generate_orders(n: usize) -> Vec<serde_json::Value> {
     let statuses = ["paid", "pending", "paid", "cancelled", "paid"];
@@ -75,11 +94,11 @@ steps:
       order: desc
   - id: iterate_filter
     type: filter
-    iterate:
-      over: "{{sort_by_total.output}}"
-      as: "item"
-      {batch}
     inputs:
+      iterate:
+        over: "{{sort_by_total.output}}"
+        as: "item"
+        {batch}
       data: "{{item}}"
       field: status
       operator: eq
@@ -107,11 +126,11 @@ fn build_inline_js_pipeline() -> String {
 steps:
   - id: f
     type: js
-    code: |
-      function run(input) {
-        return input.data.filter(function(o) { return o.status === 'paid'; });
-      }
     inputs:
+      code: |
+        function run(data) {
+          return data.filter(function(o) { return o.status === 'paid'; });
+        }
       data: "{slots.orders}"
 output: "{f.output}""#
     .to_string()
@@ -120,24 +139,23 @@ output: "{f.output}""#
 fn build_parallel_pipeline() -> String {
     r#"name: parallel_ops
 steps:
-  - id: f1
-    type: filter
+  - id: obj_a
+    type: var
     inputs:
-      data: "{slots.orders}"
-      field: status
-      operator: eq
-      value: "paid"
-  - id: sorted
-    type: sort
+      value:
+        x: 1
+        name: "alpha"
+  - id: obj_b
+    type: var
     inputs:
-      data: "{slots.orders}"
-      field: total
-      order: desc
+      value:
+        y: 2
+        version: 3
   - id: merged
     type: merge
     inputs:
-      a: "{f1.output}"
-      b: "{sorted.output}"
+      a: "{obj_a.output}"
+      b: "{obj_b.output}"
 output: "{merged.output}""#
     .to_string()
 }
@@ -173,7 +191,7 @@ steps:
   - id: v
     type: var
     inputs:
-      payload: "{slots.orders}"
+      value: "{slots.orders}"
 output: "{v.output}""#
     .to_string()
 }
@@ -211,19 +229,19 @@ fn setup(
 fn run_once(
     rt: &tokio::runtime::Runtime,
     def: &weave::dsl::PipelineDef,
-    db: Arc<Mutex<Database>>,
+    db: &Arc<Mutex<Database>>,
     slots: HashMap<String, serde_json::Value>,
 ) -> usize {
-    let (runner, task_id, slots) = setup(rt, def, db, slots);
+    let (runner, task_id, slots) = setup(rt, def, db.clone(), slots);
     let result = rt.block_on(runner.run(task_id, slots)).expect("run");
     result.len()
 }
 
-fn fresh_db(prefix: &str, counter: &AtomicUsize) -> Arc<Mutex<Database>> {
+fn fresh_db(tmpdir: &TempDir, prefix: &str, counter: &AtomicUsize) -> (Arc<Mutex<Database>>, PathBuf) {
     let n = counter.fetch_add(1, Ordering::Relaxed);
-    let tmp = std::env::temp_dir().join(format!("weave-bench-{prefix}-{n}"));
-    let _ = std::fs::create_dir_all(&tmp);
-    Arc::new(Mutex::new(Database::open(tmp.join("weave.redb")).expect("open db")))
+    let dir = tmpdir.0.join(format!("{prefix}-{n}"));
+    let _ = std::fs::create_dir_all(&dir);
+    (Arc::new(Mutex::new(Database::open(dir.join("weave.redb")).expect("open db"))), dir)
 }
 
 // ── Benchmarks ───────────────────────────────────────────────────────────
@@ -231,12 +249,13 @@ fn fresh_db(prefix: &str, counter: &AtomicUsize) -> Arc<Mutex<Database>> {
 fn bench_iterate_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("iterate_batch");
     group.sample_size(10);
-    group.warm_up_time(Duration::from_secs(10));
-    group.measurement_time(Duration::from_secs(20));
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(5));
     let orders = generate_orders(DATA_SIZE);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut slots = HashMap::new();
     slots.insert("orders".into(), json!(orders));
+    let tmpdir = TempDir::new("iter");
 
     for &bs in &[Some(100), Some(200), Some(500), None] {
         let label = bs.map(|n| format!("batch_size_{n}")).unwrap_or_else(|| "batch_none".into());
@@ -246,17 +265,19 @@ fn bench_iterate_batch(c: &mut Criterion) {
         let counter = AtomicUsize::new(0);
         group.bench_function(format!("{label}_miss"), |b| {
             b.iter(|| {
-                let db = fresh_db(&format!("m-{label}"), &counter);
-                let n = run_once(&rt, &def, db, slots.clone());
+                let (db, dir) = fresh_db(&tmpdir, &format!("m-{label}"), &counter);
+                let n = run_once(&rt, &def, &db, slots.clone());
+                drop(db);
+                let _ = std::fs::remove_dir_all(&dir);
                 black_box(n);
             })
         });
 
-        let db = fresh_db(&format!("h-{label}"), &AtomicUsize::new(0));
-        run_once(&rt, &def, db.clone(), slots.clone());
+        let (db_hit, _dir_hit) = fresh_db(&tmpdir, &format!("h-{label}"), &AtomicUsize::new(0));
+        run_once(&rt, &def, &db_hit, slots.clone());
         group.bench_function(format!("{label}_hit"), |b| {
             b.iter(|| {
-                let n = run_once(&rt, &def, db.clone(), slots.clone());
+                let n = run_once(&rt, &def, &db_hit, slots.clone());
                 black_box(n);
             })
         });
@@ -273,6 +294,7 @@ fn bench_builtin_vs_js(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut slots = HashMap::new();
     slots.insert("orders".into(), json!(orders));
+    let tmpdir = TempDir::new("bvj");
 
     let yaml_builtin = build_single_filter_pipeline();
     let def_builtin = parse(&yaml_builtin).expect("parse");
@@ -280,17 +302,19 @@ fn bench_builtin_vs_js(c: &mut Criterion) {
 
     group.bench_function("filter_builtin_miss", |b| {
         b.iter(|| {
-            let db = fresh_db("bm", &counter);
-            let n = run_once(&rt, &def_builtin, db, slots.clone());
+            let (db, dir) = fresh_db(&tmpdir, "bm", &counter);
+            let n = run_once(&rt, &def_builtin, &db, slots.clone());
+            drop(db);
+            let _ = std::fs::remove_dir_all(&dir);
             black_box(n);
         })
     });
 
-    let db = fresh_db("bh", &AtomicUsize::new(0));
-    run_once(&rt, &def_builtin, db.clone(), slots.clone());
+    let (db_hit, _dir_hit) = fresh_db(&tmpdir, "bh", &AtomicUsize::new(0));
+    run_once(&rt, &def_builtin, &db_hit, slots.clone());
     group.bench_function("filter_builtin_hit", |b| {
         b.iter(|| {
-            let n = run_once(&rt, &def_builtin, db.clone(), slots.clone());
+            let n = run_once(&rt, &def_builtin, &db_hit, slots.clone());
             black_box(n);
         })
     });
@@ -301,17 +325,19 @@ fn bench_builtin_vs_js(c: &mut Criterion) {
 
     group.bench_function("filter_inline_js_miss", |b| {
         b.iter(|| {
-            let db = fresh_db("jm", &counter2);
-            let n = run_once(&rt, &def_js, db, slots.clone());
+            let (db, dir) = fresh_db(&tmpdir, "jm", &counter2);
+            let n = run_once(&rt, &def_js, &db, slots.clone());
+            drop(db);
+            let _ = std::fs::remove_dir_all(&dir);
             black_box(n);
         })
     });
 
-    let db_js = fresh_db("jh", &AtomicUsize::new(0));
-    run_once(&rt, &def_js, db_js.clone(), slots.clone());
+    let (db_js, _dir_js) = fresh_db(&tmpdir, "jh", &AtomicUsize::new(0));
+    run_once(&rt, &def_js, &db_js, slots.clone());
     group.bench_function("filter_inline_js_hit", |b| {
         b.iter(|| {
-            let n = run_once(&rt, &def_js, db_js.clone(), slots.clone());
+            let n = run_once(&rt, &def_js, &db_js, slots.clone());
             black_box(n);
         })
     });
@@ -328,6 +354,7 @@ fn bench_operator_chain(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut slots = HashMap::new();
     slots.insert("items".into(), json!(items));
+    let tmpdir = TempDir::new("chain");
 
     let yaml = build_chained_pipeline();
     let def = parse(&yaml).expect("parse");
@@ -335,8 +362,10 @@ fn bench_operator_chain(c: &mut Criterion) {
     let counter = AtomicUsize::new(0);
     group.bench_function("chain_filter_sort_dedup", |b| {
         b.iter(|| {
-            let db = fresh_db("chain", &counter);
-            let n = run_once(&rt, &def, db, slots.clone());
+            let (db, dir) = fresh_db(&tmpdir, "chain", &counter);
+            let n = run_once(&rt, &def, &db, slots.clone());
+            drop(db);
+            let _ = std::fs::remove_dir_all(&dir);
             black_box(n);
         })
     });
@@ -349,10 +378,9 @@ fn bench_parallel_layer(c: &mut Criterion) {
     group.sample_size(20);
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(5));
-    let orders = generate_orders(DATA_SIZE);
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let mut slots = HashMap::new();
-    slots.insert("orders".into(), json!(orders));
+    let slots = HashMap::new();
+    let tmpdir = TempDir::new("par");
 
     let yaml = build_parallel_pipeline();
     let def = parse(&yaml).expect("parse");
@@ -360,8 +388,10 @@ fn bench_parallel_layer(c: &mut Criterion) {
     let counter = AtomicUsize::new(0);
     group.bench_function("parallel_filter_sort_merge", |b| {
         b.iter(|| {
-            let db = fresh_db("par", &counter);
-            let n = run_once(&rt, &def, db, slots.clone());
+            let (db, dir) = fresh_db(&tmpdir, "par", &counter);
+            let n = run_once(&rt, &def, &db, slots.clone());
+            drop(db);
+            let _ = std::fs::remove_dir_all(&dir);
             black_box(n);
         })
     });
@@ -377,6 +407,7 @@ fn bench_var_passthrough(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut slots = HashMap::new();
     slots.insert("orders".into(), json!(orders));
+    let tmpdir = TempDir::new("var");
 
     let yaml = build_var_passthrough_pipeline();
     let def = parse(&yaml).expect("parse");
@@ -384,8 +415,10 @@ fn bench_var_passthrough(c: &mut Criterion) {
 
     group.bench_function("var_json_roundtrip", |b| {
         b.iter(|| {
-            let db = fresh_db("var", &counter);
-            let n = run_once(&rt, &def, db, slots.clone());
+            let (db, dir) = fresh_db(&tmpdir, "var", &counter);
+            let n = run_once(&rt, &def, &db, slots.clone());
+            drop(db);
+            let _ = std::fs::remove_dir_all(&dir);
             black_box(n);
         })
     });

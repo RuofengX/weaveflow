@@ -26,7 +26,7 @@ pub async fn execute_step(
     let (data, config) = resolve_inputs(scope, step)?;
     let op: Box<dyn Operator> = resolve_operator(step, scope)?;
 
-    if let Some(ref cfg) = step.iterate {
+    if let Some(ref cfg) = step.op.iterate() {
         let over_bytes = resolve_ref(scope, &cfg.over)?;
         let mut hasher = Sha256::new();
         hasher.update(step.op.op_type().as_bytes());
@@ -84,7 +84,7 @@ pub async fn execute_step_static(
     let (data, config) = resolve_inputs(scope, step)?;
     let op: Box<dyn Operator> = resolve_operator(step, scope)?;
 
-    if step.iterate.is_some() {
+    if step.op.iterate().is_some() {
         return Err(WeaveError::Internal(
             "iterate not supported in parallel layer".into(),
         ));
@@ -145,7 +145,7 @@ pub fn resolve_operator(
     step: &StepDef,
     scope: &Scope,
 ) -> WeaveResult<Box<dyn Operator>> {
-    if let StepOp::JsScript(ref inputs) = step.op {
+    if let StepOp::Js(ref inputs) = step.op {
         let code = resolve_code_templates(&inputs.code, scope)?;
         return Ok(Box::new(JsOperator {
             name: step.id.clone(),
