@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use tracing::{debug, info};
 
 use super::meta::TaskId;
 use super::state::{Progress, StepProgress, StepState, TaskStatus, LayerInfo};
@@ -62,6 +63,7 @@ impl TaskTracker {
         step_ids: Vec<String>,
         layers: Vec<LayerInfo>,
     ) -> (tokio::sync::broadcast::Receiver<Vec<u8>>, TaskSnapshot) {
+        debug!(task_id = %task_id, pipeline = %pipeline_name, steps = step_ids.len(), "tracker create");
         let progress = Progress::from_step_ids(&step_ids);
         let status = TaskStatus::Running(progress.clone());
         let (tx, rx) = tokio::sync::broadcast::channel(64);
@@ -96,6 +98,7 @@ impl TaskTracker {
 
     /// 更新单个 step 的状态，并广播。
     pub async fn update_step(&self, task_id: &TaskId, step_id: &str, state: StepState) {
+        debug!(task_id = %task_id, step = %step_id, state = ?state, "tracker update_step");
         let mut runs = self.runs.lock().unwrap();
         if let Some(run) = runs.get_mut(task_id) {
             if let Some(step) = run.progress.step_mut(step_id) {
@@ -120,6 +123,7 @@ impl TaskTracker {
 
     /// 标记 task 完成。
     pub async fn complete(&self, task_id: &TaskId, output: serde_json::Value) {
+        info!(task_id = %task_id, "tracker complete");
         let mut runs = self.runs.lock().unwrap();
         if let Some(run) = runs.get_mut(task_id) {
             run.status = TaskStatus::Completed(output);
@@ -130,6 +134,7 @@ impl TaskTracker {
 
     /// 标记 task 失败。
     pub async fn fail(&self, task_id: &TaskId, error: String) {
+        info!(task_id = %task_id, %error, "tracker fail");
         let mut runs = self.runs.lock().unwrap();
         if let Some(run) = runs.get_mut(task_id) {
             run.status = TaskStatus::Failed(error);

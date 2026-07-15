@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use tracing::debug;
 
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
@@ -19,6 +20,7 @@ impl Operator for JsOperator {
         data: &Value,
         config: &Value,
     ) -> Result<Value, OperatorError> {
+        debug!(name = %self.name, "js operator");
         let timeout = config.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30_000);
 
         let result = tokio::time::timeout(

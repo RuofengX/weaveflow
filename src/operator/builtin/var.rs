@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use tracing::trace;
 
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
@@ -17,6 +18,7 @@ impl Operator for VarOperator {
         _data: &Value,
         config: &Value,
     ) -> Result<Value, OperatorError> {
+        trace!("var operator (passthrough)");
         Ok(config.clone())
     }
 }

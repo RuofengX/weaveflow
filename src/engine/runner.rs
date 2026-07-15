@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::dsl::{PipelineDef, RefValue};
 use crate::engine::dag::Dag;
@@ -56,6 +56,15 @@ pub async fn run_inner(
     slots: HashMap<String, Value>,
 ) -> WeaveResult<Vec<u8>> {
     let mut slots = slots;
+
+    info!(
+        pipeline = %pipeline.name,
+        task_id = %task_id,
+        steps = pipeline.steps.len(),
+        slots_count = pipeline.slots.len(),
+        "pipeline run started"
+    );
+
     for slot_def in &pipeline.slots {
         if !slots.contains_key(&slot_def.name) {
             match slot_def.schema.get("default") {
@@ -105,6 +114,7 @@ pub async fn run_inner(
     }
 
     // Rules validation
+    debug!(rules = pipeline.rules.len(), "evaluating rules");
     for rule in &pipeline.rules {
         let op = crate::engine::step::resolve_rule_operator(rule, None)?;
         let rule_config = rule
@@ -156,6 +166,8 @@ pub async fn run_inner(
                 WeaveError::Internal(format!("step {step_id} not found in DAG"))
             })?;
 
+            debug!(step = %step_id, op = %step_def.op.op_type(), "executing step");
+
             let started_at = chrono::Utc::now().timestamp_millis();
             tracker
                 .update_step(
@@ -178,6 +190,9 @@ pub async fn run_inner(
             .await
             {
                 Ok(output) => {
+                    let completed_at = chrono::Utc::now().timestamp_millis();
+                    let duration_ms = (completed_at - started_at) as u64;
+                    info!(step = %step_id, duration_ms, "step completed");
                     scope.set_output(step_id, output.clone());
                     {
                         let db_lock = db.lock().await;
@@ -190,6 +205,7 @@ pub async fn run_inner(
                         );
                     }
                     let completed_at = chrono::Utc::now().timestamp_millis();
+                    let duration_ms = (completed_at - started_at) as u64;
                     tracker
                         .update_step(
                             &task_id,
@@ -199,12 +215,13 @@ pub async fn run_inner(
                                 completed_at,
                                 attempts: 1,
                                 cached: false,
-                                duration_ms: (completed_at - started_at) as u64,
+                                duration_ms,
                             },
                         )
                         .await;
                 }
                 Err(e) => {
+                    error!(step = %step_id, error = %e, "step failed");
                     let now = chrono::Utc::now().timestamp_millis();
                     tracker
                         .update_step(
@@ -225,6 +242,7 @@ pub async fn run_inner(
         }
 
         let mut futures = Vec::new();
+        debug!(layer_steps = ?layer, "executing parallel layer");
         for step_id in layer {
             let sd = dag
                 .step(step_id)
@@ -265,6 +283,9 @@ pub async fn run_inner(
         for (step_id, started_at, result) in results {
             match result {
                 Ok(output) => {
+                    let completed_at = chrono::Utc::now().timestamp_millis();
+                    let duration_ms = (completed_at - started_at) as u64;
+                    debug!(step = %step_id, duration_ms, "parallel step completed");
                     scope.set_output(&step_id, output.clone());
                     {
                         let db_lock = db.lock().await;
@@ -277,6 +298,7 @@ pub async fn run_inner(
                         );
                     }
                     let completed_at = chrono::Utc::now().timestamp_millis();
+                    let duration_ms = (completed_at - started_at) as u64;
                     tracker
                         .update_step(
                             &task_id,
@@ -286,12 +308,13 @@ pub async fn run_inner(
                                 completed_at,
                                 attempts: 1,
                                 cached: false,
-                                duration_ms: (completed_at - started_at) as u64,
+                                duration_ms,
                             },
                         )
                         .await;
                 }
                 Err(e) => {
+                    error!(step = %step_id, error = %e, "parallel step failed");
                     if !layer_failed {
                         first_error = format!("step {step_id} failed: {e}");
                         layer_failed = true;
@@ -357,6 +380,7 @@ pub async fn run_inner(
             serde_json::json!(final_output)
         }
     };
+    info!(task_id = %task_id, pipeline = %pipeline.name, "pipeline run completed");
     tracker.complete(&task_id, output_val).await;
 
     Ok(final_output)

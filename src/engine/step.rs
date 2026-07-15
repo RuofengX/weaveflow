@@ -3,6 +3,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
 
 use crate::dsl::StepDef;
 use crate::dsl::StepOp;
@@ -41,6 +42,7 @@ pub async fn execute_step(
         {
             let db_lock = db.lock().await;
             if let Some(v) = db_lock.check_cache_bytes(&cache_key)? {
+                debug!(step = %step.id, "iterate cache hit");
                 scope.set_output(&step.id, v.clone());
                 return Ok(v);
             }
@@ -68,6 +70,7 @@ pub async fn execute_step(
     {
         let db_lock = db.lock().await;
         if let Some(v) = db_lock.check_cache_bytes(&cache_key)? {
+            debug!(step = %step.id, op = %step.op.op_type(), "cache hit");
             scope.set_output(&step.id, v.clone());
             return Ok(v);
         }
@@ -94,6 +97,7 @@ pub async fn execute_step_static(
     {
         let db_lock = db.lock().await;
         if let Some(v) = db_lock.check_cache_bytes(&cache_key)? {
+            debug!(step = %step.id, op = %step.op.op_type(), "cache hit (static)");
             scope.set_output(&step.id, v.clone());
             return Ok(v);
         }
@@ -122,8 +126,12 @@ pub async fn execute_with_retry(
     let delay_ms = step.retry.as_ref().map(|r| r.delay_ms).unwrap_or(1000);
 
     for _attempt in 0..max_attempts {
+        debug!(step = %step.id, attempt = _attempt + 1, max_attempts, "executing operator");
         match op.run(data, config).await {
             Ok(output) => {
+                if _attempt > 0 {
+                    info!(step = %step.id, attempt = _attempt + 1, "retry succeeded");
+                }
                 {
                     let db_lock = db.lock().await;
                     db_lock.set_cache_bytes(cache_key, &output)?;
@@ -131,6 +139,7 @@ pub async fn execute_with_retry(
                 return Ok(output);
             }
             Err(_) if _attempt + 1 < max_attempts => {
+                warn!(step = %step.id, attempt = _attempt + 1, max_attempts, delay_ms, "retrying");
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
             Err(e) => return Err(e.into()),

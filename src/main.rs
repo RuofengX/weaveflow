@@ -16,6 +16,7 @@
 use clap::{Parser, Subcommand};
 
 mod cli;
+mod server;
 
 const DEFAULT_BIND: &str = "127.0.0.1:9928";
 
@@ -104,6 +105,12 @@ enum DaemonCmd {
         #[arg(long, env = "WEAVE_MAX_CONCURRENT_TASKS")]
         max_concurrent_tasks: Option<usize>,
     },
+    /// View daemon logs
+    Log {
+        /// Follow (tail -f) mode
+        #[arg(short = 'f', long = "live")]
+        live: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -171,6 +178,42 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
     Ok((k.to_string(), v.to_string()))
 }
 
+async fn daemon_log(addr: &str, live: bool) {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let mut offset = 0usize;
+
+    loop {
+        let url = format!("http://{addr}/system/logs?offset={offset}");
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                let new_offset_hdr = resp
+                    .headers()
+                    .get("X-Log-Offset")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<usize>().ok());
+                if let Ok(body) = resp.text().await {
+                    let new_offset = new_offset_hdr.unwrap_or(offset + body.len());
+                    if !body.is_empty() {
+                        print!("{body}");
+                    }
+                    offset = new_offset;
+                }
+                if !live {
+                    return;
+                }
+            }
+            Err(e) => {
+                eprintln!("daemon log: {e}");
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
 fn exit_on_err(r: Result<(), String>) {
     if let Err(e) = r {
         eprintln!("错误: {e}");
@@ -232,16 +275,19 @@ async fn main() {
                     args.push(w[1].clone());
                 }
             }
-            cli::daemon::serve(args).await;
+            server::daemon::serve(args).await;
         }
         Commands::Daemon(DaemonCmd::Start { bind, max_concurrent_tasks }) => {
-            cli::daemon::start(&bind, max_concurrent_tasks).await;
+            server::daemon::start(&bind, max_concurrent_tasks).await;
         }
         Commands::Daemon(DaemonCmd::Stop) => {
-            cli::daemon::stop().await;
+            server::daemon::stop().await;
         }
         Commands::Daemon(DaemonCmd::Restart { bind, max_concurrent_tasks }) => {
-            cli::daemon::restart(&bind, max_concurrent_tasks).await;
+            server::daemon::restart(&bind, max_concurrent_tasks).await;
+        }
+        Commands::Daemon(DaemonCmd::Log { live }) => {
+            daemon_log(daemon, live).await;
         }
         Commands::Pipeline(PipelineCmd::Apply { file, data }) => {
             exit_on_err(cli::client::pipeline_apply(daemon, file.as_deref(), data.as_deref()).await);

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use tracing::trace;
 
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
@@ -16,6 +17,7 @@ impl Operator for NoopOperator {
         data: &Value,
         _config: &Value,
     ) -> Result<Value, OperatorError> {
+        trace!("noop operator");
         Ok(data.clone())
     }
 }

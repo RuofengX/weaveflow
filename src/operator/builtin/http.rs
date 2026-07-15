@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use tracing::debug;
 
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
@@ -19,6 +20,7 @@ impl Operator for HttpOperator {
         let url = config.get("url").and_then(|v| v.as_str())
             .ok_or_else(|| OperatorError::Config("缺少 url".into()))?;
         let method = config.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+        debug!(url = %url, method, "http request");
 
         let client = reqwest::Client::new();
         let body_bytes = if !data.is_null() {

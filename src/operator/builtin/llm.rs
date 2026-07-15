@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
@@ -34,6 +34,7 @@ impl Operator for LlmOperator {
         _data: &Value,
         config: &Value,
     ) -> Result<Value, OperatorError> {
+        debug!("llm request");
         let url = config
             .get("url")
             .and_then(|v| v.as_str())

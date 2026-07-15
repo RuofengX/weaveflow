@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use tracing::debug;
 
 use crate::operator::builtin::resolve_nested;
 use crate::operator::{Operator, OperatorError, OperatorSpec};
@@ -18,6 +19,7 @@ impl Operator for DedupOperator {
         config: &Value,
     ) -> Result<Value, OperatorError> {
         let field = config.get("field").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(field, "dedup operator");
         let is_array = data.is_array();
         let arr: Vec<Value> = match data {
             Value::Array(a) => a.clone(),

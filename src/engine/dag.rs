@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use tracing::debug;
 
 use crate::dsl::{PipelineDef, StepDef, StepOp, VariablePath};
 use crate::vm::resolver::extract_code_template_deps;
@@ -24,6 +25,7 @@ pub struct Dag {
 
 impl Dag {
     pub fn from_pipeline(def: &PipelineDef) -> Result<Self, DagError> {
+        debug!(pipeline = %def.name, steps = def.steps.len(), "building DAG");
         if def.steps.is_empty() {
             return Err(DagError::EmptyGraph);
         }
@@ -82,6 +84,7 @@ impl Dag {
     }
 
     pub fn topological_sort(&self) -> Result<Vec<DagLayer>, DagError> {
+        debug!(steps = self.steps.len(), "topological sort");
         let mut in_degree: HashMap<&str, usize> = self.steps.keys()
             .map(|id| (id.as_str(), self.in_edges.get(id).map(|e| e.len()).unwrap_or(0)))
             .collect();

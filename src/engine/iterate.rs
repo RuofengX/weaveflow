@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tracing::info;
 
 use crate::dsl::{IterateConfig, StepDef};
 use crate::engine::step::resolve_operator;
@@ -28,6 +29,7 @@ pub async fn execute_iterate(
         other => vec![other.clone()],
     };
 
+    let total_items = items.len();
     let batched = cfg.batch.is_some();
     let batch_size = cfg.batch.as_ref().map(|b| b.size as usize);
 
@@ -43,6 +45,15 @@ pub async fn execute_iterate(
             .map(|n| n.get())
             .unwrap_or(4)
     });
+
+    info!(
+        step = %step.id,
+        items = total_items,
+        batched,
+        max_workers,
+        total_chunks,
+        "iterate started"
+    );
 
     let started_at = chrono::Utc::now().timestamp_millis();
     tracker
@@ -115,6 +126,13 @@ pub async fn execute_iterate(
     scope.set_output(&step.id, final_result.clone());
 
     let completed_at = chrono::Utc::now().timestamp_millis();
+    let duration_ms = (completed_at - started_at) as u64;
+    info!(
+        step = %step.id,
+        items = total_items,
+        duration_ms,
+        "iterate completed"
+    );
     tracker
         .update_step(
             task_id,

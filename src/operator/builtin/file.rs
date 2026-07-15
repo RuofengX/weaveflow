@@ -1,6 +1,7 @@
 use base64::Engine;
 use async_trait::async_trait;
 use serde_json::Value;
+use tracing::debug;
 
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
@@ -59,6 +60,7 @@ impl Operator for FileOperator {
         config: &Value,
     ) -> Result<Value, OperatorError> {
         // 本地路径优先
+        debug!("file operator");
         if let Some(path) = config.get("path").and_then(|v| v.as_str()) {
             let bytes = tokio::fs::read(path)
                 .await

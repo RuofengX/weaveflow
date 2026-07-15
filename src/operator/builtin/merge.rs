@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use tracing::debug;
 
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
@@ -16,6 +17,7 @@ impl Operator for MergeOperator {
         data: &Value,
         config: &Value,
     ) -> Result<Value, OperatorError> {
+        debug!("merge operator");
         let a = if !data.is_null() {
             data.clone()
         } else {

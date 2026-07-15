@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dsl::{PipelineDef, RefValue, StepOp, VariablePath};
 use serde_json::Value;
+use tracing::debug;
 
 // ---------------------------------------------------------------------------
 // 校验报告
@@ -270,6 +271,12 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
         }
     }
 
+    debug!(
+        pipeline = %def.name,
+        errors = report.errors.len(),
+        warnings = report.warnings.len(),
+        "validation complete"
+    );
     report
 }
 

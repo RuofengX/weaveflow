@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use tracing::debug;
 
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
@@ -21,6 +22,7 @@ impl Operator for CommandOperator {
             .or_else(|| config.get("cmd"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| OperatorError::Config("command 算子需要 command 字段".into()))?;
+        debug!(cmd = %cmd, "command execution");
 
         let shell = config
             .get("shell")

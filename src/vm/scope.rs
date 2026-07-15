@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::{debug, trace};
 
 use serde_json::Value;
 
@@ -21,7 +22,9 @@ impl Scope {
     }
 
     pub fn get_output(&self, step_id: &str) -> Option<Arc<Value>> {
-        self.outputs.get(step_id).cloned()
+        let out = self.outputs.get(step_id).cloned();
+        trace!(step = %step_id, found = out.is_some(), "scope get_output");
+        out
     }
 
     pub fn slots(&self) -> Arc<Value> {
@@ -29,6 +32,7 @@ impl Scope {
     }
 
     pub fn set_output(&mut self, step_id: &str, value: Value) {
+        debug!(step = %step_id, "scope set_output");
         self.outputs.insert(step_id.to_string(), Arc::new(value));
     }
 }

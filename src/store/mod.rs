@@ -7,6 +7,7 @@ pub(crate) use crate::store::database::CacheKey;
 use chrono::Utc;
 use redb::{Database as RedbDb, ReadableTable};
 use std::path::Path;
+use tracing::debug;
 
 use crate::dsl::PipelineDef;
 use crate::error::{WeaveError, WeaveResult};
@@ -24,16 +25,19 @@ pub struct Database {
 
 impl Database {
     pub fn open(db_path: impl AsRef<Path>) -> WeaveResult<Self> {
-        let db = RedbDb::create(db_path).map_err(|e| WeaveError::Database {
+        let path = db_path.as_ref();
+        let db = RedbDb::create(path).map_err(|e| WeaveError::Database {
             operation: "create",
             source: Box::new(e.into()),
         })?;
+        debug!(path = %path.display(), "database opened");
         Ok(Database { db })
     }
 
     // ── Pipeline ────────────────────────────────────────────────────────
 
     pub fn save_pipeline_upsert(&self, def: &PipelineDef) -> WeaveResult<PipelineId> {
+        debug!(name = %def.name, steps = def.steps.len(), "save_pipeline_upsert");
         if let Some((pid, _)) = self.find_pipeline_by_name(&def.name)? {
             let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
                 operation: "save_pipeline_upsert begin_write",
@@ -181,6 +185,7 @@ impl Database {
         inputs: serde_json::Value,
         result_ttl_secs: i64,
     ) -> WeaveResult<TaskId> {
+        debug!(pipeline = %pipeline_name, "create_task");
         let task_id = TaskId::new();
         let meta = TaskMeta {
             task_id,
@@ -256,6 +261,7 @@ impl Database {
 
     /// 普通快照（Durability::None — 写 OS 页缓存，不 fsync）。
     pub fn save_snapshot(&self, task_id: &TaskId, snap: Snapshot) -> WeaveResult<u64> {
+        debug!(task_id = %task_id, step = %snap.step_id, "save_snapshot");
         self.save_snapshot_with_durability(task_id, snap, redb::Durability::None)
     }
 
@@ -452,9 +458,13 @@ impl Database {
                 })? {
                     Some(guard) => {
                         let output_digest = guard.value();
+                        debug!(digest = %output_digest, "cache hit");
                         self.load_object(&output_digest)
                     }
-                    None => Ok(None),
+                    None => {
+                        debug!("cache miss");
+                        Ok(None)
+                    }
                 }
             }
             Err(_) => Ok(None),
@@ -464,6 +474,7 @@ impl Database {
     /// Value-based cache: store output Value with cache key.
     pub fn set_cache_bytes(&self, key: &[u8], output: &serde_json::Value) -> WeaveResult<()> {
         let output_digest = self.store_object(output)?;
+        debug!(digest = %output_digest, "cache set");
         let ck = CacheKey(ObjectDigest::compute(key));
         let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
             operation: "set_cache_bytes begin_write",

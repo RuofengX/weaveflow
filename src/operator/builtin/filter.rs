@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use rayon::prelude::*;
 use serde_json::Value;
+use tracing::debug;
 
 use crate::operator::builtin::resolve_nested;
 use crate::operator::{Operator, OperatorError, OperatorSpec};
@@ -39,6 +40,7 @@ impl Operator for FilterOperator {
         config: &Value,
     ) -> Result<Value, OperatorError> {
         let field = config.get("field").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(field, "filter operator");
         let operator = config.get("operator").and_then(|v| v.as_str()).unwrap_or("eq");
         let ref_value = config.get("value").unwrap_or(&Value::Null);
 

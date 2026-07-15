@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use rayon::prelude::*;
 use serde_json::Value;
+use tracing::debug;
 
 use crate::operator::builtin::resolve_nested;
 use crate::operator::{Operator, OperatorError, OperatorSpec};
@@ -19,6 +20,7 @@ impl Operator for SortOperator {
         config: &Value,
     ) -> Result<Value, OperatorError> {
         let field = config.get("field").and_then(|v| v.as_str()).unwrap_or("");
+        debug!(field, "sort operator");
         let order = config.get("order").and_then(|v| v.as_str()).unwrap_or("asc");
 
         let is_array = data.is_array();

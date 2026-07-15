@@ -20,6 +20,8 @@ use weave::engine::runner::Runner;
 use weave::store::{Database, PruneOptions};
 use weave::tracker::{LayerInfo, TaskId, TaskTracker};
 
+use super::logging::RingWriter;
+
 type DbRef = Arc<Mutex<Database>>;
 type TrackerRef = Arc<TaskTracker>;
 
@@ -29,6 +31,7 @@ struct AppState {
     db: DbRef,
     tracker: TrackerRef,
     semaphore: Arc<tokio::sync::Semaphore>,
+    log_ring: RingWriter,
 }
 
 #[derive(Deserialize)]
@@ -82,7 +85,9 @@ async fn create_pipeline(
     State(state): State<Arc<AppState>>,
     body: String,
 ) -> Result<Json<Value>, WeaveError> {
+    tracing::info!(len = body.len(), "POST /pipelines");
     let pipeline = parse(&body)?;
+    tracing::info!(name = %pipeline.name, steps = pipeline.steps.len(), "pipeline parsed");
     let report = validate(&pipeline, &ValidateOptions::default());
     if !report.is_ok() {
         let msgs: Vec<String> = report
@@ -90,6 +95,7 @@ async fn create_pipeline(
             .iter()
             .map(|e| format!("[{}] {}", e.code, e.message))
             .collect();
+        tracing::warn!(errors = %msgs.join("; "), "validation failed");
         return Err(WeaveError::Validation(msgs.join("; ")));
     }
 
@@ -105,6 +111,7 @@ async fn create_pipeline(
     }
 
     let pid = state.db.lock().await.save_pipeline_upsert(&pipeline)?;
+    tracing::info!(pipeline_id = %pid, name = %pipeline.name, "pipeline saved");
     let response = serde_json::json!({
         "id": pid.to_string(),
         "name": &*pipeline.name,
@@ -118,17 +125,20 @@ async fn delete_pipeline(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, WeaveError> {
+    tracing::info!(pipeline = %name, "DELETE /pipelines/:name");
     let db = state.db.lock().await;
     let (pid, _) = db
         .find_pipeline_by_name(&name)?
         .ok_or_else(|| WeaveError::NotFound(format!("pipeline {name} not found")))?;
     db.delete_pipeline(&pid)?;
+    tracing::info!(pipeline_id = %pid, "pipeline deleted");
     Ok(Json(serde_json::json!({"deleted": name})))
 }
 
 async fn list_pipelines(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, WeaveError> {
+    tracing::info!("GET /pipelines");
     let items = state.db.lock().await.list_pipelines()?;
     let list: Vec<Value> = items
         .iter()
@@ -143,6 +153,7 @@ async fn get_pipeline(
     State(state): State<Arc<AppState>>,
     Path(name_or_id): Path<String>,
 ) -> Result<Json<Value>, WeaveError> {
+    tracing::info!(pipeline = %name_or_id, "GET /pipelines/:name");
     let db = state.db.lock().await;
     let pipeline = if let Some((_, p)) = db.find_pipeline_by_name(&name_or_id)? {
         p
@@ -162,6 +173,8 @@ async fn run_pipeline(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<Value>, WeaveError> {
+    tracing::info!(pipeline = %req.pipeline, "POST /runs");
+
     // Load pipeline
     let pipeline = {
         let db = state.db.lock().await;
@@ -177,6 +190,7 @@ async fn run_pipeline(
     };
 
     let inputs = req.inputs.unwrap_or_default();
+    tracing::info!(pipeline = %pipeline.name, input_keys = ?inputs.keys().collect::<Vec<_>>(), "run inputs resolved");
 
     // Build DAG layers for progress display
     let dag = Dag::from_pipeline(&pipeline)?;
@@ -208,8 +222,7 @@ async fn run_pipeline(
         )
         .await;
 
-    // Acquire a concurrency permit. This blocks the HTTP handler until a slot is free,
-    // providing natural backpressure when the concurrent task limit is reached.
+    // Acquire a concurrency permit
     let permit = state
         .semaphore
         .clone()
@@ -220,16 +233,23 @@ async fn run_pipeline(
     // Spawn executor in background
     let state_clone = state.clone();
     let pipeline_clone = pipeline.clone();
+    let tid = task_id;
     tokio::spawn(async move {
-        let _permit = permit; // hold the permit until this task finishes
+        let _permit = permit;
         let runner = Runner::new(
             pipeline_clone,
             state_clone.db.clone(),
             state_clone.tracker.clone(),
         );
 
-        let _ = runner.run(task_id, inputs).await;
+        let result = runner.run(tid, inputs).await;
+        match &result {
+            Ok(_) => tracing::info!(task_id = %tid, "pipeline run completed"),
+            Err(e) => tracing::error!(task_id = %tid, error = %e, "pipeline run failed"),
+        }
     });
+
+    tracing::info!(task_id = %task_id, "task submitted to background runner");
 
     let response = serde_json::json!({
         "task_id": task_id.to_string(),
@@ -243,6 +263,7 @@ async fn run_pipeline(
 async fn list_tasks(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, WeaveError> {
+    tracing::info!("GET /tasks");
     let tasks = state.db.lock().await.list_tasks()?;
     let list: Vec<Value> = tasks
         .iter()
@@ -261,6 +282,7 @@ async fn get_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> Result<Json<TaskResponse>, WeaveError> {
+    tracing::info!(task_id = %task_id, "GET /runs/:task_id");
     let tid = parse_task_id(&task_id)?;
     let (task, snapshot_count) = {
         let db = state.db.lock().await;
@@ -276,7 +298,6 @@ async fn get_task(
         (task, snaps.len() as u64)
     };
 
-    // Check tracker for live progress
     let progress = state
         .tracker
         .get(&tid)
@@ -297,6 +318,7 @@ async fn list_snapshots(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> Result<Json<Vec<SnapshotMeta>>, WeaveError> {
+    tracing::info!(task_id = %task_id, "GET /runs/:task_id/snapshots");
     let tid = parse_task_id(&task_id)?;
     let db = state.db.lock().await;
     let snapshots = db.load_snapshots(&tid)?;
@@ -314,6 +336,7 @@ async fn get_snapshot_by_seq(
     State(state): State<Arc<AppState>>,
     Path((task_id, seq)): Path<(String, u64)>,
 ) -> Result<Json<SnapshotResponse>, WeaveError> {
+    tracing::info!(task_id = %task_id, seq = seq, "GET /runs/:task_id/snapshots/:seq");
     let tid = parse_task_id(&task_id)?;
     let db = state.db.lock().await;
     let snapshots = db.load_snapshots(&tid)?;
@@ -322,9 +345,6 @@ async fn get_snapshot_by_seq(
             let output: Value = match serde_json::from_slice::<Value>(&snap.output) {
                 Ok(v) => {
                     if v.is_null() && !snap.output.is_empty() {
-                        // The stored output is literally the JSON `null` token.
-                        // This is likely an anomaly — the step may have failed to produce
-                        // a meaningful output but the error was not properly propagated.
                         serde_json::json!({
                             "_anomalous_null": true,
                             "_notice": "step output is JSON null — may indicate a silent failure or unhandled error",
@@ -361,6 +381,7 @@ async fn prune_tasks(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PruneRequest>,
 ) -> Result<Json<PruneResponse>, WeaveError> {
+    tracing::info!(pipeline = ?req.pipeline, force = req.force, dry_run = req.dry_run, "POST /prune");
     let options = PruneOptions {
         pipeline: req.pipeline,
         force: req.force.unwrap_or(false),
@@ -368,6 +389,7 @@ async fn prune_tasks(
     };
     let mut db = state.db.lock().await;
     let report = db.prune(&options)?;
+    tracing::info!(tasks = report.tasks_removed, objects = report.objects_removed, bytes = report.bytes_freed, "prune complete");
     Ok(Json(PruneResponse {
         tasks_removed: report.tasks_removed,
         objects_removed: report.objects_removed,
@@ -378,6 +400,7 @@ async fn prune_tasks(
 
 async fn list_operators(
 ) -> Result<Json<Value>, WeaveError> {
+    tracing::info!("GET /system/operators");
     let builtins = weave::operator::builtins();
     let list: Vec<Value> = builtins.values().map(|op| {
             let spec = op.spec();
@@ -392,6 +415,26 @@ async fn list_operators(
     Ok(Json(serde_json::json!(list)))
 }
 
+async fn get_logs(
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    let offset: usize = params.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let body = state.log_ring.read_since(offset);
+    let new_offset = offset + body.len();
+    let text = String::from_utf8_lossy(&body).to_string();
+    let mut resp = axum::response::Response::new(axum::body::Body::from(text));
+    resp.headers_mut().insert(
+        "X-Log-Offset",
+        new_offset.to_string().parse().unwrap(),
+    );
+    resp.headers_mut().insert(
+        "content-type",
+        "text/plain; charset=utf-8".parse().unwrap(),
+    );
+    resp
+}
+
 // ── WebSocket ─────────────────────────────────────────────────────────────
 
 async fn ws_task(
@@ -399,9 +442,9 @@ async fn ws_task(
     Path(task_id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> Result<axum::response::Response, WeaveError> {
+    tracing::info!(task_id = %task_id, "GET /runs/:task_id/ws");
     let tid = parse_task_id(&task_id)?;
 
-    // Get current snapshot to send as initial state
     let initial = state.tracker.get(&tid).await;
 
     let rx = match state.tracker.subscribe(&tid).await {
@@ -421,8 +464,6 @@ async fn handle_ws(
     mut rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
     initial: Option<weave::tracker::TaskSnapshot>,
 ) {
-    // Send current snapshot first so the client sees the latest state immediately,
-    // even if the task completed before the WS connection was established.
     if let Some(ref snap) = initial {
         let bytes = serde_json::to_vec(snap).unwrap_or_default();
         if socket
@@ -479,18 +520,14 @@ fn build_app(state: Arc<AppState>) -> Router {
         )
         .route("/prune", post(prune_tasks))
         .route("/system/operators", get(list_operators))
+        .route("/system/logs", get(get_logs))
         .with_state(state)
 }
 
 // ── Serve ─────────────────────────────────────────────────────────────────
 
 pub async fn serve(args: Vec<String>) {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    let log_ring = super::logging::init_logging();
 
     let bind = args
         .iter()
@@ -513,6 +550,7 @@ pub async fn serve(args: Vec<String>) {
         db: Arc::new(Mutex::new(db)),
         tracker: Arc::new(TaskTracker::new()),
         semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_permits)),
+        log_ring,
     });
 
     let app = build_app(state);
@@ -624,6 +662,7 @@ pub async fn restart(bind: &str, max_concurrent_tasks: Option<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::logging::RingWriter;
     use std::path::PathBuf;
 
     fn temp_db() -> (Database, PathBuf) {
@@ -644,6 +683,7 @@ mod tests {
             db: Arc::new(tokio::sync::Mutex::new(db)),
             tracker: Arc::new(TaskTracker::new()),
             semaphore: Arc::new(tokio::sync::Semaphore::new(usize::MAX >> 3)),
+            log_ring: RingWriter::new(),
         });
 
         let app = build_app(state);
@@ -733,3 +773,4 @@ output: "{greet.output}"
         let _ = handle.await;
     }
 }
+
