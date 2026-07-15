@@ -16,12 +16,12 @@ name: etl_test
 steps:
   - id: f
     type: filter
+    iterate:
+      over: "{slots.orders}"
+      as: "item"
+      batch:
+        size: 100
     inputs:
-      iterate:
-        over: "{slots.orders}"
-        as: "item"
-        batch:
-          size: 100
       data: "{item}"
       field: status
       operator: eq

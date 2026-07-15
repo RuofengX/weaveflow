@@ -66,16 +66,16 @@ name: iterate_demo
 steps:
   - id: process
     type: http
+    iterate:
+      over: "{slots.data}"
+      as: "item"
+      max_workers: 8
     inputs:
       url: "{slots.data}"
-      iterate:
-        over: "{slots.data}"
-        as: "item"
-        max_workers: 8
 output: "{process.output}"
 "#;
         let def = parse(yaml).unwrap();
-        let iter = def.steps[0].op.iterate().unwrap();
+        let iter = def.steps[0].iterate.as_ref().unwrap();
         assert_eq!(iter.over.parts, vec!["slots", "data"]);
         assert_eq!(iter.as_name, "item");
         assert_eq!(iter.max_workers, Some(8));

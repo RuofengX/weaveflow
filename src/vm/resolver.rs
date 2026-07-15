@@ -11,7 +11,7 @@ pub fn resolve_inputs(
     scope: &Scope,
     step: &crate::dsl::StepDef,
 ) -> WeaveResult<(Vec<u8>, Value)> {
-    let as_name = step.op.iterate().map(|c| c.as_name.as_str());
+    let as_name = step.iterate.as_ref().map(|c| c.as_name.as_str());
 
     // 将 step.op 序列化为 Value，然后递归解析其中的 RefValue
     let op_value = serde_json::to_value(&step.op)
@@ -76,7 +76,7 @@ fn resolve_value_tree(
                 return Ok((data, Value::Object(config_map)));
             }
 
-            // 普通对象（如 ForkBranch.inputs）
+            // 普通对象
             for (k, v) in map {
                 let (d, resolved) = resolve_value_tree(scope, v, as_name)?;
                 if k == "data" {

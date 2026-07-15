@@ -36,7 +36,6 @@
 | `sort` | `builtin/sort.rs` | 数组排序（rayon 并行） |
 | `dedup` | `builtin/dedup.rs` | 数组去重 |
 | `merge` | `builtin/merge.rs` | 合并两个对象 |
-| `split` | `builtin/split.rs` | 数组切分 |
 | `base64` | `builtin/base64.rs` | Base64 编解码 |
 | `http` | `builtin/http.rs` | HTTP 请求 |
 | `file` | `builtin/file.rs` | 本地文件 / URL 读取 |
@@ -70,7 +69,6 @@
 | ~~JSON Schema 输入校验~~ | **已实现** — `runner.rs:82-105` 用 jsonschema crate 校验。 |
 | ~~`weave check` 命令~~ | **已实现** — `main.rs:69-74` Check 子命令 + `check_pipeline()`. |
 | ~~Snapshot null 掩盖根因~~ | **已实现** — `daemon.rs:326-335` 检测 `_anomalous_null` 并标注 raw_size/raw_hex。 |
-| ~~fork / join 算子~~ | **已实现** — `builtin/fork.rs`，`type: fork`，branches 数组并行分发 + join(object\|array) 聚合。 |
 | ~~自举 validator~~ | **已实现** — `pipeline.rs` RuleDef + `runner.rs` 执行前逐条运行 rules（支持 js 算子），返回 `{valid, error}`。validator.rs 新增 JS 语法 AOT 校验。 |
 | bytecode 缓存 | QuickJS 不支持跨 Runtime 字节码复用（字节码 Runtime-tied）。rquickjs 0.12 不暴露 `JS_WriteObject`/`JS_ReadObject`。当前已有 step 级输入缓存（相同输入不重复执行）。若需优化 iterate 场景 JS 重复编译，需升级 rquickjs 版本或引入 Runtime 池。 |
 

@@ -57,7 +57,8 @@ impl Dag {
 
         for step in &def.steps {
             let deps = extract_output_refs_from_step(step, &step_ids);
-            let iterate_deps = step.op.iterate()
+            let iterate_deps = step.iterate
+                .as_ref()
                 .map(|cfg| extract_refs_from_path(&cfg.over, &step_ids))
                 .unwrap_or_default();
             let code_deps = match &step.op {
@@ -251,6 +252,7 @@ mod tests {
         StepDef {
             id: id.into(),
             after: if after.is_empty() { None } else { Some(after.into_iter().map(|s| s.into()).collect()) },
+            iterate: None,
             cache: None,
             retry: None,
             timeout: None,
@@ -351,6 +353,7 @@ mod tests {
         let s_e = StepDef {
             id: "e".into(),
             after: None,
+            iterate: None,
             cache: None,
             retry: None,
             timeout: None,
@@ -371,6 +374,7 @@ mod tests {
         let s_b = StepDef {
             id: "b".into(),
             after: None,
+            iterate: None,
             cache: None,
             retry: None,
             timeout: None,
@@ -379,7 +383,6 @@ mod tests {
                 method: None,
                 headers: None,
                 body: None,
-                iterate: None,
             }),
         };
         let p = make_pipeline(vec![step("a", vec![]), s_b]);

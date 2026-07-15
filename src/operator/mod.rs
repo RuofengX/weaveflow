@@ -13,7 +13,6 @@ pub fn builtins() -> std::collections::HashMap<&'static str, &'static dyn Operat
     m.insert("sort", &builtin::sort::SortOperator as &dyn Operator);
     m.insert("dedup", &builtin::dedup::DedupOperator as &dyn Operator);
     m.insert("merge", &builtin::merge::MergeOperator as &dyn Operator);
-    m.insert("split", &builtin::split::SplitOperator as &dyn Operator);
     m.insert("base64", &builtin::base64::Base64Operator as &dyn Operator);
     m.insert("http", &builtin::http::HttpOperator as &dyn Operator);
     m.insert("file", &builtin::file::FileOperator as &dyn Operator);
@@ -21,6 +20,5 @@ pub fn builtins() -> std::collections::HashMap<&'static str, &'static dyn Operat
     m.insert("llm", &builtin::llm::LlmOperator as &dyn Operator);
     m.insert("var", &builtin::var::VarOperator as &dyn Operator);
     m.insert("js", &builtin::js::JsOperatorPlaceholder as &dyn Operator);
-    m.insert("fork", &builtin::fork::ForkOperator as &dyn Operator);
     m
 }

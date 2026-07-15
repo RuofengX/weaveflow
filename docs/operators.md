@@ -29,12 +29,12 @@
 
 | 输入 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `code` | string | ✓ | — | JS 源码，须顶层定义 `function run(input)` |
-| `data` | RefValue | — | — | 传给 JS 的输入数据 `input.data` |
+| `code` | string | ✓ | — | JS 源码，须顶层定义 `function run(data)` |
+| `data` | RefValue | — | — | 传给 JS 的输入数据 |
 
 JS 运行时规范：
-- 闭包顶层必须定义 `function run(input) { ... }`，返回可 JSON 序列化的值
-- `input.data` = `data` 输入，`input.<其他inputs>` = 其他的输入字段
+- 闭包顶层必须定义 `function run(data) { ... }`，返回可 JSON 序列化的值
+- `data` = 输入数据（来自 `data` 字段），`data.data_base64` / `data.data_utf8` = 二进制辅助字段
 - 支持 `{{step_id.output}}` 双花括号模板（运行时 resolve）
 - 无 `fs`、`net`、`process` 等 Node.js API
 
@@ -43,8 +43,8 @@ JS 运行时规范：
   type: js
   inputs:
     code: |
-      function run(input) {
-        return input.data.sort(function(a, b) {
+      function run(data) {
+        return data.sort(function(a, b) {
           return a.score - b.score;
         });
       }
@@ -133,25 +133,6 @@ JS 运行时规范：
   inputs:
     a: "{step1.output}"
     b: "{step2.output}"
-```
-
----
-
-## split — 数组切分为 chunks
-
-将数组等分切块，用于后续 batch 处理。
-
-| 输入 | 类型 | 必填 | 默认 | 说明 |
-|------|------|------|------|------|
-| `data` | RefValue | — | — | 输入数组 |
-| `size` | u32 | — | `100` | 每 chunk 最大元素数 |
-
-```yaml
-- id: split_batches
-  type: split
-  inputs:
-    data: "{source.output}"
-    size: 50
 ```
 
 ---
@@ -278,49 +259,4 @@ JS 运行时规范：
 
 ---
 
-## fork — 并行多路分发
-
-将一个步骤的输出分发到多个并行分支，各分支独立执行后聚合结果。
-
-| 输入 | 类型 | 必填 | 默认 | 说明 |
-|------|------|------|------|------|
-| `branches` | `[{id, type, inputs}]` | ✓ | — | 分支配置数组 |
-| `join` | string | — | `"object"` | 聚合模式：`object`（按分支 id 合并）/ `array`（拼接为数组） |
-
-### 分支 (branch) 结构
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `id` | string | — | 分支标识（省缺 = `branch_N`） |
-| `type` | string | ✓ | 算子类型 |
-| `inputs` | object | — | 算子输入（支持 `{...}` 引用） |
-
-```yaml
-- id: process
-  type: fork
-  inputs:
-    branches:
-      - id: stats
-        type: js
-        inputs:
-          code: |
-            function run(input) { return { count: input.data.length }; }
-          data: "{source.output}"
-      - id: sample
-        type: js
-        inputs:
-          code: |
-            function run(input) { return { first_10: input.data.slice(0, 10) }; }
-          data: "{source.output}"
-    join: "object"
-```
-
-`join: "object"` 输出：
-```json
-{ "stats": ..., "sample": ... }
-```
-
-`join: "array"` 输出：
-```json
-[{...}, {...}]
 ```

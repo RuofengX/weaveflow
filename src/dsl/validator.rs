@@ -108,7 +108,7 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
                 serde_json::to_value(&step.op).unwrap_or(Value::Null);
             check_ref_in_json(&op_val, &all_step_ids, &step.id, &mut report);
         }
-        check_iterate_config(step.op.iterate(), &step.id, &all_step_ids, &mut report);
+        check_iterate_config(step.iterate.as_ref(), &step.id, &all_step_ids, &mut report);
     }
 
     // ---- 2. slots ----
@@ -243,7 +243,7 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
                 }
             }
         }
-        if let Some(ref cfg) = step.op.iterate() {
+        if let Some(ref cfg) = step.iterate {
             for (prefix, _) in refs_in_path(&cfg.over) {
                 if prefix != "slots" && prefix != "env" {
                     upstream_deps.entry(sid).or_default().push(prefix);
@@ -533,6 +533,7 @@ mod tests {
         StepDef {
             id: "fetch".into(),
             after: None,
+            iterate: None,
             cache: None,
             retry: None,
             timeout: None,
@@ -541,7 +542,6 @@ mod tests {
                 method: None,
                 headers: None,
                 body: None,
-                iterate: None,
             }),
         }
     }
@@ -550,6 +550,7 @@ mod tests {
         StepDef {
             id: id.into(),
             after: if after.is_empty() { None } else { Some(after.into_iter().map(|s| s.into()).collect()) },
+            iterate: None,
             cache: None,
             retry: None,
             timeout: None,
@@ -677,7 +678,6 @@ mod tests {
             method: None,
             headers: None,
             body: None,
-            iterate: None,
         });
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
@@ -703,7 +703,6 @@ mod tests {
                 h
             }),
             body: None,
-            iterate: None,
         });
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
@@ -720,14 +719,12 @@ mod tests {
     #[test]
     fn invalid_iterate_config() {
         let mut def = valid_def();
-        if let StepOp::Http(ref mut inputs) = def.steps[0].op {
-            inputs.iterate = Some(IterateConfig {
-                over: VariablePath::parse("{slots.url}").unwrap(),
-                as_name: "item".into(),
-                max_workers: Some(0),
-                batch: None,
-            });
-        }
+        def.steps[0].iterate = Some(IterateConfig {
+            over: VariablePath::parse("{slots.url}").unwrap(),
+            as_name: "item".into(),
+            max_workers: Some(0),
+            batch: None,
+        });
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.iter().any(|e| e.code == "invalid_iterate_config"));
     }
@@ -735,14 +732,12 @@ mod tests {
     #[test]
     fn valid_iterate_config() {
         let mut def = valid_def();
-        if let StepOp::Http(ref mut inputs) = def.steps[0].op {
-            inputs.iterate = Some(IterateConfig {
-                over: VariablePath::parse("{slots.url}").unwrap(),
-                as_name: "item".into(),
-                max_workers: Some(4),
-                batch: None,
-            });
-        }
+        def.steps[0].iterate = Some(IterateConfig {
+            over: VariablePath::parse("{slots.url}").unwrap(),
+            as_name: "item".into(),
+            max_workers: Some(4),
+            batch: None,
+        });
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
     }

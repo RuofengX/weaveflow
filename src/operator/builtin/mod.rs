@@ -3,14 +3,12 @@ pub mod command;
 pub mod dedup;
 pub mod file;
 pub mod filter;
-pub mod fork;
 pub mod http;
 pub mod js;
 pub mod llm;
 pub mod merge;
 pub mod noop;
 pub mod sort;
-pub mod split;
 pub mod var;
 
 use serde_json::Value;
@@ -39,14 +37,12 @@ pub fn register_all(ops: &mut HashMap<String, Box<dyn Operator>>) {
         Box::new(sort::SortOperator),
         Box::new(dedup::DedupOperator),
         Box::new(merge::MergeOperator),
-        Box::new(split::SplitOperator),
         Box::new(base64::Base64Operator),
         Box::new(http::HttpOperator),
         Box::new(file::FileOperator),
         Box::new(command::CommandOperator),
         Box::new(llm::LlmOperator),
         Box::new(var::VarOperator),
-        Box::new(fork::ForkOperator),
     ];
     for op in list {
         let name = op.spec().type_name.to_string();

@@ -5,10 +5,11 @@ use super::step_op::StepOp;
 use super::variable::VariablePath;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StepDef {
+ pub struct StepDef {
     pub id: String,
     #[serde(default)]
     pub after: Option<Vec<String>>,
+    pub iterate: Option<IterateConfig>,
     pub cache: Option<bool>,
     pub retry: Option<RetryDef>,
     pub timeout: Option<u64>,

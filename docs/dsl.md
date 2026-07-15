@@ -20,13 +20,13 @@ steps:                      # 必填，至少 1 步
   - id: step_id
     type: operator_name     # 内置算子名，或 "js" 表示内联 JS
     after: [step_a]          # 可选，显式顺序依赖
-    iterate:                 # 可选，step 根级
+    inputs:                  # 算子输入（JS 的 code 字段也在内）
+    iterate:                 # 可选，step 根级，对所有算子生效
       over: "{upstream.output}"
       as: "item"
       max_workers: 4
       batch:
         size: 100
-    inputs:                  # 算子输入（JS 的 code 字段也在内）
     cache: true
     retry:
       max_attempts: 3
@@ -68,7 +68,7 @@ slots:
 | `id` | string | ✓ | — | 唯一标识 |
 | `type` | string | ✓ | — | 算子类型（内置名 或 `"js"`） |
 | `after` | string[] | — | — | 顺序依赖（不需要数据） |
-| `iterate` | object | — | — | 迭代配置（step 根级） |
+| `iterate` | object | — | — | 迭代配置（step 根级，所有算子均支持） |
 | `inputs` | object | — | — | 算子输入（JS 算子的 `code` 字段也在此） |
 | `cache` | bool | — | 算子默认 | 是否启用缓存 |
 | `retry` | object | — | — | 重试策略 |
@@ -84,16 +84,16 @@ slots:
 
 ### iterate
 
-`step.iterate` 存在即启用逐元素并行展开：
+`step.iterate` 存在即启用逐元素并行展开，所有算子类型均支持：
 
 ```yaml
 - id: batch_step
   type: http
   iterate:
-    over: "{split.output}"   # 变量引用，指向数组
-    as: "item"               # 元素变量名
-    max_workers: 4           # 省缺 → rayon 自动
-    batch:                   # 可选：按数组批次传给算子
+    over: "{upstream.output}"  # 变量引用，指向数组
+    as: "item"                 # 元素变量名
+    max_workers: 4             # 省缺 → rayon 自动
+    batch:                     # 可选：按数组批次传给算子
       size: 100
   inputs:
     url: "https://api.example.com/ingest"
@@ -115,12 +115,12 @@ slots:
 无需预注册，直接在 DSL 中写 JS 源码。`code` 字段写在 `inputs` 内部：
 
 ```yaml
-- id: custom_filter
+  - id: custom_filter
   type: js
   inputs:
     code: |
-      function run(input) {
-        return input.data.filter(function(o) {
+      function run(data) {
+        return data.filter(function(o) {
           return o.status === 'paid';
         });
       }
@@ -128,8 +128,8 @@ slots:
 ```
 
 - `code` 字段包含 JS 源码
-- 必须在顶层定义 `function run(input) { ... }`
-- `input` 为 `{ data: ..., ...其他 inputs }`
+- 必须在顶层定义 `function run(data) { ... }`
+- `data` 为输入数据（来自 `data` 字段）
 - QuickJS 沙箱执行，无 fs/net 访问
 
 ## 内置算子
@@ -141,7 +141,6 @@ slots:
 | `sort` | 按字段排序 (asc/desc) | ✅ |
 | `dedup` | 按字段去重 | ✅ |
 | `merge` | 合并两个对象 (b 覆盖 a) | ✅ |
-| `split` | 数组切分为等长 chunks | ✅ |
 | `base64` | Base64 编解码 | ✅ |
 | `noop` | 直接返回输入（测试用） | ✅ |
 | `var` | 变量占位——接受任意 inputs 原样输出 | ✅ |
@@ -149,7 +148,6 @@ slots:
 | `command` | 执行 Shell 命令 | ✅ |
 | `llm` | OpenAI 兼容的 LLM 推理 | ✅ |
 | `js` | 内联 QuickJS 沙箱（`code` 字段写入 `inputs` 内） | ✅ |
-| `fork` | 并行多路分发，按分支 id 或数组聚合结果 | ✅ |
 
 各算子的输入字段、默认值、配置示例详见 [operators.md](operators.md)。
 
@@ -208,8 +206,8 @@ steps:
     type: js
     inputs:
       code: |
-        function run(input) {
-          return input.data.map(function(record) {
+        function run(data) {
+          return data.map(function(record) {
             record.processed = true;
             return record;
           });

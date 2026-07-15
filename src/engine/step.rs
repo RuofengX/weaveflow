@@ -26,7 +26,7 @@ pub async fn execute_step(
     let (data, config) = resolve_inputs(scope, step)?;
     let op: Box<dyn Operator> = resolve_operator(step, scope)?;
 
-    if let Some(ref cfg) = step.op.iterate() {
+    if let Some(ref cfg) = step.iterate.as_ref() {
         let over_bytes = resolve_ref(scope, &cfg.over)?;
         let mut hasher = Sha256::new();
         hasher.update(step.op.op_type().as_bytes());
@@ -84,7 +84,7 @@ pub async fn execute_step_static(
     let (data, config) = resolve_inputs(scope, step)?;
     let op: Box<dyn Operator> = resolve_operator(step, scope)?;
 
-    if step.op.iterate().is_some() {
+    if step.iterate.is_some() {
         return Err(WeaveError::Internal(
             "iterate not supported in parallel layer".into(),
         ));

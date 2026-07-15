@@ -36,6 +36,7 @@ pub struct RawStepDef {
     pub id: String,
     #[serde(default)]
     pub after: Option<Vec<String>>,
+    pub iterate: Option<RawIterateConfig>,
     pub cache: Option<bool>,
     pub retry: Option<RetryDef>,
     pub timeout: Option<u64>,
@@ -79,14 +80,12 @@ pub enum RawStepOp {
     Sort(RawSortInputs),
     Dedup(RawDedupInputs),
     Merge(RawMergeInputs),
-    Split(RawSplitInputs),
     Base64(RawBase64Inputs),
     Noop,
     Var(RawVarInputs),
     File(RawFileInputs),
     Command(RawCommandInputs),
     Llm(RawLlmInputs),
-    Fork(RawForkInputs),
 }
 
 #[derive(Deserialize)]
@@ -98,8 +97,6 @@ pub struct RawHttpInputs {
     pub headers: Option<HashMap<String, Value>>,
     #[serde(default)]
     pub body: Option<Value>,
-    #[serde(default)]
-    pub iterate: Option<RawIterateConfig>,
 }
 
 #[derive(Deserialize)]
@@ -119,8 +116,6 @@ pub struct RawFilterInputs {
     pub field: Option<String>,
     #[serde(default)]
     pub value: Option<Value>,
-    #[serde(default)]
-    pub iterate: Option<RawIterateConfig>,
 }
 
 #[derive(Deserialize)]
@@ -146,14 +141,6 @@ pub struct RawMergeInputs {
     pub b: Value,
     #[serde(default)]
     pub a: Option<Value>,
-}
-
-#[derive(Deserialize)]
-pub struct RawSplitInputs {
-    #[serde(default)]
-    pub data: Option<Value>,
-    #[serde(default)]
-    pub size: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -198,31 +185,12 @@ pub struct RawLlmInputs {
     pub temperature: Option<f64>,
     #[serde(default)]
     pub skip_vision_check: Option<bool>,
-    #[serde(default)]
-    pub iterate: Option<RawIterateConfig>,
 }
 
 #[derive(Deserialize)]
 pub struct RawVarInputs {
     #[serde(default)]
     pub value: Option<Value>,
-}
-
-#[derive(Deserialize)]
-pub struct RawForkInputs {
-    pub branches: Vec<RawForkBranch>,
-    #[serde(default)]
-    pub join: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct RawForkBranch {
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(rename = "type")]
-    pub op_type: String,
-    #[serde(default)]
-    pub inputs: HashMap<String, Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +229,7 @@ impl From<RawStepDef> for StepDef {
         StepDef {
             id: raw.id,
             after: raw.after,
+            iterate: raw.iterate.map(IterateConfig::from),
             cache: raw.cache,
             retry: raw.retry,
             timeout: raw.timeout,
@@ -277,7 +246,6 @@ impl From<RawStepOp> for StepOp {
                 method: r.method,
                 headers: r.headers.map(|m| m.into_iter().map(|(k, v)| (k, yaml_to_refvalue(&v))).collect()),
                 body: r.body.as_ref().map(yaml_to_refvalue),
-                iterate: r.iterate.map(IterateConfig::from),
             }),
             RawStepOp::Js(r) => StepOp::Js(step_op::JsInputs {
                 code: r.code,
@@ -288,7 +256,6 @@ impl From<RawStepOp> for StepOp {
                 operator: r.operator.unwrap_or_else(|| "eq".into()),
                 field: r.field,
                 value: r.value.as_ref().map(yaml_to_refvalue),
-                iterate: r.iterate.map(IterateConfig::from),
             }),
             RawStepOp::Sort(r) => StepOp::Sort(step_op::SortInputs {
                 data: r.data.as_ref().map(yaml_to_refvalue),
@@ -302,10 +269,6 @@ impl From<RawStepOp> for StepOp {
             RawStepOp::Merge(r) => StepOp::Merge(step_op::MergeInputs {
                 b: yaml_to_refvalue(&r.b),
                 a: r.a.as_ref().map(yaml_to_refvalue),
-            }),
-            RawStepOp::Split(r) => StepOp::Split(step_op::SplitInputs {
-                data: r.data.as_ref().map(yaml_to_refvalue),
-                size: r.size.unwrap_or(100),
             }),
             RawStepOp::Base64(r) => StepOp::Base64(step_op::Base64Inputs {
                 data: r.data.as_ref().map(yaml_to_refvalue),
@@ -334,15 +297,6 @@ impl From<RawStepOp> for StepOp {
                 max_tokens: r.max_tokens.unwrap_or(4096),
                 temperature: r.temperature,
                 skip_vision_check: r.skip_vision_check,
-                iterate: r.iterate.map(IterateConfig::from),
-            }),
-            RawStepOp::Fork(r) => StepOp::Fork(step_op::ForkInputs {
-                branches: r.branches.into_iter().map(|b| step_op::ForkBranch {
-                    id: b.id,
-                    op_type: b.op_type,
-                    inputs: b.inputs.into_iter().map(|(k, v)| (k, yaml_to_refvalue(&v))).collect(),
-                }).collect(),
-                join: r.join.unwrap_or_else(|| "object".into()),
             }),
         }
     }

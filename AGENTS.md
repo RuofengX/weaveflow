@@ -6,7 +6,7 @@
 cargo build                    # compile
 cargo test --lib               # 36 unit tests (no external deps)
 cargo test --test '*'          # 21 integration tests (requires local weave binary)
-cargo bench --bench etl        # ETL benchmarks
+cargo bench --bench '*'        # ETL benchmarks (5 benches)
 ```
 
 ## Architecture
@@ -100,14 +100,12 @@ pub enum StepOp {
     Sort(SortInputs),
     Dedup(DedupInputs),
     Merge(MergeInputs),
-    Split(SplitInputs),
     Base64(Base64Inputs),
     Noop,                            // no inputs
     Var(VarInputs),
     File(FileInputs),
     Command(CommandInputs),
     Llm(LlmInputs),
-    Fork(ForkInputs),
 }
 ```
 
@@ -145,7 +143,7 @@ pub trait Operator: Send + Sync {
 
 Return `Cow<[u8]>`: `Borrowed` for noop passthrough, `Owned` otherwise.
 
-### Builtin operators (14)
+### Builtin operators (12)
 
 | Operator | DSL type | Feature |
 |----------|----------|---------|
@@ -155,14 +153,12 @@ Return `Cow<[u8]>`: `Borrowed` for noop passthrough, `Owned` otherwise.
 | Sort | `sort` | Array sort by field/order (rayon parallel) |
 | Dedup | `dedup` | Array deduplication by field |
 | Merge | `merge` | Merge two objects (`a` + `b`) |
-| Split | `split` | Chunk array into batches of `size` |
 | Base64 | `base64` | Encode/decode base64 |
 | Noop | `noop` | Passthrough (test helper) |
 | Var | `var` | Variable placeholder — passes inputs through as-is |
 | File | `file` | Read files (path or url) |
 | Command | `command` | Execute shell commands |
 | LLM | `llm` | LLM API calls |
-| Fork | `fork` | Parallel branches with join |
 
 Detailed input fields, defaults, and examples: [docs/operators.md](docs/operators.md).
 

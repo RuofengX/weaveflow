@@ -44,5 +44,21 @@ tempfile = "3"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]
-name = "etl"
+name = "iterate_batch"
+harness = false
+
+[[bench]]
+name = "builtin_vs_js"
+harness = false
+
+[[bench]]
+name = "operator_chain"
+harness = false
+
+[[bench]]
+name = "parallel_layer"
+harness = false
+
+[[bench]]
+name = "var_passthrough"
 harness = false

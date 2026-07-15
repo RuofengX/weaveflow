@@ -162,16 +162,10 @@ steps:
       operator: "gte"
       value: 18
 
-  - id: batch
-    type: split
-    inputs:
-      data: "{filter.output}"
-      size: 100
-
   - id: send
     type: http
-    iterate:                    # ← step 根级
-      over: "{batch.output}"
+    iterate:
+      over: "{filter.output}"
       as: "item"
       batch:
         size: 100
@@ -248,7 +242,6 @@ weave system prune [--force] [--dry-run]
 | `sort` | 排序（asc/desc），rayon 并行 |
 | `dedup` | 去重 |
 | `merge` | 对象合并 |
-| `split` | 数组切分 |
 | `base64` | 编解码 |
 | `noop` | 直通（测试用） |
 | `var` | 变量占位 |

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::step::IterateConfig;
 use super::variable::RefValue;
 
 // ---------------------------------------------------------------------------
@@ -18,14 +17,12 @@ pub enum StepOp {
     Sort(SortInputs),
     Dedup(DedupInputs),
     Merge(MergeInputs),
-    Split(SplitInputs),
     Base64(Base64Inputs),
     Noop,
     Var(VarInputs),
     File(FileInputs),
     Command(CommandInputs),
     Llm(LlmInputs),
-    Fork(ForkInputs),
 }
 
 impl StepOp {
@@ -37,23 +34,12 @@ impl StepOp {
             StepOp::Sort(_) => "sort",
             StepOp::Dedup(_) => "dedup",
             StepOp::Merge(_) => "merge",
-            StepOp::Split(_) => "split",
             StepOp::Base64(_) => "base64",
             StepOp::Noop => "noop",
             StepOp::Var(_) => "var",
             StepOp::File(_) => "file",
             StepOp::Command(_) => "command",
             StepOp::Llm(_) => "llm",
-            StepOp::Fork(_) => "fork",
-        }
-    }
-
-    pub fn iterate(&self) -> Option<&IterateConfig> {
-        match self {
-            StepOp::Http(i) => i.iterate.as_ref(),
-            StepOp::Filter(i) => i.iterate.as_ref(),
-            StepOp::Llm(i) => i.iterate.as_ref(),
-            _ => None,
         }
     }
 }
@@ -71,8 +57,6 @@ pub struct HttpInputs {
     pub headers: Option<HashMap<String, RefValue>>,
     #[serde(default)]
     pub body: Option<RefValue>,
-    #[serde(default)]
-    pub iterate: Option<IterateConfig>,
 }
 
 /// JS 算子的 code 字段在 inputs.code 中。
@@ -94,8 +78,6 @@ pub struct FilterInputs {
     pub field: Option<String>,
     #[serde(default)]
     pub value: Option<RefValue>,
-    #[serde(default)]
-    pub iterate: Option<IterateConfig>,
 }
 
 fn default_filter_operator() -> String {
@@ -129,18 +111,6 @@ pub struct MergeInputs {
     pub b: RefValue,
     #[serde(default)]
     pub a: Option<RefValue>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SplitInputs {
-    #[serde(default)]
-    pub data: Option<RefValue>,
-    #[serde(default = "default_split_size")]
-    pub size: u32,
-}
-
-fn default_split_size() -> u32 {
-    100
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,8 +155,6 @@ pub struct LlmInputs {
     pub temperature: Option<f64>,
     #[serde(default)]
     pub skip_vision_check: Option<bool>,
-    #[serde(default)]
-    pub iterate: Option<IterateConfig>,
 }
 
 fn default_max_tokens() -> u64 {
@@ -197,25 +165,4 @@ fn default_max_tokens() -> u64 {
 pub struct VarInputs {
     #[serde(default)]
     pub value: Option<RefValue>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ForkInputs {
-    pub branches: Vec<ForkBranch>,
-    #[serde(default = "default_join")]
-    pub join: String,
-}
-
-fn default_join() -> String {
-    "object".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ForkBranch {
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(rename = "type")]
-    pub op_type: String,
-    #[serde(default)]
-    pub inputs: HashMap<String, RefValue>,
 }
