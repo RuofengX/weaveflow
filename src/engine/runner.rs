@@ -7,7 +7,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::dsl::{PipelineDef, RefValue};
 use crate::engine::dag::Dag;
-use crate::engine::step::{execute_step, execute_step_static};
+use crate::engine::step::execute_step;
 use crate::error::{WeaveError, WeaveResult};
 use crate::store::Database;
 use crate::tracker::{Snapshot, StepState, TaskId, TaskTracker};
@@ -127,87 +127,6 @@ pub async fn run_inner(
     let last_step_id = layers.last().and_then(|l| l.last()).cloned();
 
     for layer in layers.iter() {
-        if layer.len() == 1 {
-            let step_id = &layer[0];
-            let step_def = dag.step(step_id).ok_or_else(|| {
-                WeaveError::Internal(format!("step {step_id} not found in DAG"))
-            })?;
-
-            debug!(step = %step_id, op = %step_def.op.op_type(), "executing step");
-
-            let started_at = chrono::Utc::now().timestamp_millis();
-            tracker
-                .update_step(
-                    &task_id,
-                    step_id,
-                    StepState::Running {
-                        started_at,
-                        attempts: 1,
-                    },
-                )
-                .await;
-
-            match execute_step(
-                db.clone(),
-                &mut scope,
-                step_def,
-                &task_id,
-                tracker.as_ref(),
-            )
-            .await
-            {
-                Ok(output) => {
-                    let completed_at = chrono::Utc::now().timestamp_millis();
-                    let duration_ms = (completed_at - started_at) as u64;
-                    info!(step = %step_id, duration_ms, "step completed");
-                    scope.set_output(step_id, output.clone());
-                    {
-                        let db_lock = db.lock().await;
-                        save_step_snapshot(
-                            &db_lock,
-                            &task_id,
-                            step_id,
-                            &output,
-                            Some(step_id.as_str()) == last_step_id.as_deref(),
-                        );
-                    }
-                    let completed_at = chrono::Utc::now().timestamp_millis();
-                    let duration_ms = (completed_at - started_at) as u64;
-                    tracker
-                        .update_step(
-                            &task_id,
-                            step_id,
-                            StepState::Completed {
-                                started_at,
-                                completed_at,
-                                attempts: 1,
-                                cached: false,
-                                duration_ms,
-                            },
-                        )
-                        .await;
-                }
-                Err(e) => {
-                    error!(step = %step_id, error = %e, "step failed");
-                    let now = chrono::Utc::now().timestamp_millis();
-                    tracker
-                        .update_step(
-                            &task_id,
-                            step_id,
-                            StepState::Failed {
-                                started_at: Some(started_at),
-                                completed_at: now,
-                                error: e.to_string(),
-                                attempts: 1,
-                            },
-                        )
-                        .await;
-                    return Err(WeaveError::Internal(format!("step {step_id} failed: {e}")));
-                }
-            }
-            continue;
-        }
-
         let mut futures = Vec::new();
         debug!(layer_steps = ?layer, "executing parallel layer");
         for step_id in layer {
@@ -236,7 +155,7 @@ pub async fn run_inner(
                     )
                     .await;
 
-                let out = execute_step_static(db_clone, &mut sc, &sd).await;
+                let out = execute_step(db_clone, &mut sc, &sd, &tid, &tracker_clone).await;
                 (sd.id.clone(), started_at, out)
             });
         }

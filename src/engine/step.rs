@@ -78,42 +78,6 @@ pub async fn execute_step(
 
     execute_with_retry(db, op.as_ref(), &data, &config, &cache_key, step).await
 }
-
-pub async fn execute_step_static(
-    db: Arc<Mutex<Database>>,
-    scope: &mut Scope,
-    step: &StepDef,
-) -> WeaveResult<Value> {
-    let (data, config) = resolve_inputs(scope, step)?;
-    let op: Box<dyn Operator> = resolve_operator(step, scope)?;
-
-    if step.iterate.is_some() {
-        return Err(WeaveError::Internal(
-            "iterate not supported in parallel layer".into(),
-        ));
-    }
-
-    let cache_key = compute_cache_key(step.op.op_type(), &data, &config);
-    {
-        let db_lock = db.lock().await;
-        if let Some(v) = db_lock.check_cache_bytes(&cache_key)? {
-            debug!(step = %step.id, op = %step.op.op_type(), "cache hit (static)");
-            scope.set_output(&step.id, v.clone());
-            return Ok(v);
-        }
-    }
-
-    let output = op
-        .run(&data, &config)
-        .await?;
-    scope.set_output(&step.id, output.clone());
-    {
-        let db_guard = db.lock().await;
-        db_guard.set_cache_bytes(&cache_key, &output)?;
-    }
-    Ok(output)
-}
-
 pub async fn execute_with_retry(
     db: Arc<Mutex<Database>>,
     op: &dyn Operator,
