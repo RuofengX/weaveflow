@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -14,7 +13,7 @@ use crate::operator::builtin::js::JsOperator;
 use crate::operator::{get_builtin, Operator};
 use crate::store::Database;
 use crate::tracker::{TaskId, TaskTracker};
-use crate::vm::resolver::{resolve_code_templates, resolve_inputs, resolve_ref};
+use crate::vm::resolver::{resolve_code_templates, resolve_inputs};
 use crate::vm::Scope;
 
 pub async fn execute_step(
@@ -27,27 +26,17 @@ pub async fn execute_step(
     let (data, config) = resolve_inputs(scope, step)?;
     let op: Box<dyn Operator> = resolve_operator(step, scope)?;
 
-    if let Some(cfg) = step.iterate.as_ref() {
-        let over_ref = resolve_ref(scope, &cfg.over)?;
-        let mut hasher = Sha256::new();
-        hasher.update(step.op.op_type().as_bytes());
-        hasher.update(b":");
-        hasher.update(serde_json::to_vec(&*data).unwrap_or_default());
-        hasher.update(b":");
-        hasher.update(serde_json::to_vec(&config).unwrap_or_default());
-        hasher.update(b":iterate:");
-        hasher.update(serde_json::to_vec(&*over_ref).unwrap_or_default());
-        let cache_key = hasher.finalize().to_vec();
-
-        {
-            let db_lock = db.lock().await;
-            if let Some(v) = db_lock.check_cache_bytes(&cache_key)? {
-                debug!(step = %step.id, "iterate cache hit");
-                scope.set_output(&step.id, v.clone());
-                return Ok(v);
-            }
+    let cache_key = compute_cache_key(step.op.op_type(), &data, &config);
+    {
+        let db_lock = db.lock().await;
+        if let Some(v) = db_lock.check_cache_bytes(&cache_key)? {
+            debug!(step = %step.id, op = %step.op.op_type(), "cache hit");
+            scope.set_output(&step.id, v.clone());
+            return Ok(v);
         }
+    }
 
+    if let Some(cfg) = step.iterate.as_ref() {
         let result = execute_iterate(
             db.clone(),
             scope,
@@ -59,21 +48,11 @@ pub async fn execute_step(
         )
         .await?;
 
-    {
-        let db_lock = db.lock().await;
-        db_lock.set_cache_bytes(&cache_key, &result)?;
-    }
-    return Ok(result);
-    }
-
-    let cache_key = compute_cache_key(step.op.op_type(), &data, &config);
-    {
-        let db_lock = db.lock().await;
-        if let Some(v) = db_lock.check_cache_bytes(&cache_key)? {
-            debug!(step = %step.id, op = %step.op.op_type(), "cache hit");
-            scope.set_output(&step.id, v.clone());
-            return Ok(v);
+        {
+            let db_lock = db.lock().await;
+            db_lock.set_cache_bytes(&cache_key, &result)?;
         }
+        return Ok(result);
     }
 
     execute_with_retry(db, op.as_ref(), &data, &config, &cache_key, step).await
