@@ -119,7 +119,7 @@ pub fn resolve_operator(
     if let StepOp::Js(ref inputs) = step.op {
         let code = resolve_code_templates(&inputs.code, scope)?;
         return Ok(Box::new(JsOperator {
-            name: step.id.clone(),
+            name: step.id.0.clone(),
             source: code,
         }));
     }

@@ -4,11 +4,46 @@ use super::retry::RetryDef;
 use super::step_op::StepOp;
 use super::variable::VariablePath;
 
+/// Pipeline 步骤标识符，newtype over String。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StepId(pub String);
+
+impl std::fmt::Display for StepId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::borrow::Borrow<str> for StepId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for StepId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for StepId {
+    fn from(s: String) -> Self {
+        StepId(s)
+    }
+}
+
+impl From<&str> for StepId {
+    fn from(s: &str) -> Self {
+        StepId(s.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
  pub struct StepDef {
-    pub id: String,
+    pub id: StepId,
     #[serde(default)]
-    pub after: Option<Vec<String>>,
+    pub after: Option<Vec<StepId>>,
     pub iterate: Option<IterateConfig>,
     pub cache: Option<bool>,
     pub retry: Option<RetryDef>,

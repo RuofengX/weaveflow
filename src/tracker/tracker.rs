@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
+use crate::dsl::StepId;
+
 use super::meta::TaskId;
 use super::state::{Progress, StepProgress, StepState, TaskStatus, LayerInfo};
 
@@ -53,7 +55,7 @@ impl TaskTracker {
         &self,
         task_id: TaskId,
         pipeline_name: String,
-        step_ids: Vec<String>,
+        step_ids: Vec<StepId>,
         layers: Vec<LayerInfo>,
     ) -> (tokio::sync::broadcast::Receiver<Vec<u8>>, TaskSnapshot) {
         debug!(task_id = %task_id, pipeline = %pipeline_name, steps = step_ids.len(), "tracker create");
@@ -90,7 +92,7 @@ impl TaskTracker {
     }
 
     /// 更新单个 step 的状态，并广播。
-    pub async fn update_step(&self, task_id: &TaskId, step_id: &str, state: StepState) {
+    pub async fn update_step(&self, task_id: &TaskId, step_id: &StepId, state: StepState) {
         debug!(task_id = %task_id, step = %step_id, state = ?state, "tracker update_step");
         let mut runs = self.runs.lock().unwrap();
         if let Some(run) = runs.get_mut(task_id) {
@@ -102,7 +104,7 @@ impl TaskTracker {
     }
 
     /// 更新 iterate 进度（done/total），每个 chunk 完成时调用，并广播。
-    pub async fn update_iterate(&self, task_id: &TaskId, step_id: &str, done: u64, total: u64) {
+    pub async fn update_iterate(&self, task_id: &TaskId, step_id: &StepId, done: u64, total: u64) {
         let mut runs = self.runs.lock().unwrap();
         if let Some(run) = runs.get_mut(task_id) {
             if let Some(step) = run.progress.step_mut(step_id)

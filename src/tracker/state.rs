@@ -1,18 +1,20 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::dsl::StepId;
+
 /// 步骤执行进度。状态无关的元数据在外层，状态相关的数据在 StepState 中。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepProgress {
-    pub step_id: String,
+    pub step_id: StepId,
     pub timeout: Option<u64>,
     pub state: StepState,
 }
 
 impl StepProgress {
-    pub fn new(step_id: &str, timeout: Option<u64>) -> Self {
+    pub fn new(step_id: &StepId, timeout: Option<u64>) -> Self {
         StepProgress {
-            step_id: step_id.into(),
+            step_id: step_id.clone(),
             timeout,
             state: StepState::Pending,
         }
@@ -62,18 +64,18 @@ pub struct Progress {
 }
 
 impl Progress {
-    pub fn from_step_ids(ids: &[String]) -> Self {
+    pub fn from_step_ids(ids: &[StepId]) -> Self {
         Progress {
             steps: ids.iter().map(|id| StepProgress::new(id, None)).collect(),
         }
     }
 
-    pub fn step_mut(&mut self, step_id: &str) -> Option<&mut StepProgress> {
-        self.steps.iter_mut().find(|s| s.step_id == step_id)
+    pub fn step_mut(&mut self, step_id: &StepId) -> Option<&mut StepProgress> {
+        self.steps.iter_mut().find(|s| &s.step_id == step_id)
     }
 
-    pub fn step(&self, step_id: &str) -> Option<&StepProgress> {
-        self.steps.iter().find(|s| s.step_id == step_id)
+    pub fn step(&self, step_id: &StepId) -> Option<&StepProgress> {
+        self.steps.iter().find(|s| &s.step_id == step_id)
     }
 }
 
@@ -90,5 +92,5 @@ pub enum TaskStatus {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LayerInfo {
     pub index: usize,
-    pub step_ids: Vec<String>,
+    pub step_ids: Vec<StepId>,
 }

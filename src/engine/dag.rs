@@ -1,26 +1,26 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use tracing::debug;
 
-use crate::dsl::{PipelineDef, StepDef, StepOp, VariablePath};
+use crate::dsl::{PipelineDef, StepDef, StepId, StepOp, VariablePath};
 use crate::vm::resolver::extract_code_template_deps;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DagError {
     #[error("cycle detected, remaining nodes: {0:?}")]
-    CycleFound(Vec<String>),
+    CycleFound(Vec<StepId>),
     #[error("after reference not found: {0}")]
-    RefNotFound(String),
+    RefNotFound(StepId),
     #[error("DAG has no steps")]
     EmptyGraph,
 }
 
-pub type DagLayer = Vec<String>;
+pub type DagLayer = Vec<StepId>;
 
 #[derive(Debug, Clone)]
 pub struct Dag {
-    steps: HashMap<String, StepDef>,
-    in_edges: HashMap<String, Vec<String>>,
-    out_edges: HashMap<String, Vec<String>>,
+    steps: HashMap<StepId, StepDef>,
+    in_edges: HashMap<StepId, Vec<StepId>>,
+    out_edges: HashMap<StepId, Vec<StepId>>,
 }
 
 impl Dag {
@@ -32,8 +32,8 @@ impl Dag {
 
         let mut steps = HashMap::new();
         let mut step_ids = HashSet::new();
-        let mut in_edges: HashMap<String, Vec<String>> = HashMap::new();
-        let mut out_edges: HashMap<String, Vec<String>> = HashMap::new();
+        let mut in_edges: HashMap<StepId, Vec<StepId>> = HashMap::new();
+        let mut out_edges: HashMap<StepId, Vec<StepId>> = HashMap::new();
 
         for step in &def.steps {
             if steps.contains_key(&step.id) {
@@ -67,7 +67,7 @@ impl Dag {
                 StepOp::Js(inputs) => extract_code_template_deps(&inputs.code, &step_ids),
                 _ => vec![],
             };
-            let all_deps: Vec<String> = deps.into_iter()
+            let all_deps: Vec<StepId> = deps.into_iter()
                 .chain(iterate_deps)
                 .chain(code_deps)
                 .collect();
@@ -85,11 +85,11 @@ impl Dag {
 
     pub fn topological_sort(&self) -> Result<Vec<DagLayer>, DagError> {
         debug!(steps = self.steps.len(), "topological sort");
-        let mut in_degree: HashMap<&str, usize> = self.steps.keys()
-            .map(|id| (id.as_str(), self.in_edges.get(id).map(|e| e.len()).unwrap_or(0)))
+        let mut in_degree: HashMap<&StepId, usize> = self.steps.keys()
+            .map(|id| (id, self.in_edges.get(id).map(|e| e.len()).unwrap_or(0)))
             .collect();
 
-        let mut queue: VecDeque<&str> = in_degree.iter()
+        let mut queue: VecDeque<&StepId> = in_degree.iter()
             .filter(|(_, deg)| **deg == 0)
             .map(|(&id, _)| id)
             .collect();
@@ -101,11 +101,11 @@ impl Dag {
             let mut layer = Vec::new();
             for _ in 0..queue.len() {
                 if let Some(node) = queue.pop_front() {
-                    layer.push(node.to_string());
+                    layer.push(node.clone());
                     visited += 1;
                     if let Some(children) = self.out_edges.get(node) {
                         for child in children {
-                            if let Some(deg) = in_degree.get_mut(child.as_str()) {
+                            if let Some(deg) = in_degree.get_mut(child) {
                                 *deg -= 1;
                                 if *deg == 0 {
                                     queue.push_back(child);
@@ -119,9 +119,9 @@ impl Dag {
         }
 
         if visited != self.steps.len() {
-            let remaining: Vec<String> = self.steps.keys()
-                .filter(|id| in_degree.get(id.as_str()).is_none_or(|&d| d != 0))
-                .map(|id| format!("{} ({})", id, in_degree[id.as_str()]))
+            let remaining: Vec<StepId> = self.steps.keys()
+                .filter(|id| in_degree.get(id).is_none_or(|&d| d != 0))
+                .cloned()
                 .collect();
             return Err(DagError::CycleFound(remaining));
         }
@@ -133,27 +133,27 @@ impl Dag {
         self.topological_sort().is_err()
     }
 
-    pub fn step_ids(&self) -> Vec<String> {
+    pub fn step_ids(&self) -> Vec<StepId> {
         self.steps.keys().cloned().collect()
     }
 
-    pub fn step(&self, id: &str) -> Option<&StepDef> {
+    pub fn step(&self, id: &StepId) -> Option<&StepDef> {
         self.steps.get(id)
     }
 
-    pub fn predecessors(&self, id: &str) -> Option<&[String]> {
+    pub fn predecessors(&self, id: &StepId) -> Option<&[StepId]> {
         self.in_edges.get(id).map(|v| v.as_slice())
     }
 
-    pub fn successors(&self, id: &str) -> Option<&[String]> {
+    pub fn successors(&self, id: &StepId) -> Option<&[StepId]> {
         self.out_edges.get(id).map(|v| v.as_slice())
     }
 }
 
 fn extract_output_refs_from_step(
     step: &StepDef,
-    known_steps: &HashSet<String>,
-) -> Vec<String> {
+    known_steps: &HashSet<StepId>,
+) -> Vec<StepId> {
     let Ok(op_value) = serde_json::to_value(&step.op) else { return vec![] };
     let mut refs = Vec::new();
     collect_refs(&op_value, &mut refs, known_steps);
@@ -164,20 +164,19 @@ fn extract_output_refs_from_step(
 
 fn extract_refs_from_path(
     path: &VariablePath,
-    known_steps: &HashSet<String>,
-) -> Vec<String> {
-    let mut refs = Vec::new();
+    known_steps: &HashSet<StepId>,
+) -> Vec<StepId> {
     if let Some(first) = path.parts.first()
         && known_steps.contains(first.as_str()) {
-            refs.push(first.clone());
+            return vec![StepId::from(first.clone())];
         }
-    refs
+    vec![]
 }
 
 fn collect_refs(
     val: &serde_json::Value,
-    results: &mut Vec<String>,
-    known_steps: &HashSet<String>,
+    results: &mut Vec<StepId>,
+    known_steps: &HashSet<StepId>,
 ) {
     match val {
         serde_json::Value::Object(map) => {
@@ -186,7 +185,7 @@ fn collect_refs(
                     && let Ok(path) = serde_json::from_value::<VariablePath>(path_val.clone())
                     && let Some(first) = path.parts.first()
                         && known_steps.contains(first.as_str()) {
-                            results.push(first.clone());
+                            results.push(StepId::from(first.clone()));
                         }
             } else if map.len() == 1 && map.contains_key("Literal") {
                 if let Some(lit) = map.get("Literal") {
@@ -212,8 +211,8 @@ fn collect_refs(
 
 fn collect_string_refs(
     val: &serde_json::Value,
-    results: &mut Vec<String>,
-    known_steps: &HashSet<String>,
+    results: &mut Vec<StepId>,
+    known_steps: &HashSet<StepId>,
 ) {
     let Some(s) = val.as_str() else { return };
     let mut start = 0;
@@ -224,7 +223,7 @@ fn collect_string_refs(
             if let Some(var_ref) = VariablePath::parse(inner)
                 && let Some(first) = var_ref.parts.first()
                     && known_steps.contains(first.as_str()) {
-                        results.push(first.clone());
+                        results.push(StepId::from(first.clone()));
                     }
             start = brace_abs + end + 1;
         } else {
@@ -251,14 +250,18 @@ mod tests {
 
     fn step(id: &str, after: Vec<&str>) -> StepDef {
         StepDef {
-            id: id.into(),
-            after: if after.is_empty() { None } else { Some(after.into_iter().map(|s| s.into()).collect()) },
+            id: StepId::from(id),
+            after: if after.is_empty() { None } else { Some(after.into_iter().map(StepId::from).collect()) },
             iterate: None,
             cache: None,
             retry: None,
             timeout: None,
             op: StepOp::Noop,
         }
+    }
+
+    fn sid(s: &str) -> StepId {
+        StepId::from(s)
     }
 
     #[test]
@@ -275,7 +278,7 @@ mod tests {
         let dag = Dag::from_pipeline(&p).unwrap();
         let layers = dag.topological_sort().unwrap();
         assert_eq!(layers.len(), 1);
-        assert_eq!(layers[0], vec!["a"]);
+        assert_eq!(layers[0], vec![sid("a")]);
     }
 
     #[test]
@@ -289,9 +292,9 @@ mod tests {
         let dag = Dag::from_pipeline(&p).unwrap();
         let layers = dag.topological_sort().unwrap();
         assert_eq!(layers.len(), 3);
-        assert_eq!(layers[0], vec!["a"]);
-        assert_eq!(layers[1], vec!["b"]);
-        assert_eq!(layers[2], vec!["c"]);
+        assert_eq!(layers[0], vec![sid("a")]);
+        assert_eq!(layers[1], vec![sid("b")]);
+        assert_eq!(layers[2], vec![sid("c")]);
     }
 
     #[test]
@@ -306,9 +309,9 @@ mod tests {
         let layers = dag.topological_sort().unwrap();
         assert_eq!(layers.len(), 2);
         assert_eq!(layers[0].len(), 2);
-        assert!(layers[0].contains(&"a".to_string()));
-        assert!(layers[0].contains(&"b".to_string()));
-        assert_eq!(layers[1], vec!["c"]);
+        assert!(layers[0].contains(&sid("a")));
+        assert!(layers[0].contains(&sid("b")));
+        assert_eq!(layers[1], vec![sid("c")]);
     }
 
     #[test]
@@ -352,7 +355,7 @@ mod tests {
     #[test]
     fn implicit_dep_via_input_ref() {
         let s_e = StepDef {
-            id: "e".into(),
+            id: StepId::from("e"),
             after: None,
             iterate: None,
             cache: None,
@@ -366,14 +369,14 @@ mod tests {
         let dag = Dag::from_pipeline(&p).unwrap();
         let layers = dag.topological_sort().unwrap();
         assert_eq!(layers.len(), 2);
-        assert_eq!(layers[0], vec!["d"]);
-        assert_eq!(layers[1], vec!["e"]);
+        assert_eq!(layers[0], vec![sid("d")]);
+        assert_eq!(layers[1], vec![sid("e")]);
     }
 
     #[test]
     fn implicit_dep_via_input_ref_nested() {
         let s_b = StepDef {
-            id: "b".into(),
+            id: StepId::from("b"),
             after: None,
             iterate: None,
             cache: None,
@@ -389,7 +392,7 @@ mod tests {
         let p = make_pipeline(vec![step("a", vec![]), s_b]);
         let dag = Dag::from_pipeline(&p).unwrap();
         let layers = dag.topological_sort().unwrap();
-        assert_eq!(layers[0], vec!["a"]);
-        assert_eq!(layers[1], vec!["b"]);
+        assert_eq!(layers[0], vec![sid("a")]);
+        assert_eq!(layers[1], vec![sid("b")]);
     }
 }

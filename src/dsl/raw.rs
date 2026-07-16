@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use super::pipeline::PipelineDef;
 use super::retry::RetryDef;
-use super::step::{BatchConfig, IterateConfig, StepDef};
+use super::step::{BatchConfig, IterateConfig, StepDef, StepId};
 use super::step_op::{self, StepOp};
 use super::storage::StorageDef;
 use super::variable::{parse_string_to_refvalue, RefValue, VariablePath};
@@ -200,8 +200,8 @@ impl TryFrom<RawPipelineDef> for PipelineDef {
 impl From<RawStepDef> for StepDef {
     fn from(raw: RawStepDef) -> Self {
         StepDef {
-            id: raw.id,
-            after: raw.after,
+            id: StepId::from(raw.id),
+            after: raw.after.map(|a| a.into_iter().map(StepId::from).collect()),
             iterate: raw.iterate.map(IterateConfig::from),
             cache: raw.cache,
             retry: raw.retry,

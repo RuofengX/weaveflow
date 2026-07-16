@@ -6,7 +6,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-use crate::dsl::{PipelineDef, RefValue};
+use crate::dsl::{PipelineDef, RefValue, StepId};
 use crate::engine::dag::Dag;
 use crate::engine::step::execute_step;
 use crate::error::{WeaveError, WeaveResult};
@@ -161,7 +161,7 @@ pub async fn run_inner(
             });
         }
 
-        let results: Vec<(String, DateTime<Utc>, WeaveResult<Value>)> =
+        let results: Vec<(StepId, DateTime<Utc>, WeaveResult<Value>)> =
             futures::future::join_all(futures).await;
 
         let mut layer_failed = false;
@@ -181,7 +181,7 @@ pub async fn run_inner(
                             &task_id,
                             &step_id,
                             &output,
-                            Some(step_id.as_str()) == last_step_id.as_deref(),
+                            Some(&step_id) == last_step_id.as_ref(),
                         );
                     }
                     let completed_at = Utc::now();
@@ -236,8 +236,8 @@ pub async fn run_inner(
                 if path.parts.is_empty() {
                     return Err(WeaveError::Internal("empty output ref".into()));
                 }
-                let step_id = &path.parts[0];
-                let value = scope.get_output(step_id).ok_or_else(|| {
+                let step_id = StepId::from(path.parts[0].clone());
+                let value = scope.get_output(&step_id).ok_or_else(|| {
                     WeaveError::Internal(format!("output step {step_id} not found"))
                 })?;
 
@@ -276,14 +276,14 @@ pub async fn run_inner(
 fn save_step_snapshot(
     db: &Database,
     task_id: &TaskId,
-    step_id: &str,
+    step_id: &StepId,
     output: &Value,
     is_last: bool,
 ) {
     let bytes = serde_json::to_vec(output).unwrap_or_default();
     let snap = Snapshot {
         seq: 0,
-        step_id: step_id.to_string(),
+        step_id: step_id.clone(),
         output: bytes,
     };
     let _ = if is_last {

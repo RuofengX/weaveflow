@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::dsl::{PipelineDef, RefValue, StepOp, VariablePath};
+use crate::dsl::{PipelineDef, RefValue, StepId, StepOp, VariablePath};
 use serde_json::Value;
 use tracing::debug;
 
@@ -64,24 +64,24 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
         });
     }
 
-    let all_step_ids: HashSet<&str> = def.steps.iter().map(|s| s.id.as_str()).collect();
+    let all_step_ids: HashSet<StepId> = def.steps.iter().map(|s| s.id.clone()).collect();
 
     // ---- 1. 步骤 ----
     let mut seen_ids = HashSet::new();
     for step in &def.steps {
-        if step.id.is_empty() {
+        if step.id.0.is_empty() {
             report.errors.push(ValidationError {
                 code: "empty_step_id".into(),
                 message: "步骤 ID 不能为空".into(),
             });
         }
-        if ["slots", "env"].contains(&step.id.as_str())  {
+        if step.id.0 == "slots" || step.id.0 == "env"  {
             report.errors.push(ValidationError {
                 code: "reserved_step_id".into(),
                 message: format!("步骤 ID 不能使用保留名称: {}", step.id),
             });
         }
-        if !step.id.is_empty() && !seen_ids.insert(&step.id) {
+        if !step.id.0.is_empty() && !seen_ids.insert(&step.id) {
             report.errors.push(ValidationError {
                 code: "duplicate_step_id".into(),
                 message: format!("步骤 ID 重复: {}", step.id),
@@ -98,7 +98,7 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
                     });
                 }
             }
-            let mut seen_after: HashSet<&str> = HashSet::new();
+            let mut seen_after: HashSet<&StepId> = HashSet::new();
             for dep in after {
                 if !seen_after.insert(dep) {
                     report.errors.push(ValidationError {
@@ -139,7 +139,7 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
     for step in &def.steps {
         if let Some(ref after) = step.after {
             for dep in after {
-                if dep != &step.id && !all_step_ids.contains(dep.as_str()) {
+                if dep != &step.id && !all_step_ids.contains(dep.0.as_str()) {
                     report.errors.push(ValidationError {
                         code: "after_ref_not_found".into(),
                         message: format!(
@@ -179,12 +179,12 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
     }
 
     // orphan step check
-    let mut referenced_steps: HashSet<String> = HashSet::new();
+    let mut referenced_steps: HashSet<StepId> = HashSet::new();
     for step in &def.steps {
         let op_val = serde_json::to_value(&step.op).unwrap_or(Value::Null);
         for (prefix, _) in refs_in_json(&op_val) {
             if prefix != "slots" && prefix != "env" {
-                referenced_steps.insert(prefix);
+                referenced_steps.insert(StepId::from(prefix));
             }
         }
         if let Some(ref after) = step.after {
@@ -195,14 +195,14 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
     }
     for (prefix, _) in output_refs(&def.output) {
         if prefix != "slots" && prefix != "env" {
-            referenced_steps.insert(prefix);
+            referenced_steps.insert(StepId::from(prefix));
         }
     }
 
     for step in &def.steps {
         let is_output_target = output_refs(&def.output)
             .iter()
-            .any(|(p, _)| p == &step.id);
+            .any(|(p, _)| StepId::from(p.as_str()) == step.id);
         let is_referenced = referenced_steps.contains(&step.id) || is_output_target;
         if !is_referenced {
             report.warnings.push(ValidationWarning {
@@ -220,33 +220,33 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
     }
 
     // ---- 9. 无上游依赖检查 (warning) ----
-    let mut upstream_deps: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut upstream_deps: HashMap<StepId, Vec<StepId>> = HashMap::new();
     for step in &def.steps {
-        let sid = step.id.as_str();
+        let sid = step.id.clone();
         if let Some(ref after) = step.after {
             for dep in after {
-                upstream_deps.entry(sid).or_default().push(dep.clone());
+                upstream_deps.entry(sid.clone()).or_default().push(dep.clone());
             }
         }
         {
             let op_val = serde_json::to_value(&step.op).unwrap_or(Value::Null);
             for (prefix, _) in refs_in_json(&op_val) {
                 if prefix != "slots" && prefix != "env" {
-                    upstream_deps.entry(sid).or_default().push(prefix);
+                    upstream_deps.entry(sid.clone()).or_default().push(StepId::from(prefix));
                 }
             }
         }
         if let Some(ref cfg) = step.iterate {
             for (prefix, _) in refs_in_path(&cfg.over) {
                 if prefix != "slots" && prefix != "env" {
-                    upstream_deps.entry(sid).or_default().push(prefix);
+                    upstream_deps.entry(sid.clone()).or_default().push(StepId::from(prefix));
                 }
             }
         }
     }
 
     for step in &def.steps {
-        if !upstream_deps.contains_key(step.id.as_str()) {
+        if !upstream_deps.contains_key(&step.id) {
             report.warnings.push(ValidationWarning {
                 code: "no_upstream_deps".into(),
                 message: format!(
@@ -373,8 +373,8 @@ fn extract_refs(s: &str) -> Vec<(String, String)> {
 
 fn check_ref_in_json(
     val: &Value,
-    all_ids: &HashSet<&str>,
-    step_id: &str,
+    all_ids: &HashSet<StepId>,
+    step_id: &StepId,
     report: &mut ValidationReport,
 ) {
     match val {
@@ -422,7 +422,7 @@ fn check_ref_in_json(
 
 fn check_output_ref(
     output: &RefValue,
-    all_ids: &HashSet<&str>,
+    all_ids: &HashSet<StepId>,
     report: &mut ValidationReport,
 ) {
     match output {
@@ -452,8 +452,8 @@ fn check_output_ref(
 
 fn check_iterate_config(
     cfg: Option<&crate::dsl::IterateConfig>,
-    step_id: &str,
-    all_step_ids: &HashSet<&str>,
+    step_id: &StepId,
+    all_step_ids: &HashSet<StepId>,
     report: &mut ValidationReport,
 ) {
     if let Some(cfg) = cfg {
@@ -479,7 +479,7 @@ fn check_iterate_config(
     }
 }
 
-fn check_js_syntax(id: &str, code: &str, report: &mut ValidationReport) {
+fn check_js_syntax(id: &StepId, code: &str, report: &mut ValidationReport) {
     let re = regex::Regex::new(r"\{\{[a-zA-Z_][\w.]*\}\}")
         .expect("template regex");
     let sanitized = re.replace_all(code, "\"__placeholder__\"");

@@ -42,7 +42,7 @@ output: "{f.output}"
 
     let dag = Dag::from_pipeline(&def).unwrap();
     let layers = dag.topological_sort().unwrap();
-    let all_step_ids: Vec<String> = layers.iter().flatten().cloned().collect();
+    let all_step_ids = layers.iter().flatten().cloned().collect::<Vec<_>>();
     let layer_infos: Vec<LayerInfo> = layers
         .iter()
         .enumerate()

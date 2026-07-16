@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 
-use weave::dsl::parser::parse;
+use weave::dsl::{parser::parse, StepId};
 use weave::dsl::validator::{validate, ValidateOptions};
 use weave::error::WeaveError;
 use weave::engine::dag::Dag;
@@ -54,13 +54,13 @@ struct TaskResponse {
 #[derive(Serialize)]
 struct SnapshotMeta {
     seq: u64,
-    step_id: String,
+    step_id: StepId,
 }
 
 #[derive(Serialize)]
 struct SnapshotResponse {
     seq: u64,
-    step_id: String,
+    step_id: StepId,
     output: Value,
 }
 
@@ -195,7 +195,7 @@ async fn run_pipeline(
     // Build DAG layers for progress display
     let dag = Dag::from_pipeline(&pipeline)?;
     let layers = dag.topological_sort()?;
-    let all_step_ids: Vec<String> = layers.iter().flatten().cloned().collect();
+    let all_step_ids: Vec<StepId> = layers.iter().flatten().cloned().collect();
     let layer_infos: Vec<LayerInfo> = layers
         .iter()
         .enumerate()

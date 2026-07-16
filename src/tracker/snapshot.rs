@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::dsl::StepId;
+
 /// Snapshot key = task_id + seq.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SnapshotKey {
@@ -18,6 +20,6 @@ impl std::fmt::Display for SnapshotKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub seq: u64,
-    pub step_id: String,
+    pub step_id: StepId,
     pub output: Vec<u8>,
 }

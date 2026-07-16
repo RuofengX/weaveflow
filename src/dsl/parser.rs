@@ -36,7 +36,7 @@ impl From<rust_yaml::Error> for ParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsl::{RefValue, StepOp};
+    use crate::dsl::{RefValue, StepId, StepOp};
 
     fn minimal_yaml() -> &'static str {
         r#"
@@ -55,7 +55,7 @@ output: "{fetch.output}"
         let def = parse(minimal_yaml()).unwrap();
         assert_eq!(def.name, "minimal");
         assert_eq!(def.steps.len(), 1);
-        assert_eq!(def.steps[0].id, "fetch");
+        assert_eq!(def.steps[0].id, StepId::from("fetch"));
         assert_eq!(def.steps[0].op.op_type(), "http");
         assert!(matches!(def.output, RefValue::Ref(_)));
         let StepOp::Http(ref inputs) = def.steps[0].op else { panic!("expected http") };

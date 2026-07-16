@@ -13,7 +13,7 @@ pub use pipeline::PipelineDef;
 pub use pipeline::SlotDef;
 pub use retry::BackoffStrategy;
 pub use retry::RetryDef;
-pub use step::{BatchConfig, IterateConfig, StepDef};
+pub use step::{BatchConfig, IterateConfig, StepDef, StepId};
 pub use step_op::StepOp;
 pub use storage::{StorageDef, Ttl};
 pub use variable::{RefValue, VariablePath};

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use crate::dsl::VariablePath;
+use crate::dsl::{StepId, VariablePath};
 use crate::error::{WeaveError, WeaveResult};
 use crate::vm::Scope;
 
@@ -127,8 +127,8 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Arc<Value>
             Ok(Arc::new(Value::String(val)))
         }
         _ => {
-            let step_id = &path.parts[0];
-            let value = scope.get_output(step_id).ok_or_else(|| {
+            let step_id = StepId::from(path.parts[0].clone());
+            let value = scope.get_output(&step_id).ok_or_else(|| {
                 WeaveError::Internal(format!("step {step_id} not found in scope"))
             })?;
 
@@ -161,8 +161,8 @@ pub fn resolve_code_templates(code: &str, scope: &Scope) -> WeaveResult<String> 
         if parts.is_empty() || parts[0].is_empty() {
             continue;
         }
-        let step_id = parts[0];
-        let value = scope.get_output(step_id).ok_or_else(|| {
+        let step_id = StepId::from(parts[0]);
+        let value = scope.get_output(&step_id).ok_or_else(|| {
             WeaveError::Internal(format!(
                 "code 模板 {{}} 引用了不存在的步骤: {step_id}"
             ))
@@ -192,7 +192,7 @@ pub fn resolve_code_templates(code: &str, scope: &Scope) -> WeaveResult<String> 
     Ok(result)
 }
 
-pub fn extract_code_template_deps(code: &str, known_steps: &HashSet<String>) -> Vec<String> {
+pub fn extract_code_template_deps(code: &str, known_steps: &HashSet<StepId>) -> Vec<StepId> {
     let re = regex::Regex::new(r"\{\{([a-zA-Z_][\w.]*)\}\}").unwrap();
     let mut deps = Vec::new();
     for cap in re.captures_iter(code) {
@@ -200,7 +200,7 @@ pub fn extract_code_template_deps(code: &str, known_steps: &HashSet<String>) -> 
         if let Some(step_id) = ref_expr.split('.').next()
             && known_steps.contains(step_id)
         {
-            deps.push(step_id.to_string());
+            deps.push(StepId::from(step_id));
         }
     }
     deps.sort();

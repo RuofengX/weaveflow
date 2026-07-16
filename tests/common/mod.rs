@@ -29,7 +29,7 @@ pub fn run_yaml(yaml: &str, slots: HashMap<String, Value>) -> WeaveResult<Value>
 
     let dag = Dag::from_pipeline(&def).expect("dag");
     let layers = dag.topological_sort().expect("topo");
-    let all_step_ids: Vec<String> = layers.iter().flatten().cloned().collect();
+    let all_step_ids = layers.iter().flatten().cloned().collect::<Vec<_>>();
     let layer_infos: Vec<LayerInfo> = layers
         .iter()
         .enumerate()
