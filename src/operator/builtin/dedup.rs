@@ -15,15 +15,19 @@ impl Operator for DedupOperator {
 
     async fn run(
         &self,
-        inputs: &Value,
+        inputs: Value,
     ) -> Result<Value, OperatorError> {
-        let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("");
+        let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("").to_string();
         debug!(field, "dedup operator");
-        let data = inputs.get("data").unwrap_or(&Value::Null);
+        let data = if let Value::Object(mut m) = inputs {
+            m.remove("data").unwrap_or(Value::Null)
+        } else {
+            inputs
+        };
         let is_array = data.is_array();
         let arr: Vec<Value> = match data {
-            Value::Array(a) => a.clone(),
-            other => vec![other.clone()],
+            Value::Array(a) => a,
+            other => vec![other],
         };
 
         let mut seen = std::collections::HashSet::new();
@@ -32,7 +36,7 @@ impl Operator for DedupOperator {
             let key = if field.is_empty() {
                 serde_json::to_string(&item).unwrap_or_default()
             } else {
-                serde_json::to_string(resolve_nested(&item, field)).unwrap_or_default()
+                serde_json::to_string(resolve_nested(&item, &field)).unwrap_or_default()
             };
             if seen.insert(key) {
                 result.push(item);

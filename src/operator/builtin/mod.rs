@@ -51,9 +51,21 @@ pub fn register_all(ops: &mut HashMap<String, Box<dyn Operator>>) {
     }
 }
 
-/// 按名字查找内置算子。
+/// 按名字查找内置算子。直接 match，避免 HashMap 分配。
 pub fn get_builtin(name: &str) -> Option<Box<dyn Operator>> {
-    let mut ops: HashMap<String, Box<dyn Operator>> = HashMap::new();
-    register_all(&mut ops);
-    ops.remove(name)
+    match name {
+        "noop" => Some(Box::new(noop::NoopOperator)),
+        "filter" => Some(Box::new(filter::FilterOperator)),
+        "sort" => Some(Box::new(sort::SortOperator)),
+        "dedup" => Some(Box::new(dedup::DedupOperator)),
+        "merge" => Some(Box::new(merge::MergeOperator)),
+        "base64" => Some(Box::new(base64::Base64Operator)),
+        "http" => Some(Box::new(http::HttpOperator)),
+        "js" => Some(Box::new(js::JsOperator)),
+        "file" => Some(Box::new(file::FileOperator)),
+        "command" => Some(Box::new(command::CommandOperator)),
+        "llm" => Some(Box::new(llm::LlmOperator)),
+        "var" => Some(Box::new(var::VarOperator)),
+        _ => None,
+    }
 }

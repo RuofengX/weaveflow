@@ -14,7 +14,7 @@ impl Operator for CommandOperator {
 
     async fn run(
         &self,
-        inputs: &Value,
+        inputs: Value,
     ) -> Result<Value, OperatorError> {
         let cmd = inputs
             .get("command")

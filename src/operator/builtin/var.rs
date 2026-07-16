@@ -15,9 +15,9 @@ impl Operator for VarOperator {
 
     async fn run(
         &self,
-        inputs: &Value,
+        inputs: Value,
     ) -> Result<Value, OperatorError> {
         trace!("var operator (passthrough)");
-        Ok(inputs.clone())
+        Ok(inputs)
     }
 }

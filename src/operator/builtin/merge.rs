@@ -14,20 +14,20 @@ impl Operator for MergeOperator {
 
     async fn run(
         &self,
-        inputs: &Value,
+        inputs: Value,
     ) -> Result<Value, OperatorError> {
         debug!("merge operator");
-        let a = inputs.get("a")
-            .or_else(|| inputs.get("data"));
+        let a = inputs.get("a").cloned()
+            .or_else(|| inputs.get("data").cloned());
         let a = match a {
-            Some(v) if !v.is_null() => v.clone(),
+            Some(v) if !v.is_null() => v,
             _ => Value::Null,
         };
 
-        let b_val = inputs.get("b")
+        let b = inputs.get("b").cloned()
             .ok_or_else(|| OperatorError::Config("缺少 b 字段".into()))?;
 
-        match (a.as_object(), b_val.as_object()) {
+        match (a.as_object(), b.as_object()) {
             (Some(oa), Some(ob)) => {
                 let mut merged = oa.clone();
                 for (k, v) in ob {

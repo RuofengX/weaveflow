@@ -80,7 +80,7 @@ pub async fn execute_step(
     // 4. 解析算子并直接执行（含重试）。
     let op: Box<dyn Operator> = resolve_operator(step)?;
     info!(step = %step.id, op = %step.op.op_type(), "executing");
-    execute_with_retry(db, op.as_ref(), &inputs, &cache_key, step).await
+    execute_with_retry(db, op.as_ref(), inputs, &cache_key, step).await
 }
 
 /// 调用 op.run(inputs)，失败时按重试配置自动重试。
@@ -88,16 +88,41 @@ pub async fn execute_step(
 pub async fn execute_with_retry(
     db: Arc<Mutex<Database>>,
     op: &dyn Operator,
-    inputs: &Value,
+    inputs: Value,
     cache_key: &[u8],
     step: &StepDef,
 ) -> WeaveResult<Value> {
     let max_attempts = step.retry.as_ref().map(|r| r.max_attempts).unwrap_or(1);
     let delay_ms = step.retry.as_ref().map(|r| r.delay_ms).unwrap_or(1000);
 
+    // Fast path: no retry configured — move inputs, zero clone.
+    if max_attempts == 1 {
+        debug!(step = %step.id, attempt = 1, max_attempts, "executing operator");
+        return match op.run(inputs).await {
+            Ok(output) => {
+                let db_lock = db.lock().await;
+                db_lock.set_cache_bytes(cache_key, &output)?;
+                trace!(step = %step.id, "output cached");
+                Ok(output)
+            }
+            Err(e) => {
+                warn!(step = %step.id, attempt = 1, "operator failed");
+                Err(e.into())
+            }
+        };
+    }
+
+    // Retry path: clone per attempt (last attempt moves).
+    let mut inputs = inputs;
     for attempt in 0..max_attempts {
         debug!(step = %step.id, attempt = attempt + 1, max_attempts, "executing operator");
-        match op.run(inputs).await {
+        let is_last = attempt + 1 == max_attempts;
+        let attempt_inputs = if is_last {
+            std::mem::take(&mut inputs)
+        } else {
+            inputs.clone()
+        };
+        match op.run(attempt_inputs).await {
             Ok(output) => {
                 if attempt > 0 {
                     info!(step = %step.id, attempt = attempt + 1, "retry succeeded");
@@ -109,7 +134,7 @@ pub async fn execute_with_retry(
                 trace!(step = %step.id, attempt = attempt + 1, "output cached");
                 return Ok(output);
             }
-            Err(_) if attempt + 1 < max_attempts => {
+            Err(_) if !is_last => {
                 warn!(step = %step.id, attempt = attempt + 1, max_attempts, delay_ms, "retrying");
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }

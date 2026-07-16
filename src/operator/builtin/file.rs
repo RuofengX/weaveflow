@@ -56,7 +56,7 @@ impl Operator for FileOperator {
 
     async fn run(
         &self,
-        inputs: &Value,
+        inputs: Value,
     ) -> Result<Value, OperatorError> {
         // 本地路径优先
         debug!("file operator");

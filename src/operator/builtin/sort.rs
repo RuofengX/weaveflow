@@ -16,22 +16,26 @@ impl Operator for SortOperator {
 
     async fn run(
         &self,
-        inputs: &Value,
+        inputs: Value,
     ) -> Result<Value, OperatorError> {
-        let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("");
+        let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("").to_string();
         debug!(field, "sort operator");
-        let order = inputs.get("order").and_then(|v| v.as_str()).unwrap_or("asc");
-        let data = inputs.get("data").unwrap_or(&Value::Null);
+        let order = inputs.get("order").and_then(|v| v.as_str()).unwrap_or("asc").to_string();
+        let data = if let Value::Object(mut m) = inputs {
+            m.remove("data").unwrap_or(Value::Null)
+        } else {
+            inputs
+        };
 
         let is_array = data.is_array();
         let mut arr: Vec<Value> = match data {
-            Value::Array(a) => a.clone(),
-            other => vec![other.clone()],
+            Value::Array(a) => a,
+            other => vec![other],
         };
 
         arr.par_sort_by(|a, b| {
-            let va = resolve_nested(a, field);
-            let vb = resolve_nested(b, field);
+            let va = resolve_nested(a, &field);
+            let vb = resolve_nested(b, &field);
             let cmp = compare_values(va, vb);
             if order == "desc" { cmp.reverse() } else { cmp }
         });

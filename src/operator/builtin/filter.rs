@@ -36,24 +36,28 @@ impl Operator for FilterOperator {
 
     async fn run(
         &self,
-        inputs: &Value,
+        inputs: Value,
     ) -> Result<Value, OperatorError> {
-        let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("");
+        let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("").to_string();
         debug!(field, "filter operator");
-        let operator = inputs.get("operator").and_then(|v| v.as_str()).unwrap_or("eq");
-        let ref_value = inputs.get("value").unwrap_or(&Value::Null);
-        let data = inputs.get("data").unwrap_or(&Value::Null);
+        let operator = inputs.get("operator").and_then(|v| v.as_str()).unwrap_or("eq").to_string();
+        let ref_value = inputs.get("value").cloned().unwrap_or(Value::Null);
+        let data = if let Value::Object(mut m) = inputs {
+            m.remove("data").unwrap_or(Value::Null)
+        } else {
+            inputs
+        };
 
         let is_array = data.is_array();
         let arr: Vec<Value> = match data {
-            Value::Array(a) => a.clone(),
-            other => vec![other.clone()],
+            Value::Array(a) => a,
+            other => vec![other],
         };
 
         let result: Vec<Value> = arr
             .into_par_iter()
             .filter(|item| {
-                Self::compare(resolve_nested(item, field), operator, ref_value).unwrap_or(false)
+                Self::compare(resolve_nested(item, &field), &operator, &ref_value).unwrap_or(false)
             })
             .collect();
 

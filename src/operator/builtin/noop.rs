@@ -14,9 +14,9 @@ impl Operator for NoopOperator {
 
     async fn run(
         &self,
-        inputs: &Value,
+        inputs: Value,
     ) -> Result<Value, OperatorError> {
         trace!("noop operator");
-        Ok(inputs.clone())
+        Ok(inputs)
     }
 }

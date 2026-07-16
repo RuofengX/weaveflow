@@ -15,7 +15,7 @@ impl Operator for Base64Operator {
 
     async fn run(
         &self,
-        inputs: &Value,
+        inputs: Value,
     ) -> Result<Value, OperatorError> {
         let mode = inputs.get("mode").and_then(|v| v.as_str()).unwrap_or("encode");
         debug!(mode, "base64 operator");

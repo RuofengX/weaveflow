@@ -31,7 +31,7 @@ impl Operator for LlmOperator {
 
     async fn run(
         &self,
-        inputs: &Value,
+        inputs: Value,
     ) -> Result<Value, OperatorError> {
         debug!("llm request");
         let url = inputs
@@ -51,7 +51,7 @@ impl Operator for LlmOperator {
 
         let system = inputs.get("system").and_then(|v| v.as_str());
 
-        let (images, has_images) = extract_images(inputs);
+        let (images, has_images) = extract_images(&inputs);
         let skip_vision_check = inputs
             .get("skip_vision_check")
             .and_then(|v| v.as_bool())

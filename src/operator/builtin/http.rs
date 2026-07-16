@@ -14,7 +14,7 @@ impl Operator for HttpOperator {
 
     async fn run(
         &self,
-        inputs: &Value,
+        inputs: Value,
     ) -> Result<Value, OperatorError> {
         let url = inputs.get("url").and_then(|v| v.as_str())
             .ok_or_else(|| OperatorError::Config("缺少 url".into()))?;

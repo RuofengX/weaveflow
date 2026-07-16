@@ -25,22 +25,19 @@ pub async fn execute_iterate(
 ) -> WeaveResult<Value> {
     let over_ref = resolve_ref(scope, &cfg.over)?;
 
-    let items: Vec<Value> = match &*over_ref {
-        Value::Array(arr) => arr.clone(),
-        other => vec![other.clone()],
+    let total_items = match &*over_ref {
+        Value::Array(arr) => arr.len(),
+        _ => 1,
     };
-
-    let total_items = items.len();
     let batched = cfg.batch.is_some();
     let batch_size = cfg.batch.as_ref().map(|b| b.size as usize);
 
-    let chunks: Vec<Vec<Value>> = if let Some(bs) = batch_size {
-        items.chunks(bs).map(|c| c.to_vec()).collect()
+    let total_chunks: usize = if let Some(bs) = batch_size {
+        (total_items + bs - 1) / bs.max(1)
     } else {
-        items.into_iter().map(|item| vec![item]).collect()
+        total_items
     };
 
-    let total_chunks = chunks.len() as u64;
     let max_workers = cfg.max_workers.map(|n| n as usize).unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(|n| n.get())
@@ -64,7 +61,7 @@ pub async fn execute_iterate(
             StepState::Iterating {
                 started_at,
                 progress: IterateProgress {
-                    total: total_chunks,
+                    total: total_chunks as u64,
                     done: 0,
                     errors: 0,
                     skip: 0,
@@ -73,23 +70,38 @@ pub async fn execute_iterate(
         )
         .await;
 
-    let mut results: Vec<Value> = vec![Value::Null; total_chunks as usize];
-    let mut remaining: Vec<_> = chunks.into_iter().enumerate().collect();
+    // 将 operator 解析移到循环外，避免重复分配
+    let op: Arc<dyn Operator> = Arc::from(resolve_operator(step)?);
+
+    let mut results: Vec<Value> = vec![Value::Null; total_chunks];
+    let mut remaining: Vec<usize> = (0..total_chunks).collect();
     let mut done_count: u64 = 0;
 
     while !remaining.is_empty() {
-        let batch: Vec<_> = remaining
+        let batch: Vec<usize> = remaining
             .drain(..max_workers.min(remaining.len()))
             .collect();
         let mut batch_futures = Vec::new();
 
-        for (idx, chunk) in batch {
+        for &idx in &batch {
+            // 切片访问 over 数组，不克隆整个数组
             let data = if batched {
-                Value::Array(chunk)
+                let bs = batch_size.unwrap();
+                let start = idx * bs;
+                let end = (start + bs).min(total_items);
+                let arr: Vec<Value> = match &*over_ref {
+                    Value::Array(a) => a[start..end].to_vec(),
+                    _ => vec![(*over_ref).clone()],
+                };
+                Value::Array(arr)
             } else {
-                chunk.into_iter().next().unwrap_or(Value::Null)
+                match &*over_ref {
+                    Value::Array(a) => a[idx].clone(),
+                    _ => (*over_ref).clone(),
+                }
             };
-            let op: Box<dyn Operator> = resolve_operator(step)?;
+
+            let op = op.clone();
             let mut item_inputs = inputs.clone();
             if let Value::Object(ref mut map) = item_inputs {
                 map.insert("data".to_string(), data);
@@ -97,7 +109,7 @@ pub async fn execute_iterate(
 
             batch_futures.push(async move {
                 let output = op
-                    .run(&item_inputs)
+                    .run(item_inputs)
                     .await?;
                 Ok::<_, WeaveError>((idx, output))
             });
@@ -108,9 +120,9 @@ pub async fn execute_iterate(
             let (idx, val) = r?;
             results[idx] = val;
             done_count += 1;
-            if done_count.is_multiple_of(10) || done_count == total_chunks {
+            if done_count.is_multiple_of(10) || done_count == total_chunks as u64 {
                 tracker
-                    .update_iterate(task_id, &step.id, done_count, total_chunks)
+                    .update_iterate(task_id, &step.id, done_count, total_chunks as u64)
                     .await;
             }
         }

@@ -13,7 +13,7 @@ impl Operator for JsOperator {
         OperatorSpec::new("js", "JS 自定义算子 (rquickjs)")
     }
 
-    async fn run(&self, inputs: &Value) -> Result<Value, OperatorError> {
+    async fn run(&self, inputs: Value) -> Result<Value, OperatorError> {
         let code = inputs
             .get("code")
             .and_then(|v| v.as_str())
