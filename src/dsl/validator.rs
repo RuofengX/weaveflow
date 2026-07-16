@@ -479,12 +479,14 @@ fn check_iterate_config(
     }
 }
 
-fn check_js_syntax(id: &StepId, code: &str, report: &mut ValidationReport) {
-    let re = regex::Regex::new(r"\{\{[a-zA-Z_][\w.]*\}\}")
-        .expect("template regex");
-    let sanitized = re.replace_all(code, "\"__placeholder__\"");
+fn check_js_syntax(id: &StepId, code: &RefValue, report: &mut ValidationReport) {
+    let source = match code {
+        RefValue::Literal(serde_json::Value::String(s)) => s.as_str(),
+        RefValue::Ref(_) => return,
+        _ => return,
+    };
     let script = format!(
-        "{sanitized}\ntry {{ var __check__ = function(){{}}; }} catch(__e__) {{}}\n"
+        "{source}\ntry {{ var __check__ = function(){{}}; }} catch(__e__) {{}}\n"
     );
     let rt = match rquickjs::Runtime::new() {
         Ok(r) => r,

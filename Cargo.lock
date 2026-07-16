@@ -2832,7 +2832,6 @@ dependencies = [
  "ratatui",
  "rayon",
  "redb",
- "regex",
  "reqwest",
  "rquickjs",
  "rust-yaml",

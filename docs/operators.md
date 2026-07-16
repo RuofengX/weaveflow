@@ -25,20 +25,20 @@
 
 ## js — 内联 QuickJS 沙箱
 
-在 QuickJS 沙箱中执行内联 JS 代码。不注册即可写自定义逻辑。
+在 QuickJS 沙箱中执行 JS 代码。不注册即可写自定义逻辑。
 
 | 输入 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `code` | string | ✓ | — | JS 源码，须顶层定义 `function run(data)` |
+| `code` | RefValue | ✓ | — | JS 源码字符串或 `{step_id.output}` 引用 |
 | `data` | RefValue | — | — | 传给 JS 的输入数据 |
 
 JS 运行时规范：
-- 闭包顶层必须定义 `function run(data) { ... }`，返回可 JSON 序列化的值
-- `data` = 输入数据（来自 `data` 字段），`data.data_base64` / `data.data_utf8` = 二进制辅助字段
-- 支持 `{{step_id.output}}` 双花括号模板（运行时 resolve）
+- 顶层必须定义 `function run(data) { ... }`，返回可 JSON 序列化的值
+- `data` = 输入数据（来自 `data` 字段）
 - 无 `fs`、`net`、`process` 等 Node.js API
 
 ```yaml
+# 内联 JS 代码
 - id: custom_sort
   type: js
   inputs:
@@ -49,6 +49,18 @@ JS 运行时规范：
         });
       }
     data: "{upstream.output}"
+
+# 从上游步骤引用 JS 代码
+- id: code_builder
+  type: base64
+  inputs:
+    data: "{file_read.output.content}"
+    mode: decode
+- id: run_code
+  type: js
+  inputs:
+    code: "{code_builder.output}"
+    data: "{data_step.output}"
 ```
 
 ---

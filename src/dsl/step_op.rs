@@ -60,10 +60,10 @@ pub struct HttpInputs {
 }
 
 /// JS 算子的 code 字段在 inputs.code 中。
-/// `{{step.output}}` 双花括号在运行时由 `resolve_code_templates` 处理。
+/// 使用标准 `{step.output}` RefValue 语法引用上游输出的 JS 代码。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsInputs {
-    pub code: String,
+    pub code: RefValue,
     #[serde(default)]
     pub data: Option<RefValue>,
 }

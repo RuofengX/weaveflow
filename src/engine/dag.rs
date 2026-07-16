@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use tracing::debug;
 
-use crate::dsl::{PipelineDef, StepDef, StepId, StepOp, VariablePath};
-use crate::vm::resolver::extract_code_template_deps;
+use crate::dsl::{PipelineDef, StepDef, StepId, VariablePath};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DagError {
@@ -63,13 +62,8 @@ impl Dag {
                 .as_ref()
                 .map(|cfg| extract_refs_from_path(&cfg.over, &step_ids))
                 .unwrap_or_default();
-            let code_deps = match &step.op {
-                StepOp::Js(inputs) => extract_code_template_deps(&inputs.code, &step_ids),
-                _ => vec![],
-            };
             let all_deps: Vec<StepId> = deps.into_iter()
                 .chain(iterate_deps)
-                .chain(code_deps)
                 .collect();
             for dep_id in all_deps {
                 if !steps.contains_key(&dep_id) {

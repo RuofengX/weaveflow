@@ -89,7 +89,7 @@ pub async fn execute_iterate(
             } else {
                 chunk.into_iter().next().unwrap_or(Value::Null)
             };
-            let op: Box<dyn Operator> = resolve_operator(step, scope)?;
+            let op: Box<dyn Operator> = resolve_operator(step)?;
             let config = config.clone();
 
             batch_futures.push(async move {

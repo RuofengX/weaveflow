@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -148,62 +147,4 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Arc<Value>
             }
         }
     }
-}
-
-pub fn resolve_code_templates(code: &str, scope: &Scope) -> WeaveResult<String> {
-    let re = regex::Regex::new(r"\{\{([a-zA-Z_][\w.]*)\}\}")
-        .map_err(|e| WeaveError::Internal(format!("code template regex: {e}")))?;
-
-    let mut result = code.to_string();
-    for cap in re.captures_iter(code) {
-        let ref_expr = &cap[1];
-        let parts: Vec<&str> = ref_expr.split('.').collect();
-        if parts.is_empty() || parts[0].is_empty() {
-            continue;
-        }
-        let step_id = StepId::from(parts[0]);
-        let value = scope.get_output(&step_id).ok_or_else(|| {
-            WeaveError::Internal(format!(
-                "code 模板 {{}} 引用了不存在的步骤: {step_id}"
-            ))
-        })?;
-
-        let resolved =
-            if parts.len() <= 1 || (parts.len() == 2 && parts[1] == "output") {
-                match &*value {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                }
-            } else {
-                let mut current = &*value;
-                let start = if parts[1] == "output" { 2 } else { 1 };
-                for part in &parts[start..] {
-                    current = current.get(part).unwrap_or(&Value::Null);
-                }
-                match current {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                }
-            };
-
-        result = result.replace(&cap[0], &resolved);
-    }
-
-    Ok(result)
-}
-
-pub fn extract_code_template_deps(code: &str, known_steps: &HashSet<StepId>) -> Vec<StepId> {
-    let re = regex::Regex::new(r"\{\{([a-zA-Z_][\w.]*)\}\}").unwrap();
-    let mut deps = Vec::new();
-    for cap in re.captures_iter(code) {
-        let ref_expr = &cap[1];
-        if let Some(step_id) = ref_expr.split('.').next()
-            && known_steps.contains(step_id)
-        {
-            deps.push(StepId::from(step_id));
-        }
-    }
-    deps.sort();
-    deps.dedup();
-    deps
 }

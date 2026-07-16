@@ -147,7 +147,7 @@ Return `Value` — all operator outputs are JSON. Scope natively stores `Arc<Val
 | Operator | DSL type | Feature |
 |----------|----------|---------|
 | HTTP | `http` | HTTP requests |
-| JS sandbox | `js` | Inline QuickJS, `code` field in inputs (template `{{step.output}}` resolved at runtime) |
+| JS sandbox | `js` | Inline QuickJS, `code` field in inputs (RefValue: literal string or `{step.output}` ref) |
 | Filter | `filter` | Array filter by field/operator/value (rayon parallel) |
 | Sort | `sort` | Array sort by field/order (rayon parallel) |
 | Dedup | `dedup` | Array deduplication by field |
@@ -221,5 +221,5 @@ The validator serializes each step's op via `serde_json::to_value(&step.op)` and
 ## Caveats
 
 - All operator outputs are JSON `Value` — Scope natively stores `Arc<Value>`.
-- JS operator: `input.config.<key>` and `input.<key>` have different semantics. The `code` field supports `{{step_id.output}}` double-brace templates resolved before evaluation.
+- JS operator: `code` field is a `RefValue` — supports literal JS strings and `{step_id.output}` refs. Resolved code is read from config at runtime.
 - When adding a new step type to `StepOp`, you MUST also add the corresponding `Raw*Inputs` struct + `RawStepOp` variant + `From` conversion arm in `src/dsl/raw.rs`. Missing any of these = compile error at the `From<RawStepOp> for StepOp` match.

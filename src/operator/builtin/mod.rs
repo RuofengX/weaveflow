@@ -39,6 +39,7 @@ pub fn register_all(ops: &mut HashMap<String, Box<dyn Operator>>) {
         Box::new(merge::MergeOperator),
         Box::new(base64::Base64Operator),
         Box::new(http::HttpOperator),
+        Box::new(js::JsOperator),
         Box::new(file::FileOperator),
         Box::new(command::CommandOperator),
         Box::new(llm::LlmOperator),

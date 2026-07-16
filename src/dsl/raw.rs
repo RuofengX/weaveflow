@@ -86,7 +86,7 @@ pub struct RawHttpInputs {
 
 #[derive(Deserialize)]
 pub struct RawJsInputs {
-    pub code: String,
+    pub code: Value,
     #[serde(default)]
     pub data: Option<Value>,
 }
@@ -221,7 +221,7 @@ impl From<RawStepOp> for StepOp {
                 body: r.body.as_ref().map(yaml_to_refvalue),
             }),
             RawStepOp::Js(r) => StepOp::Js(step_op::JsInputs {
-                code: r.code,
+                code: yaml_to_refvalue(&r.code),
                 data: r.data.as_ref().map(yaml_to_refvalue),
             }),
             RawStepOp::Filter(r) => StepOp::Filter(step_op::FilterInputs {

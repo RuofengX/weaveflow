@@ -1,5 +1,5 @@
 
-// js_code_template — 测试 code 中的 {{}} 模板引用
+// js_code_template — 测试 code 字段中使用 { } RefValue 引用上游输出的 JS 代码
 
 #[path = "common/mod.rs"]
 mod common;
@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::io::Write;
 
 #[test]
-fn code_template_basic() {
-    let yaml2 = r#"
+fn code_literal() {
+    let yaml = r#"
 name: no_template
 steps:
   - id: greet
@@ -20,18 +20,21 @@ steps:
         function run(data) { return { msg: "hello" }; }
 output: "{greet.output}"
 "#;
-    let result = run_yaml(yaml2, HashMap::new()).expect("run");
+    let result = run_yaml(yaml, HashMap::new()).expect("run");
     assert_eq!(result["msg"], json!("hello"));
 }
 
 #[test]
-fn code_template_with_file() {
+fn code_ref_from_file() {
     let mut f = tempfile::NamedTempFile::new().expect("temp file");
-    f.write_all(b"function greet(name) { return 'Hi, ' + name; }").expect("write");
+    f.write_all(
+        b"function greet(name) { return 'Hi, ' + name; }\n\nfunction run(data) {\n  return { msg: greet('Weave') };\n}",
+    )
+    .expect("write");
     let path = f.path().to_string_lossy().to_string();
 
     let yaml = r#"
-name: code_template_file
+name: code_ref_from_file
 steps:
   - id: load_util
     type: file
@@ -40,48 +43,42 @@ steps:
   - id: decode_util
     type: base64
     inputs:
-      data: "{{load_util.output.content}}"
+      data: "{load_util.output.content}"
       mode: decode
   - id: use_util
     type: js
     inputs:
-      code: |
-        {{decode_util.output}}
-
-        function run(data) {
-          return { msg: greet('Weave') };
-        }
+      code: "{decode_util.output}"
 output: "{use_util.output}"
-"#.replace("PATH_PLACEHOLDER", &path);
+"#
+    .replace("PATH_PLACEHOLDER", &path);
     let result = run_yaml(&yaml, HashMap::new()).expect("run");
     assert_eq!(result["msg"], json!("Hi, Weave"));
 }
 
 #[test]
-fn code_template_with_var() {
+fn code_ref_from_var() {
     let yaml = r#"
-name: code_template_var
+name: code_ref_from_var
 steps:
   - id: util_code
     type: var
     inputs:
-      value:
-        code: |
-          function add(a, b) {
-            return a + b;
-          }
-  - id: use_util
-    type: js
-    inputs:
-      code: |
-        {{util_code.output.value.code}}
+      value: |
+        function add(a, b) {
+          return a + b;
+        }
 
         function run(data) {
           return { sum: add(1, 2) };
         }
+  - id: use_util
+    type: js
+    inputs:
+      code: "{util_code.output.value}"
 output: "{use_util.output}"
 "#;
-    let result = run_yaml(yaml, HashMap::new()).expect("run");
+    let result = run_yaml(&yaml, HashMap::new()).expect("run");
     assert_eq!(result["sum"], json!(3));
 }
 
@@ -115,7 +112,8 @@ steps:
           };
         }
 output: "{check.output}"
-"#.replace("PATH_PLACEHOLDER", &path);
+"#
+    .replace("PATH_PLACEHOLDER", &path);
     let result = run_yaml(&yaml, HashMap::new()).expect("run");
     assert_eq!(result["has_base64"], json!(true));
     assert_eq!(result["bytes_len"], json!(5));
@@ -160,7 +158,8 @@ steps:
           return { text: s };
         }
 output: "{inflate_test.output}"
-"#.replace("B64_PLACEHOLDER", &b64);
+"#
+    .replace("B64_PLACEHOLDER", &b64);
     let result = run_yaml(&yaml, HashMap::new()).expect("run");
     assert_eq!(result["text"], json!("Hello, weave!"));
 }
@@ -186,7 +185,7 @@ steps:
         }
 output: "{r.output}"
 "#;
-    let result = run_yaml(yaml, HashMap::new()).expect("run");
+    let result = run_yaml(&yaml, HashMap::new()).expect("run");
     assert!(result["encoded"].as_str().unwrap().len() > 0);
     assert_eq!(result["restored"], json!("Hello, QuickJS!"));
 }
