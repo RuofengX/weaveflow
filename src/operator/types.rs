@@ -40,7 +40,6 @@ pub trait Operator: Send + Sync {
 
     async fn run(
         &self,
-        data: &Value,
-        config: &Value,
+        inputs: &Value,
     ) -> Result<Value, OperatorError>;
 }

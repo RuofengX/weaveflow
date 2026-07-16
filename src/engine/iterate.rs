@@ -18,7 +18,7 @@ pub async fn execute_iterate(
     _db: Arc<Mutex<Database>>,
     scope: &mut Scope,
     step: &StepDef,
-    config: Value,
+    inputs: &Value,
     cfg: &IterateConfig,
     task_id: &TaskId,
     tracker: &TaskTracker,
@@ -90,11 +90,14 @@ pub async fn execute_iterate(
                 chunk.into_iter().next().unwrap_or(Value::Null)
             };
             let op: Box<dyn Operator> = resolve_operator(step)?;
-            let config = config.clone();
+            let mut item_inputs = inputs.clone();
+            if let Value::Object(ref mut map) = item_inputs {
+                map.insert("data".to_string(), data);
+            }
 
             batch_futures.push(async move {
                 let output = op
-                    .run(&data, &config)
+                    .run(&item_inputs)
                     .await?;
                 Ok::<_, WeaveError>((idx, output))
             });

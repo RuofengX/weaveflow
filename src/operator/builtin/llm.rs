@@ -7,10 +7,10 @@ use crate::operator::{Operator, OperatorError, OperatorSpec};
 /// LLM 算子：调用 OpenAI 兼容的 chat completions API，直接返回文本内容。
 pub struct LlmOperator;
 
-fn extract_images(config: &Value) -> (Vec<&str>, bool) {
+fn extract_images(inputs: &Value) -> (Vec<&str>, bool) {
     let mut found = false;
 
-    let images: Vec<&str> = match config.get("images_b64").or_else(|| config.get("image_base64")) {
+    let images: Vec<&str> = match inputs.get("images_b64").or_else(|| inputs.get("image_base64")) {
         Some(Value::String(s)) => { found = true; vec![s.as_str()] }
         Some(Value::Array(arr)) => {
             let imgs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
@@ -31,29 +31,28 @@ impl Operator for LlmOperator {
 
     async fn run(
         &self,
-        _data: &Value,
-        config: &Value,
+        inputs: &Value,
     ) -> Result<Value, OperatorError> {
         debug!("llm request");
-        let url = config
+        let url = inputs
             .get("url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| OperatorError::Config("llm 缺少 url".into()))?;
 
-        let model = config
+        let model = inputs
             .get("model")
             .and_then(|v| v.as_str())
             .ok_or_else(|| OperatorError::Config("llm 缺少 model".into()))?;
 
-        let prompt = config
+        let prompt = inputs
             .get("prompt")
             .and_then(|v| v.as_str())
             .ok_or_else(|| OperatorError::Config("llm 缺少 prompt".into()))?;
 
-        let system = config.get("system").and_then(|v| v.as_str());
+        let system = inputs.get("system").and_then(|v| v.as_str());
 
-        let (images, has_images) = extract_images(config);
-        let skip_vision_check = config
+        let (images, has_images) = extract_images(inputs);
+        let skip_vision_check = inputs
             .get("skip_vision_check")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
@@ -65,15 +64,15 @@ impl Operator for LlmOperator {
                 "images provided to llm operator — ensure model '{model}' supports vision/image inputs. Set skip_vision_check=true to suppress this warning."
             );
         }
-        let mime_type = config
+        let mime_type = inputs
             .get("image_type")
             .and_then(|v| v.as_str())
             .unwrap_or("image/jpeg");
-        let max_tokens = config
+        let max_tokens = inputs
             .get("max_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(4096);
-        let temperature = config
+        let temperature = inputs
             .get("temperature")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);

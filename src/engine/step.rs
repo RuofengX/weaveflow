@@ -2,7 +2,7 @@
 //!
 //! 单个 step 的执行流程：
 //!   1. 解析输入（slots、环境变量、上游输出）
-//!   2. 基于 (op_type, data, config) 计算内容寻址缓存 key
+//!   2. 基于 (op_type, inputs) 计算内容寻址缓存 key
 //!   3. 查缓存 → 命中 → 直接返回
 //!   4. 如果配置了 iterate → 展开数组分批执行 → 结果写入缓存
 //!   5. 否则 → 解析算子 → execute_with_retry（含重试）→ 写入缓存
@@ -31,14 +31,14 @@ pub async fn execute_step(
     tracker: &TaskTracker,
 ) -> WeaveResult<Value> {
     // 1. 解析输入：将 scope 中的 slots、env、上游输出填入 step 的 inputs 占位符。
-    let (data, config) = resolve_inputs(scope, step)?;
+    let inputs = resolve_inputs(scope, step)?;
     trace!(step = %step.id, op = %step.op.op_type(), "inputs resolved");
 
     // 2. 计算内容寻址缓存 key。
-    //    相同 (op_type, data, config) 总是映射到同一 key — iterate 和
+    //    相同 (op_type, inputs) 总是映射到同一 key — iterate 和
     //    非 iterate 路径共享此 key，因此 iterate 的缓存结果可以服务于
     //    非 iterate 运行（反之亦然），只要输入匹配。
-    let cache_key = compute_cache_key(step.op.op_type(), &data, &config);
+    let cache_key = compute_cache_key(step.op.op_type(), &inputs);
     {
         let db_lock = db.lock().await;
         if let Some(v) = db_lock.check_cache_bytes(&cache_key)? {
@@ -62,7 +62,7 @@ pub async fn execute_step(
             db.clone(),
             scope,
             step,
-            config,
+            &inputs,
             cfg,
             task_id,
             tracker,
@@ -80,42 +80,41 @@ pub async fn execute_step(
     // 4. 解析算子并直接执行（含重试）。
     let op: Box<dyn Operator> = resolve_operator(step)?;
     info!(step = %step.id, op = %step.op.op_type(), "executing");
-    execute_with_retry(db, op.as_ref(), &data, &config, &cache_key, step).await
+    execute_with_retry(db, op.as_ref(), &inputs, &cache_key, step).await
 }
 
-/// 调用 op.run(data, config)，失败时按重试配置自动重试。
+/// 调用 op.run(inputs)，失败时按重试配置自动重试。
 /// 成功后输出写入缓存；最终失败时返回最后一次错误。
 pub async fn execute_with_retry(
     db: Arc<Mutex<Database>>,
     op: &dyn Operator,
-    data: &Value,
-    config: &Value,
+    inputs: &Value,
     cache_key: &[u8],
     step: &StepDef,
 ) -> WeaveResult<Value> {
     let max_attempts = step.retry.as_ref().map(|r| r.max_attempts).unwrap_or(1);
     let delay_ms = step.retry.as_ref().map(|r| r.delay_ms).unwrap_or(1000);
 
-    for _attempt in 0..max_attempts {
-        debug!(step = %step.id, attempt = _attempt + 1, max_attempts, "executing operator");
-        match op.run(data, config).await {
+    for attempt in 0..max_attempts {
+        debug!(step = %step.id, attempt = attempt + 1, max_attempts, "executing operator");
+        match op.run(inputs).await {
             Ok(output) => {
-                if _attempt > 0 {
-                    info!(step = %step.id, attempt = _attempt + 1, "retry succeeded");
+                if attempt > 0 {
+                    info!(step = %step.id, attempt = attempt + 1, "retry succeeded");
                 }
                 {
                     let db_lock = db.lock().await;
                     db_lock.set_cache_bytes(cache_key, &output)?;
                 }
-                trace!(step = %step.id, attempt = _attempt + 1, "output cached");
+                trace!(step = %step.id, attempt = attempt + 1, "output cached");
                 return Ok(output);
             }
-            Err(_) if _attempt + 1 < max_attempts => {
-                warn!(step = %step.id, attempt = _attempt + 1, max_attempts, delay_ms, "retrying");
+            Err(_) if attempt + 1 < max_attempts => {
+                warn!(step = %step.id, attempt = attempt + 1, max_attempts, delay_ms, "retrying");
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
             Err(e) => {
-                warn!(step = %step.id, attempt = _attempt + 1, max_attempts, "operator failed");
+                warn!(step = %step.id, attempt = attempt + 1, max_attempts, "operator failed");
                 return Err(e.into());
             }
         }

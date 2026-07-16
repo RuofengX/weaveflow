@@ -16,12 +16,12 @@ impl Operator for SortOperator {
 
     async fn run(
         &self,
-        data: &Value,
-        config: &Value,
+        inputs: &Value,
     ) -> Result<Value, OperatorError> {
-        let field = config.get("field").and_then(|v| v.as_str()).unwrap_or("");
+        let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("");
         debug!(field, "sort operator");
-        let order = config.get("order").and_then(|v| v.as_str()).unwrap_or("asc");
+        let order = inputs.get("order").and_then(|v| v.as_str()).unwrap_or("asc");
+        let data = inputs.get("data").unwrap_or(&Value::Null);
 
         let is_array = data.is_array();
         let mut arr: Vec<Value> = match data {

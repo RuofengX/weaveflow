@@ -15,11 +15,11 @@ impl Operator for Base64Operator {
 
     async fn run(
         &self,
-        data: &Value,
-        config: &Value,
+        inputs: &Value,
     ) -> Result<Value, OperatorError> {
-        let mode = config.get("mode").and_then(|v| v.as_str()).unwrap_or("encode");
+        let mode = inputs.get("mode").and_then(|v| v.as_str()).unwrap_or("encode");
         debug!(mode, "base64 operator");
+        let data = inputs.get("data").unwrap_or(&Value::Null);
         let input = match data {
             Value::String(s) => s.clone(),
             other => other.to_string(),

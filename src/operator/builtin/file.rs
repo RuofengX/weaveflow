@@ -56,12 +56,11 @@ impl Operator for FileOperator {
 
     async fn run(
         &self,
-        _data: &Value,
-        config: &Value,
+        inputs: &Value,
     ) -> Result<Value, OperatorError> {
         // 本地路径优先
         debug!("file operator");
-        if let Some(path) = config.get("path").and_then(|v| v.as_str()) {
+        if let Some(path) = inputs.get("path").and_then(|v| v.as_str()) {
             let bytes = tokio::fs::read(path)
                 .await
                 .map_err(|e| OperatorError::Runtime(format!("读取文件 {path}: {e}")))?;
@@ -76,7 +75,7 @@ impl Operator for FileOperator {
         }
 
         // 远程 URL
-        if let Some(url) = config.get("url").and_then(|v| v.as_str()) {
+        if let Some(url) = inputs.get("url").and_then(|v| v.as_str()) {
             let resp = reqwest::get(url)
                 .await
                 .map_err(|e| OperatorError::Runtime(format!("HTTP GET {url}: {e}")))?;

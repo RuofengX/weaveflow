@@ -36,13 +36,13 @@ impl Operator for FilterOperator {
 
     async fn run(
         &self,
-        data: &Value,
-        config: &Value,
+        inputs: &Value,
     ) -> Result<Value, OperatorError> {
-        let field = config.get("field").and_then(|v| v.as_str()).unwrap_or("");
+        let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("");
         debug!(field, "filter operator");
-        let operator = config.get("operator").and_then(|v| v.as_str()).unwrap_or("eq");
-        let ref_value = config.get("value").unwrap_or(&Value::Null);
+        let operator = inputs.get("operator").and_then(|v| v.as_str()).unwrap_or("eq");
+        let ref_value = inputs.get("value").unwrap_or(&Value::Null);
+        let data = inputs.get("data").unwrap_or(&Value::Null);
 
         let is_array = data.is_array();
         let arr: Vec<Value> = match data {

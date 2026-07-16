@@ -65,7 +65,7 @@ src/
 | Raw → Pipeline conversion | `raw.rs` uses `Raw*Inputs` structs with plain types (no RefValue); `From<RawStepOp> for StepOp` explicitly converts `"{...}"` strings to `RefValue::Ref` |
 | Scope | HashMap<String, Arc<Value>> — O(1) get/set, clone = refcount inc |
 | Storage | redb — all values inline, no external spill files |
-| Cache | SHA256(resolved input bytes) content-addressed dedup |
+| Cache | SHA256(resolved inputs bytes) content-addressed dedup |
 | Variables | `{slots.name}` / `{env.KEY}` / `{step_id.output}` / `{step_id.output.field}` |
 | Concurrency | DAG layer `join_all` + iterate chunk `join_all` + rayon inside operators |
 
@@ -136,7 +136,7 @@ pub struct IterateConfig {
 #[async_trait]
 pub trait Operator: Send + Sync {
     fn spec(&self) -> OperatorSpec;
-    async fn run(&self, data: &Value, config: &Value)
+    async fn run(&self, inputs: &Value)
         -> Result<Value, OperatorError>;
 }
 
@@ -191,13 +191,9 @@ pub enum RefValue {
 
 No custom `visit_*` deserialization — the `{...}` detection happens in `raw.rs` during conversion, not in the `RefValue` Deserialize.
 
-## Resolver: non-"data" fields must parse bytes
+## Resolver
 
-In `src/vm/resolver.rs`, `resolve_value_tree` resolves `RefValue::Ref` → bytes from scope, then:
-- If the key is `"data"`: keep the raw bytes
-- Otherwise: re-parse bytes via `serde_json::from_slice` back to `Value`
-
-Without this, non-data keys in downstream operators (like merge's `b`, http's `url`) get `Value::Null`.
+In `src/vm/resolver.rs`, `resolve_value_tree` resolves `RefValue::Ref` →Value from scope. All resolved fields are merged into a single `Value::Object` — there is no data/config split at the resolver level. Each operator receives the full inputs map and accesses whatever keys it needs.
 
 ## Validator: ref detection
 
@@ -221,5 +217,5 @@ The validator serializes each step's op via `serde_json::to_value(&step.op)` and
 ## Caveats
 
 - All operator outputs are JSON `Value` — Scope natively stores `Arc<Value>`.
-- JS operator: `code` field is a `RefValue` — supports literal JS strings and `{step_id.output}` refs. Resolved code is read from config at runtime.
+- JS operator: `code` field is a `RefValue` — supports literal JS strings and `{step_id.output}` refs. Resolved code is read from inputs at runtime.
 - When adding a new step type to `StepOp`, you MUST also add the corresponding `Raw*Inputs` struct + `RawStepOp` variant + `From` conversion arm in `src/dsl/raw.rs`. Missing any of these = compile error at the `From<RawStepOp> for StepOp` match.

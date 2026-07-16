@@ -14,22 +14,21 @@ impl Operator for CommandOperator {
 
     async fn run(
         &self,
-        _data: &Value,
-        config: &Value,
+        inputs: &Value,
     ) -> Result<Value, OperatorError> {
-        let cmd = config
+        let cmd = inputs
             .get("command")
-            .or_else(|| config.get("cmd"))
+            .or_else(|| inputs.get("cmd"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| OperatorError::Config("command 算子需要 command 字段".into()))?;
         debug!(cmd = %cmd, "command execution");
 
-        let shell = config
+        let shell = inputs
             .get("shell")
             .and_then(|v| v.as_str())
             .unwrap_or("sh");
 
-        let stdin_data = config
+        let stdin_data = inputs
             .get("stdin")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());

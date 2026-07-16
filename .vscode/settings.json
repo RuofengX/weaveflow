@@ -1,4 +1,9 @@
 {
     "chat.disableAIFeatures": true,
-    "rust-analyzer.testExplorer": true
+    "rust-analyzer.testExplorer": true,
+    "terminal.integrated.allowChords": false,
+    "terminal.integrated.defaultProfile.linux": "bash",
+    "terminal.integrated.enableVisualBell": true,
+    "editor.experimentalGpuAcceleration": "off",
+    "rust-analyzer.semanticHighlighting.punctuation.enable": true
 }

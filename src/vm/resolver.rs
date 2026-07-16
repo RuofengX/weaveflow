@@ -10,7 +10,7 @@ use crate::vm::Scope;
 pub fn resolve_inputs(
     scope: &Scope,
     step: &crate::dsl::StepDef,
-) -> WeaveResult<(Arc<Value>, Value)> {
+) -> WeaveResult<Value> {
     let as_name = step.iterate.as_ref().map(|c| c.as_name.as_str());
 
     let op_value = serde_json::to_value(&step.op)
@@ -23,7 +23,7 @@ fn resolve_value_tree(
     scope: &Scope,
     val: &Value,
     as_name: Option<&str>,
-) -> WeaveResult<(Arc<Value>, Value)> {
+) -> WeaveResult<Value> {
     match val {
         Value::Object(map) => {
             if map.len() == 1 && map.contains_key("Ref") {
@@ -32,60 +32,31 @@ fn resolve_value_tree(
                 if let Some(as_name) = as_name
                     && path.parts.first().map(|p| p.as_str()) == Some(as_name)
                 {
-                    return Ok((Arc::new(Value::Null), Value::String(format!("{{{}}}", path.parts.join(".")))));
+                    return Ok(Value::String(format!("{{{}}}", path.parts.join("."))));
                 }
                 let value = resolve_ref(scope, &path)?;
-                let resolved = (*value).clone();
-                return Ok((value, resolved));
-            }
-
-            if map.len() == 1 && map.contains_key("Literal") {
+                Ok((*value).clone())
+            } else if map.len() == 1 && map.contains_key("Literal") {
                 let lit = &map["Literal"];
-                let (d, resolved) = resolve_value_tree(scope, lit, as_name)?;
-                let data = if resolved.is_null() {
-                    Arc::new(Value::Null)
-                } else if d.is_null() {
-                    Arc::new(resolved.clone())
-                } else {
-                    d
-                };
-                return Ok((data, resolved));
-            }
-
-            let mut data: Arc<Value> = Arc::new(Value::Null);
-            let mut config_map = serde_json::Map::new();
-
-            if let Some(inputs_val) = map.get("inputs") {
-                if let Value::Object(inputs_map) = inputs_val {
-                    for (k, v) in inputs_map {
-                        let (d, resolved) = resolve_value_tree(scope, v, as_name)?;
-                        if k == "data" {
-                            data = d;
-                        } else {
-                            config_map.insert(k.clone(), resolved);
-                        }
-                    }
+                resolve_value_tree(scope, lit, as_name)
+            } else if let Some(inputs_val) = map.get("inputs") {
+                resolve_value_tree(scope, inputs_val, as_name)
+            } else {
+                let mut resolved_map = serde_json::Map::new();
+                for (k, v) in map {
+                    resolved_map.insert(k.clone(), resolve_value_tree(scope, v, as_name)?);
                 }
-                return Ok((data, Value::Object(config_map)));
+                Ok(Value::Object(resolved_map))
             }
-
-            for (k, v) in map {
-                let (d, resolved) = resolve_value_tree(scope, v, as_name)?;
-                if k == "data" {
-                    data = d;
-                }
-                config_map.insert(k.clone(), resolved);
-            }
-            Ok((data, Value::Object(config_map)))
         }
         Value::Array(arr) => {
             let resolved: Vec<Value> = arr
                 .iter()
-                .map(|v| resolve_value_tree(scope, v, as_name).map(|(_, val)| val))
+                .map(|v| resolve_value_tree(scope, v, as_name))
                 .collect::<Result<_, _>>()?;
-            Ok((Arc::new(Value::Null), Value::Array(resolved)))
+            Ok(Value::Array(resolved))
         }
-        other => Ok((Arc::new(Value::Null), other.clone())),
+        other => Ok(other.clone()),
     }
 }
 

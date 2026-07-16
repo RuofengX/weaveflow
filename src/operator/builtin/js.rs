@@ -13,14 +13,15 @@ impl Operator for JsOperator {
         OperatorSpec::new("js", "JS 自定义算子 (rquickjs)")
     }
 
-    async fn run(&self, data: &Value, config: &Value) -> Result<Value, OperatorError> {
-        let code = config
+    async fn run(&self, inputs: &Value) -> Result<Value, OperatorError> {
+        let code = inputs
             .get("code")
             .and_then(|v| v.as_str())
             .ok_or_else(|| OperatorError::Config("JS code 字段缺失或不是字符串".into()))?;
-        let timeout = config.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30_000);
+        let timeout = inputs.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30_000);
 
         debug!("js operator");
+        let data = inputs.get("data").unwrap_or(&Value::Null);
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(timeout),
             crate::quickjs::run_js(code, "run", data),

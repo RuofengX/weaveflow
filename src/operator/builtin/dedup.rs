@@ -15,11 +15,11 @@ impl Operator for DedupOperator {
 
     async fn run(
         &self,
-        data: &Value,
-        config: &Value,
+        inputs: &Value,
     ) -> Result<Value, OperatorError> {
-        let field = config.get("field").and_then(|v| v.as_str()).unwrap_or("");
+        let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("");
         debug!(field, "dedup operator");
+        let data = inputs.get("data").unwrap_or(&Value::Null);
         let is_array = data.is_array();
         let arr: Vec<Value> = match data {
             Value::Array(a) => a.clone(),

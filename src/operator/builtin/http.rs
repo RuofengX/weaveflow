@@ -14,17 +14,17 @@ impl Operator for HttpOperator {
 
     async fn run(
         &self,
-        data: &Value,
-        config: &Value,
+        inputs: &Value,
     ) -> Result<Value, OperatorError> {
-        let url = config.get("url").and_then(|v| v.as_str())
+        let url = inputs.get("url").and_then(|v| v.as_str())
             .ok_or_else(|| OperatorError::Config("缺少 url".into()))?;
-        let method = config.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+        let method = inputs.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
         debug!(url = %url, method, "http request");
 
         let client = reqwest::Client::new();
-        let body_bytes = if !data.is_null() {
-            serde_json::to_vec(data).unwrap_or_default()
+        let body_data = inputs.get("data");
+        let body_bytes = if body_data.map(|v| !v.is_null()).unwrap_or(false) {
+            serde_json::to_vec(body_data.unwrap()).unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -37,7 +37,7 @@ impl Operator for HttpOperator {
             _ => return Err(OperatorError::Config(format!("不支持 HTTP 方法: {method}"))),
         };
 
-        if let Some(headers) = config.get("headers").and_then(|v| v.as_object()) {
+        if let Some(headers) = inputs.get("headers").and_then(|v| v.as_object()) {
             for (k, v) in headers {
                 if let Some(val) = v.as_str() {
                     req_builder = req_builder.header(k.as_str(), val);

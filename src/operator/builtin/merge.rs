@@ -14,17 +14,17 @@ impl Operator for MergeOperator {
 
     async fn run(
         &self,
-        data: &Value,
-        config: &Value,
+        inputs: &Value,
     ) -> Result<Value, OperatorError> {
         debug!("merge operator");
-        let a = if !data.is_null() {
-            data.clone()
-        } else {
-            config.get("a").cloned().unwrap_or(Value::Null)
+        let a = inputs.get("a")
+            .or_else(|| inputs.get("data"));
+        let a = match a {
+            Some(v) if !v.is_null() => v.clone(),
+            _ => Value::Null,
         };
 
-        let b_val = config.get("b")
+        let b_val = inputs.get("b")
             .ok_or_else(|| OperatorError::Config("缺少 b 字段".into()))?;
 
         match (a.as_object(), b_val.as_object()) {
