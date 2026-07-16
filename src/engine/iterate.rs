@@ -1,3 +1,4 @@
+use chrono::Utc;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -55,7 +56,7 @@ pub async fn execute_iterate(
         "iterate started"
     );
 
-    let started_at = chrono::Utc::now().timestamp_millis();
+    let started_at = Utc::now();
     tracker
         .update_step(
             task_id,
@@ -125,8 +126,8 @@ pub async fn execute_iterate(
 
     scope.set_output(&step.id, final_result.clone());
 
-    let completed_at = chrono::Utc::now().timestamp_millis();
-    let duration_ms = (completed_at - started_at) as u64;
+    let completed_at = Utc::now();
+    let duration_ms = (completed_at - started_at).num_milliseconds() as u64;
     info!(
         step = %step.id,
         items = total_items,
@@ -142,7 +143,7 @@ pub async fn execute_iterate(
                 completed_at,
                 attempts: 1,
                 cached: false,
-                duration_ms: (completed_at - started_at) as u64,
+                duration_ms,
             },
         )
         .await;

@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -143,7 +144,7 @@ pub async fn run_inner(
             let sid = step_id.clone();
 
             futures.push(async move {
-                let started_at = chrono::Utc::now().timestamp_millis();
+                let started_at = Utc::now();
                 tracker_clone
                     .update_step(
                         &tid,
@@ -160,7 +161,7 @@ pub async fn run_inner(
             });
         }
 
-        let results: Vec<(String, i64, WeaveResult<Value>)> =
+        let results: Vec<(String, DateTime<Utc>, WeaveResult<Value>)> =
             futures::future::join_all(futures).await;
 
         let mut layer_failed = false;
@@ -169,8 +170,8 @@ pub async fn run_inner(
         for (step_id, started_at, result) in results {
             match result {
                 Ok(output) => {
-                    let completed_at = chrono::Utc::now().timestamp_millis();
-                    let duration_ms = (completed_at - started_at) as u64;
+                    let completed_at = Utc::now();
+                    let duration_ms = (completed_at - started_at).num_milliseconds() as u64;
                     debug!(step = %step_id, duration_ms, "parallel step completed");
                     scope.set_output(&step_id, output.clone());
                     {
@@ -183,8 +184,8 @@ pub async fn run_inner(
                             Some(step_id.as_str()) == last_step_id.as_deref(),
                         );
                     }
-                    let completed_at = chrono::Utc::now().timestamp_millis();
-                    let duration_ms = (completed_at - started_at) as u64;
+                    let completed_at = Utc::now();
+                    let duration_ms = (completed_at - started_at).num_milliseconds() as u64;
                     tracker
                         .update_step(
                             &task_id,
@@ -205,7 +206,7 @@ pub async fn run_inner(
                         first_error = format!("step {step_id} failed: {e}");
                         layer_failed = true;
                     }
-                    let now = chrono::Utc::now().timestamp_millis();
+                    let now = Utc::now();
                     tracker
                         .update_step(
                             &task_id,

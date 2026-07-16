@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// 步骤执行进度。状态无关的元数据在外层，状态相关的数据在 StepState 中。
@@ -23,23 +24,23 @@ impl StepProgress {
 pub enum StepState {
     Pending,
     Running {
-        started_at: i64,
+        started_at: DateTime<Utc>,
         attempts: u32,
     },
     Iterating {
-        started_at: i64,
+        started_at: DateTime<Utc>,
         progress: IterateProgress,
     },
     Completed {
-        started_at: i64,
-        completed_at: i64,
+        started_at: DateTime<Utc>,
+        completed_at: DateTime<Utc>,
         attempts: u32,
         cached: bool,
         duration_ms: u64,
     },
     Failed {
-        started_at: Option<i64>,
-        completed_at: i64,
+        started_at: Option<DateTime<Utc>>,
+        completed_at: DateTime<Utc>,
         error: String,
         attempts: u32,
     },

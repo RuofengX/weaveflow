@@ -1,3 +1,4 @@
+use chrono::Utc;
 use std::collections::{HashMap, HashSet};
 use std::io;
 
@@ -520,9 +521,10 @@ fn build_step_states(data: &Value) -> HashMap<String, (String, String)> {
                         let started = obj
                             .get("Running")
                             .and_then(|r| r.get("started_at"))
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0);
-                        let elapsed = chrono::Utc::now().timestamp_millis() - started;
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(Utc::now());
+                        let elapsed = (Utc::now() - started).num_milliseconds();
                         format!("running {}ms", elapsed.max(0))
                     }
                     "Iterating" => {
