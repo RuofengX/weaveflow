@@ -229,10 +229,15 @@ pub async fn run_inner(
         }
     }
 
-    let final_output = {
+    let final_output;
+    let output_val: Value;
+    {
         match &pipeline.output {
-            RefValue::Literal(v) => serde_json::to_vec(v)
-                .map_err(|e| WeaveError::Internal(format!("output serialize: {e}")))?,
+            RefValue::Literal(v) => {
+                output_val = v.clone();
+                final_output = serde_json::to_vec(&output_val)
+                    .map_err(|e| WeaveError::Internal(format!("output serialize: {e}")))?;
+            }
             RefValue::Ref(path) => {
                 if path.parts.is_empty() {
                     return Err(WeaveError::Internal("empty output ref".into()));
@@ -243,8 +248,9 @@ pub async fn run_inner(
                 })?;
 
                 if path.parts.len() <= 2 {
-                    serde_json::to_vec(&*value)
-                        .map_err(|e| WeaveError::Internal(format!("output serialize: {e}")))?
+                    output_val = (*value).clone();
+                    final_output = serde_json::to_vec(&output_val)
+                        .map_err(|e| WeaveError::Internal(format!("output serialize: {e}")))?;
                 } else {
                     let mut current = &*value;
                     let start = if path.parts.len() >= 2 && path.parts[1] == "output" {
@@ -255,19 +261,14 @@ pub async fn run_inner(
                     for part in &path.parts[start..] {
                         current = current.get(part).unwrap_or(&Value::Null);
                     }
-                    serde_json::to_vec(current)
-                        .map_err(|e| WeaveError::Internal(format!("output serialize: {e}")))?
+                    output_val = current.clone();
+                    final_output = serde_json::to_vec(&output_val)
+                        .map_err(|e| WeaveError::Internal(format!("output serialize: {e}")))?;
                 }
             }
         }
-    };
+    }
 
-    let output_val: Value = match serde_json::from_slice(&final_output) {
-        Ok(v) => v,
-        Err(_) => {
-            serde_json::json!(final_output)
-        }
-    };
     info!(task_id = %task_id, pipeline = %pipeline.name, "pipeline run completed");
     tracker.complete(&task_id, output_val).await;
 
