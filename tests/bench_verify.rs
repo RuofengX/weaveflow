@@ -38,7 +38,7 @@ output: "{f.output}"
     let tmp = tempfile::tempdir().unwrap();
     let db = Database::open(tmp.path().join("w.redb")).unwrap();
     let db = Arc::new(Mutex::new(db));
-    let tracker = Arc::new(TaskTracker::new());
+    let tracker = TaskTracker::new();
 
     let dag = Dag::from_pipeline(&def).unwrap();
     let layers = dag.topological_sort().unwrap();

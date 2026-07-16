@@ -191,7 +191,7 @@ pub fn setup(
     db: Arc<Mutex<Database>>,
     slots: HashMap<String, serde_json::Value>,
 ) -> (Runner, TaskId, HashMap<String, serde_json::Value>) {
-    let tracker = Arc::new(TaskTracker::new());
+    let tracker = TaskTracker::new();
 
     let dag = Dag::from_pipeline(def).expect("dag");
     let layers = dag.topological_sort().expect("topo");

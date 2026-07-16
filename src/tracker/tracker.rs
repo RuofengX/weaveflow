@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 use super::meta::TaskId;
@@ -38,21 +38,14 @@ struct RunState {
 /// - 执行器每步更新状态 + iterate 进度
 /// - WS 订阅 broadcast channel 获取 push
 /// - HTTP GET /runs/:task_id 直接查
+#[derive(Clone, Default)]
 pub struct TaskTracker {
-    runs: Mutex<HashMap<TaskId, RunState>>,
-}
-
-impl Default for TaskTracker {
-    fn default() -> Self {
-        Self::new()
-    }
+    runs: Arc<Mutex<HashMap<TaskId, RunState>>>,
 }
 
 impl TaskTracker {
     pub fn new() -> Self {
-        TaskTracker {
-            runs: Mutex::new(HashMap::new()),
-        }
+        Self::default()
     }
 
     /// 注册新 task，返回 broadcast receiver + 初始快照。

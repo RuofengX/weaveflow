@@ -25,7 +25,7 @@ pub fn run_yaml(yaml: &str, slots: HashMap<String, Value>) -> WeaveResult<Value>
 
     let (db, _dir) = temp_db();
     let db = Arc::new(Mutex::new(db));
-    let tracker = Arc::new(TaskTracker::new());
+    let tracker = TaskTracker::new();
 
     let dag = Dag::from_pipeline(&def).expect("dag");
     let layers = dag.topological_sort().expect("topo");

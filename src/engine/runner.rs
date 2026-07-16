@@ -16,11 +16,11 @@ use crate::vm::Scope;
 pub struct Runner {
     pub pipeline: PipelineDef,
     pub db: Arc<Mutex<Database>>,
-    pub tracker: Arc<TaskTracker>,
+    pub tracker: TaskTracker,
 }
 
 impl Runner {
-    pub fn new(pipeline: PipelineDef, db: Arc<Mutex<Database>>, tracker: Arc<TaskTracker>) -> Self {
+    pub fn new(pipeline: PipelineDef, db: Arc<Mutex<Database>>, tracker: TaskTracker) -> Self {
         Runner {
             pipeline,
             db,
@@ -51,7 +51,7 @@ impl Runner {
 pub async fn run_inner(
     pipeline: &PipelineDef,
     db: Arc<Mutex<Database>>,
-    tracker: &Arc<TaskTracker>,
+    tracker: &TaskTracker,
     task_id: TaskId,
     slots: HashMap<String, Value>,
 ) -> WeaveResult<Vec<u8>> {
@@ -138,7 +138,7 @@ pub async fn run_inner(
                 .clone();
             let mut sc = scope.clone();
             let db_clone = db.clone();
-            let tracker_clone = Arc::clone(tracker);
+            let tracker_clone = tracker.clone();
             let tid = task_id;
             let sid = step_id.clone();
 

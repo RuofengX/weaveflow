@@ -23,7 +23,7 @@ use weave::tracker::{LayerInfo, TaskId, TaskTracker};
 use super::logging::RingWriter;
 
 type DbRef = Arc<Mutex<Database>>;
-type TrackerRef = Arc<TaskTracker>;
+type TrackerRef = TaskTracker;
 
 // ── State ────────────────────────────────────────────────────────────────
 
@@ -548,7 +548,7 @@ pub async fn serve(args: Vec<String>) {
     let db = Database::open(data_dir.join("weave.redb")).expect("open database");
     let state = Arc::new(AppState {
         db: Arc::new(Mutex::new(db)),
-        tracker: Arc::new(TaskTracker::new()),
+        tracker: TaskTracker::new(),
         semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_permits)),
         log_ring,
     });
@@ -681,7 +681,7 @@ mod tests {
         let (db, _dir) = temp_db();
         let state = Arc::new(AppState {
             db: Arc::new(tokio::sync::Mutex::new(db)),
-            tracker: Arc::new(TaskTracker::new()),
+            tracker: TaskTracker::new(),
             semaphore: Arc::new(tokio::sync::Semaphore::new(usize::MAX >> 3)),
             log_ring: RingWriter::new(),
         });
