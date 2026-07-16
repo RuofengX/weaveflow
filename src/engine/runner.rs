@@ -161,6 +161,7 @@ pub async fn run_inner(
             });
         }
 
+        // 这里等待层中所有步骤完成后再处理错误，提高可观测性
         let results: Vec<(StepId, DateTime<Utc>, WeaveResult<Value>)> =
             futures::future::join_all(futures).await;
 
