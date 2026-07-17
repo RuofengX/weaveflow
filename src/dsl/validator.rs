@@ -466,6 +466,17 @@ fn check_iterate_config(
                 ),
             });
         }
+        if let Some(ref batch) = cfg.batch
+            && batch.size == 0
+        {
+            report.errors.push(ValidationError {
+                code: "invalid_iterate_config".into(),
+                message: format!(
+                    "步骤 {} 的 iterate.batch.size 不能为 0（省缺可移除 batch 字段）",
+                    step_id
+                ),
+            });
+        }
         if let Some(prefix) = cfg.over.parts.first()
             && prefix != "slots" && prefix != "env" && !all_step_ids.contains(prefix.as_str()) {
                 report.errors.push(ValidationError {
@@ -734,6 +745,32 @@ mod tests {
         });
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.iter().any(|e| e.code == "invalid_iterate_config"));
+    }
+
+    #[test]
+    fn iterate_batch_size_zero_rejected() {
+        let mut def = valid_def();
+        def.steps[0].iterate = Some(IterateConfig {
+            over: VariablePath::parse("{slots.url}").unwrap(),
+            as_name: "item".into(),
+            max_workers: None,
+            batch: Some(BatchConfig { size: 0 }),
+        });
+        let report = validate(&def, &ValidateOptions::default());
+        assert!(report.errors.iter().any(|e| e.code == "invalid_iterate_config"));
+    }
+
+    #[test]
+    fn iterate_batch_size_nonzero_accepted() {
+        let mut def = valid_def();
+        def.steps[0].iterate = Some(IterateConfig {
+            over: VariablePath::parse("{slots.url}").unwrap(),
+            as_name: "item".into(),
+            max_workers: None,
+            batch: Some(BatchConfig { size: 8 }),
+        });
+        let report = validate(&def, &ValidateOptions::default());
+        assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
     }
 
     #[test]

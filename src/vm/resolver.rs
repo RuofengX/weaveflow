@@ -94,6 +94,7 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Arc<Value>
             } else {
                 String::new()
             };
+            scope.record_env_value(&val);
             Ok(Arc::new(Value::String(val)))
         }
         _ => {

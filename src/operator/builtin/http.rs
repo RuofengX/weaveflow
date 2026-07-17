@@ -22,11 +22,11 @@ impl Operator for HttpOperator {
         debug!(url = %url, method, "http request");
 
         let client = reqwest::Client::new();
-        let body_data = inputs.get("data");
-        let body_bytes = if body_data.map(|v| !v.is_null()).unwrap_or(false) {
-            serde_json::to_vec(body_data.unwrap()).unwrap_or_default()
-        } else {
-            Vec::new()
+        let body_data = inputs.get("body");
+        let body_bytes = match body_data {
+            Some(Value::String(s)) => s.clone().into_bytes(),
+            Some(v) if !v.is_null() => serde_json::to_vec(v).unwrap_or_default(),
+            _ => Vec::new(),
         };
 
         let mut req_builder = match method.to_uppercase().as_str() {

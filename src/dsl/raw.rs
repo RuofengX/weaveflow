@@ -191,23 +191,29 @@ impl TryFrom<RawPipelineDef> for PipelineDef {
             description: raw.description,
             storage: raw.storage,
             slots: raw.slots,
-            steps: raw.steps.into_iter().map(StepDef::from).collect(),
+            steps: raw
+                .steps
+                .into_iter()
+                .map(StepDef::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
             output: parse_string_to_refvalue(&raw.output),
         })
     }
 }
 
-impl From<RawStepDef> for StepDef {
-    fn from(raw: RawStepDef) -> Self {
-        StepDef {
+impl TryFrom<RawStepDef> for StepDef {
+    type Error = ParseError;
+
+    fn try_from(raw: RawStepDef) -> Result<Self, Self::Error> {
+        Ok(StepDef {
             id: StepId::from(raw.id),
             after: raw.after.map(|a| a.into_iter().map(StepId::from).collect()),
-            iterate: raw.iterate.map(IterateConfig::from),
+            iterate: raw.iterate.map(IterateConfig::try_from).transpose()?,
             cache: raw.cache,
             retry: raw.retry,
             timeout: raw.timeout,
             op: raw.op.into(),
-        }
+        })
     }
 }
 
@@ -275,15 +281,17 @@ impl From<RawStepOp> for StepOp {
     }
 }
 
-impl From<RawIterateConfig> for IterateConfig {
-    fn from(raw: RawIterateConfig) -> Self {
-        IterateConfig {
+impl TryFrom<RawIterateConfig> for IterateConfig {
+    type Error = ParseError;
+
+    fn try_from(raw: RawIterateConfig) -> Result<Self, Self::Error> {
+        Ok(IterateConfig {
             over: VariablePath::parse(&raw.over)
-                .expect("iterate.over must be a valid variable path"),
+                .ok_or_else(|| ParseError::InvalidIterateOver(raw.over.clone()))?,
             as_name: raw.as_name,
             max_workers: raw.max_workers,
             batch: raw.batch,
-        }
+        })
     }
 }
 
@@ -353,6 +361,8 @@ fn replace_template_strings(v: &Value) -> Value {
 pub enum ParseError {
     #[error("YAML 解析失败: {0}")]
     Yaml(String),
+    #[error("iterate.over 必须是 {{...}} 形式的变量路径: {0}")]
+    InvalidIterateOver(String),
 }
 
 impl From<rust_yaml::Error> for ParseError {

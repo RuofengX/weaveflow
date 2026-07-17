@@ -18,13 +18,21 @@ pub fn temp_db() -> (Database, tempfile::TempDir) {
     (db, dir)
 }
 
+#[allow(dead_code)]
 pub fn run_yaml(yaml: &str, slots: HashMap<String, Value>) -> WeaveResult<Value> {
+    let (db, _dir) = temp_db();
+    run_yaml_with_db(yaml, slots, Arc::new(Mutex::new(db)))
+}
+
+pub fn run_yaml_with_db(
+    yaml: &str,
+    slots: HashMap<String, Value>,
+    db: Arc<Mutex<Database>>,
+) -> WeaveResult<Value> {
     let def = parse(yaml)?;
     let report = validate(&def, &ValidateOptions::default());
     assert!(report.is_ok(), "validation: {:?}", report.errors);
 
-    let (db, _dir) = temp_db();
-    let db = Arc::new(Mutex::new(db));
     let tracker = TaskTracker::new();
 
     let dag = Dag::from_pipeline(&def).expect("dag");

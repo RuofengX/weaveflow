@@ -114,6 +114,38 @@ output: "{s1.output}"
     }
 
     #[test]
+    fn parse_iterate_over_missing_braces_is_error_not_panic() {
+        let yaml = r#"
+name: bad_iterate
+steps:
+  - id: s
+    type: noop
+    iterate:
+      over: "slots.items"
+      as: "item"
+output: "{s.output}"
+"#;
+        let result = parse(yaml);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("iterate.over"));
+    }
+
+    #[test]
+    fn parse_iterate_over_empty_braces_is_error_not_panic() {
+        let yaml = r#"
+name: bad_iterate
+steps:
+  - id: s
+    type: noop
+    iterate:
+      over: "{}"
+      as: "item"
+output: "{s.output}"
+"#;
+        assert!(parse(yaml).is_err());
+    }
+
+    #[test]
     fn parse_with_slots() {
         let yaml = r#"
 name: with_slots

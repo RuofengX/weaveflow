@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::dsl::{IterateConfig, StepDef};
-use crate::engine::step::resolve_operator;
+use crate::engine::step::{resolve_operator, run_with_timeout};
 use crate::error::{WeaveError, WeaveResult};
 use crate::operator::Operator;
 use crate::store::Database;
@@ -23,6 +23,15 @@ pub async fn execute_iterate(
     task_id: &TaskId,
     tracker: &TaskTracker,
 ) -> WeaveResult<Value> {
+    if let Some(ref batch) = cfg.batch
+        && batch.size == 0
+    {
+        return Err(WeaveError::BadRequest(format!(
+            "步骤 {} 的 iterate.batch.size 不能为 0",
+            step.id
+        )));
+    }
+
     let over_ref = resolve_ref(scope, &cfg.over)?;
 
     let total_items = match &*over_ref {
@@ -108,9 +117,7 @@ pub async fn execute_iterate(
             }
 
             batch_futures.push(async move {
-                let output = op
-                    .run(item_inputs)
-                    .await?;
+                let output = run_with_timeout(op.as_ref(), item_inputs, step).await?;
                 Ok::<_, WeaveError>((idx, output))
             });
         }
@@ -164,4 +171,51 @@ pub async fn execute_iterate(
         .await;
 
     Ok(final_result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dsl::step_op::StepOp;
+    use crate::dsl::{BatchConfig, StepId, VariablePath};
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn batch_size_zero_returns_error_not_panic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(Mutex::new(
+            Database::open(dir.path().join("weave.redb")).expect("open db"),
+        ));
+        let mut slots = HashMap::new();
+        slots.insert("items".to_string(), serde_json::json!([1, 2, 3]));
+        let mut scope = Scope::new(slots);
+        let tracker = TaskTracker::new();
+        let step = StepDef {
+            id: StepId::from("s"),
+            after: None,
+            iterate: Some(IterateConfig {
+                over: VariablePath::parse("{slots.items}").unwrap(),
+                as_name: "item".into(),
+                max_workers: None,
+                batch: Some(BatchConfig { size: 0 }),
+            }),
+            cache: None,
+            retry: None,
+            timeout: None,
+            op: StepOp::Noop,
+        };
+        let cfg = step.iterate.clone().unwrap();
+        let result = execute_iterate(
+            db,
+            &mut scope,
+            &step,
+            &Value::Null,
+            &cfg,
+            &TaskId(uuid::Uuid::new_v4()),
+            &tracker,
+        )
+        .await;
+        let err = result.expect_err("batch.size 0 must be rejected");
+        assert!(err.to_string().contains("batch.size"), "err: {err}");
+    }
 }

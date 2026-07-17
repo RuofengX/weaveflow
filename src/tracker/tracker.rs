@@ -29,10 +29,17 @@ struct RunState {
     pipeline_name: String,
     layers: Vec<LayerInfo>,
     progress: Progress,
-    status: TaskStatus,
+    status: RunStatus,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
     tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+enum RunStatus {
+    Running,
+    Completed(serde_json::Value),
+    Failed(String),
 }
 
 /// 内存中的 task 运行时状态追踪器。
@@ -60,7 +67,6 @@ impl TaskTracker {
     ) -> (tokio::sync::broadcast::Receiver<Vec<u8>>, TaskSnapshot) {
         debug!(task_id = %task_id, pipeline = %pipeline_name, steps = step_ids.len(), "tracker create");
         let progress = Progress::from_step_ids(&step_ids);
-        let status = TaskStatus::Running(progress.clone());
         let (tx, rx) = tokio::sync::broadcast::channel(64);
 
         // Set initial state as Running with Undefined progress
@@ -69,7 +75,7 @@ impl TaskTracker {
             pipeline_name: pipeline_name.clone(),
             layers: layers.clone(),
             progress,
-            status,
+            status: RunStatus::Running,
             started_at: Some(Utc::now()),
             completed_at: None,
             tx,
@@ -121,7 +127,7 @@ impl TaskTracker {
         info!(task_id = %task_id, "tracker complete");
         let mut runs = self.runs.lock().unwrap();
         if let Some(run) = runs.get_mut(task_id) {
-            run.status = TaskStatus::Completed(output);
+            run.status = RunStatus::Completed(output);
             run.completed_at = Some(Utc::now());
             self.broadcast(run);
         }
@@ -132,7 +138,7 @@ impl TaskTracker {
         info!(task_id = %task_id, %error, "tracker fail");
         let mut runs = self.runs.lock().unwrap();
         if let Some(run) = runs.get_mut(task_id) {
-            run.status = TaskStatus::Failed(error);
+            run.status = RunStatus::Failed(error);
             run.completed_at = Some(Utc::now());
             self.broadcast(run);
         }
@@ -168,15 +174,162 @@ impl TaskTracker {
             }
             _ => None,
         };
+        let status = match &run.status {
+            RunStatus::Running => TaskStatus::Running(run.progress.clone()),
+            RunStatus::Completed(output) => TaskStatus::Completed(output.clone()),
+            RunStatus::Failed(error) => TaskStatus::Failed(error.clone()),
+        };
         TaskSnapshot {
             task_id: run.task_id.to_string(),
             pipeline_name: run.pipeline_name.clone(),
-            status: run.status.clone(),
+            status,
             layers: run.layers.clone(),
             steps: run.progress.steps.clone(),
             started_at: run.started_at,
             completed_at: run.completed_at,
             total_duration_ms,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step_id(s: &str) -> StepId {
+        StepId(s.to_string())
+    }
+
+    fn running_progress(snapshot: &TaskSnapshot) -> &Progress {
+        match &snapshot.status {
+            TaskStatus::Running(progress) => progress,
+            other => panic!("expected Running status, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_progress_reflects_step_updates() {
+        let tracker = TaskTracker::new();
+        let task_id = TaskId::new();
+        let (_rx, initial) = tracker
+            .create(task_id, "p".to_string(), vec![step_id("a"), step_id("b")], vec![])
+            .await;
+
+        let progress = running_progress(&initial);
+        assert!(progress
+            .steps
+            .iter()
+            .all(|s| matches!(s.state, StepState::Pending)));
+
+        tracker
+            .update_step(
+                &task_id,
+                &step_id("a"),
+                StepState::Running {
+                    started_at: Utc::now(),
+                    attempts: 1,
+                },
+            )
+            .await;
+
+        let snapshot = tracker.get(&task_id).await.unwrap();
+        let progress = running_progress(&snapshot);
+        assert!(matches!(
+            progress.step(&step_id("a")).unwrap().state,
+            StepState::Running { .. }
+        ));
+        assert!(matches!(
+            progress.step(&step_id("b")).unwrap().state,
+            StepState::Pending
+        ));
+
+        tracker
+            .update_step(
+                &task_id,
+                &step_id("a"),
+                StepState::Completed {
+                    started_at: Utc::now(),
+                    completed_at: Utc::now(),
+                    attempts: 1,
+                    cached: false,
+                    duration_ms: 1,
+                },
+            )
+            .await;
+
+        let snapshot = tracker.get(&task_id).await.unwrap();
+        let progress = running_progress(&snapshot);
+        assert!(matches!(
+            progress.step(&step_id("a")).unwrap().state,
+            StepState::Completed { .. }
+        ));
+        assert_eq!(
+            serde_json::to_value(&snapshot.steps).unwrap(),
+            serde_json::to_value(&progress.steps).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn broadcast_payload_progress_matches_get() {
+        let tracker = TaskTracker::new();
+        let task_id = TaskId::new();
+        let (mut rx, _initial) = tracker
+            .create(task_id, "p".to_string(), vec![step_id("a")], vec![])
+            .await;
+
+        tracker
+            .update_step(
+                &task_id,
+                &step_id("a"),
+                StepState::Running {
+                    started_at: Utc::now(),
+                    attempts: 1,
+                },
+            )
+            .await;
+
+        let bytes = rx.recv().await.unwrap();
+        let pushed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let snapshot = tracker.get(&task_id).await.unwrap();
+
+        let live_steps = serde_json::to_value(&snapshot.steps).unwrap();
+        assert_eq!(pushed["steps"], live_steps);
+        assert_eq!(pushed["status"]["Running"]["steps"], live_steps);
+        assert!(
+            pushed["status"]["Running"]["steps"][0]["state"]
+                .get("Running")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_status_keeps_live_steps() {
+        let tracker = TaskTracker::new();
+        let task_id = TaskId::new();
+        let (_rx, _initial) = tracker
+            .create(task_id, "p".to_string(), vec![step_id("a")], vec![])
+            .await;
+
+        tracker
+            .update_step(
+                &task_id,
+                &step_id("a"),
+                StepState::Completed {
+                    started_at: Utc::now(),
+                    completed_at: Utc::now(),
+                    attempts: 1,
+                    cached: false,
+                    duration_ms: 1,
+                },
+            )
+            .await;
+        tracker.complete(&task_id, serde_json::json!({"ok": true})).await;
+
+        let snapshot = tracker.get(&task_id).await.unwrap();
+        assert!(matches!(snapshot.status, TaskStatus::Completed(_)));
+        assert!(matches!(
+            snapshot.steps[0].state,
+            StepState::Completed { .. }
+        ));
     }
 }

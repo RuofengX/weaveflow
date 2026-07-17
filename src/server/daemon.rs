@@ -526,6 +526,38 @@ fn build_app(state: Arc<AppState>) -> Router {
 
 // ── Serve ─────────────────────────────────────────────────────────────────
 
+fn is_loopback_bind(addr: &str) -> bool {
+    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+fn enforce_bind_safety(bind: &str, allow_remote: bool) {
+    if is_loopback_bind(bind) {
+        return;
+    }
+    if !allow_remote {
+        eprintln!(
+            "error: refusing to bind to non-loopback address {bind} without --allow-remote.\n\
+             The weave daemon has NO authentication: anyone who can reach this port can create\n\
+             pipelines and execute arbitrary commands on this machine via the command/file operators.\n\
+             Re-run with --allow-remote to acknowledge this risk, or bind to 127.0.0.1 (default)."
+        );
+        std::process::exit(1);
+    }
+    eprintln!(
+        "WARNING: weave daemon has NO authentication and is binding to non-loopback address {bind}.\n\
+         Anyone who can reach this port can execute arbitrary commands on this machine.\n\
+         Consider binding to 127.0.0.1 instead, or placing the daemon behind an authenticated\n\
+         reverse proxy / firewall."
+    );
+}
+
 pub async fn serve(args: Vec<String>) {
     let log_ring = super::logging::init_logging();
 
@@ -534,6 +566,9 @@ pub async fn serve(args: Vec<String>) {
         .position(|a| a == "--bind")
         .and_then(|i| args.get(i + 1).cloned())
         .unwrap_or_else(|| "127.0.0.1:9928".to_string());
+
+    let allow_remote = args.iter().any(|a| a == "--allow-remote");
+    enforce_bind_safety(&bind, allow_remote);
 
     let max_concurrent = args
         .iter()
@@ -603,13 +638,14 @@ fn is_daemon_running() -> bool {
     alive
 }
 
-pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>) {
+pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote: bool) {
     if is_daemon_running() {
         eprintln!(
             "daemon is already running. Use `weave daemon restart` to restart."
         );
         return;
     }
+    enforce_bind_safety(bind, allow_remote);
     let exe = std::env::current_exe().expect("current exe path");
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.arg("serve")
@@ -620,6 +656,9 @@ pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>) {
         .stderr(Stdio::null());
     if let Some(n) = max_concurrent_tasks {
         cmd.arg("--max-concurrent-tasks").arg(n.to_string());
+    }
+    if allow_remote {
+        cmd.arg("--allow-remote");
     }
     let child = cmd.spawn().expect("spawn daemon");
 
@@ -651,12 +690,12 @@ pub async fn stop() {
     println!("daemon stopped (PID {pid})");
 }
 
-pub async fn restart(bind: &str, max_concurrent_tasks: Option<usize>) {
+pub async fn restart(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote: bool) {
     if is_daemon_running() {
         stop().await;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    start(bind, max_concurrent_tasks).await;
+    start(bind, max_concurrent_tasks, allow_remote).await;
 }
 
 #[cfg(test)]
@@ -674,6 +713,19 @@ mod tests {
         std::fs::create_dir_all(&dir).ok();
         let db = Database::open(dir.join("weave.redb")).expect("open db");
         (db, dir)
+    }
+
+    #[test]
+    fn loopback_bind_detection() {
+        assert!(is_loopback_bind("127.0.0.1:9928"));
+        assert!(is_loopback_bind("127.0.0.2:9928"));
+        assert!(is_loopback_bind("localhost:9928"));
+        assert!(is_loopback_bind("LOCALHOST:9928"));
+        assert!(is_loopback_bind("[::1]:9928"));
+        assert!(!is_loopback_bind("0.0.0.0:9928"));
+        assert!(!is_loopback_bind("[::]:9928"));
+        assert!(!is_loopback_bind("192.168.1.10:9928"));
+        assert!(!is_loopback_bind("example.com:9928"));
     }
 
     #[tokio::test]

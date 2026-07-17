@@ -42,6 +42,9 @@ enum Commands {
         /// Also configurable via WEAVE_MAX_CONCURRENT_TASKS env var.
         #[arg(long, env = "WEAVE_MAX_CONCURRENT_TASKS")]
         max_concurrent_tasks: Option<usize>,
+        /// Acknowledge the risk of binding to a non-loopback address without authentication
+        #[arg(long)]
+        allow_remote: bool,
     },
 
     /// Manage the weave daemon process
@@ -93,6 +96,9 @@ enum DaemonCmd {
         /// Also configurable via WEAVE_MAX_CONCURRENT_TASKS env var.
         #[arg(long, env = "WEAVE_MAX_CONCURRENT_TASKS")]
         max_concurrent_tasks: Option<usize>,
+        /// Acknowledge the risk of binding to a non-loopback address without authentication
+        #[arg(long)]
+        allow_remote: bool,
     },
     /// Stop the daemon
     Stop,
@@ -104,6 +110,9 @@ enum DaemonCmd {
         /// Also configurable via WEAVE_MAX_CONCURRENT_TASKS env var.
         #[arg(long, env = "WEAVE_MAX_CONCURRENT_TASKS")]
         max_concurrent_tasks: Option<usize>,
+        /// Acknowledge the risk of binding to a non-loopback address without authentication
+        #[arg(long)]
+        allow_remote: bool,
     },
     /// View daemon logs
     Log {
@@ -261,11 +270,14 @@ async fn main() {
     let cli = Cli::parse();
     let daemon = &cli.daemon;
     match cli.command {
-        Commands::Serve { bind, max_concurrent_tasks } => {
+        Commands::Serve { bind, max_concurrent_tasks, allow_remote } => {
             let mut args = vec!["serve".to_string(), "--bind".to_string(), bind];
             if let Some(n) = max_concurrent_tasks {
                 args.push("--max-concurrent-tasks".to_string());
                 args.push(n.to_string());
+            }
+            if allow_remote {
+                args.push("--allow-remote".to_string());
             }
             // pass through original data-dir args
             let orig: Vec<String> = std::env::args().collect();
@@ -277,14 +289,14 @@ async fn main() {
             }
             server::daemon::serve(args).await;
         }
-        Commands::Daemon(DaemonCmd::Start { bind, max_concurrent_tasks }) => {
-            server::daemon::start(&bind, max_concurrent_tasks).await;
+        Commands::Daemon(DaemonCmd::Start { bind, max_concurrent_tasks, allow_remote }) => {
+            server::daemon::start(&bind, max_concurrent_tasks, allow_remote).await;
         }
         Commands::Daemon(DaemonCmd::Stop) => {
             server::daemon::stop().await;
         }
-        Commands::Daemon(DaemonCmd::Restart { bind, max_concurrent_tasks }) => {
-            server::daemon::restart(&bind, max_concurrent_tasks).await;
+        Commands::Daemon(DaemonCmd::Restart { bind, max_concurrent_tasks, allow_remote }) => {
+            server::daemon::restart(&bind, max_concurrent_tasks, allow_remote).await;
         }
         Commands::Daemon(DaemonCmd::Log { live }) => {
             daemon_log(daemon, live).await;

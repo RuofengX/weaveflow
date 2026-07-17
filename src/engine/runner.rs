@@ -12,7 +12,7 @@ use crate::engine::step::execute_step;
 use crate::error::{WeaveError, WeaveResult};
 use crate::store::Database;
 use crate::tracker::{Snapshot, StepState, TaskId, TaskTracker};
-use crate::vm::Scope;
+use crate::vm::{Scope, redact_env_values};
 
 pub struct Runner {
     pub pipeline: PipelineDef,
@@ -183,6 +183,7 @@ pub async fn run_inner(
                             &step_id,
                             &output,
                             Some(&step_id) == last_step_id.as_ref(),
+                            &scope,
                         );
                     }
                     let completed_at = Utc::now();
@@ -281,8 +282,16 @@ fn save_step_snapshot(
     step_id: &StepId,
     output: &Value,
     is_last: bool,
+    scope: &Scope,
 ) {
-    let bytes = serde_json::to_vec(output).unwrap_or_default();
+    let secrets = scope.env_values();
+    let bytes = if secrets.is_empty() {
+        serde_json::to_vec(output).unwrap_or_default()
+    } else {
+        let mut redacted = output.clone();
+        redact_env_values(&mut redacted, &secrets);
+        serde_json::to_vec(&redacted).unwrap_or_default()
+    };
     let snap = Snapshot {
         seq: 0,
         step_id: step_id.clone(),
