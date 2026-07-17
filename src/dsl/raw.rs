@@ -138,6 +138,8 @@ pub struct RawMergeInputs {
     pub b: Value,
     #[serde(default)]
     pub a: Option<Value>,
+    #[serde(default)]
+    pub deep: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -271,6 +273,7 @@ impl From<RawStepOp> for StepOp {
             RawStepOp::Merge(r) => StepOp::Merge(step_op::MergeInputs {
                 b: yaml_to_refvalue(&r.b),
                 a: r.a.as_ref().map(yaml_to_refvalue),
+                deep: r.deep,
             }),
             RawStepOp::Base64(r) => StepOp::Base64(step_op::Base64Inputs {
                 data: r.data.as_ref().map(yaml_to_refvalue),

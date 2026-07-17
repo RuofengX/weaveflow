@@ -34,10 +34,39 @@ impl Operator for Base64Operator {
                 let decoded = base64::engine::general_purpose::STANDARD
                     .decode(input.as_bytes())
                     .map_err(|e| OperatorError::Config(format!("base64 decode: {e}")))?;
-                let text = String::from_utf8(decoded).unwrap_or_default();
+                let len = decoded.len();
+                let text = String::from_utf8(decoded).map_err(|_| {
+                    OperatorError::Runtime(format!(
+                        "base64 decode: {len} 字节不是合法 UTF-8，无法用字符串表示"
+                    ))
+                })?;
                 Ok(Value::String(text))
             }
             _ => Err(OperatorError::Config("mode 必须是 encode 或 decode".into())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn decode_invalid_utf8_returns_error() {
+        let op = Base64Operator;
+        let inputs = json!({ "data": "/w==", "mode": "decode" });
+        let err = op.run(inputs).await.expect_err("must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("UTF-8"), "unexpected error: {msg}");
+        assert!(msg.contains('1'), "error should carry byte length: {msg}");
+    }
+
+    #[tokio::test]
+    async fn decode_valid_utf8_roundtrip() {
+        let op = Base64Operator;
+        let inputs = json!({ "data": "aGVsbG8=", "mode": "decode" });
+        let out = op.run(inputs).await.expect("run");
+        assert_eq!(out, json!("hello"));
     }
 }

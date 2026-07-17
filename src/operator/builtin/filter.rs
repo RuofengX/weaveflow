@@ -13,10 +13,10 @@ impl FilterOperator {
         match op {
             "eq" => Some(a == b),
             "ne" => Some(a != b),
-            "gt" => a.as_f64().zip(b.as_f64()).map(|(x, y)| x > y),
-            "gte" => a.as_f64().zip(b.as_f64()).map(|(x, y)| x >= y),
-            "lt" => a.as_f64().zip(b.as_f64()).map(|(x, y)| x < y),
-            "lte" => a.as_f64().zip(b.as_f64()).map(|(x, y)| x <= y),
+            "gt" => numeric_cmp(a, b).map(|o| o == std::cmp::Ordering::Greater),
+            "gte" => numeric_cmp(a, b).map(|o| o != std::cmp::Ordering::Less),
+            "lt" => numeric_cmp(a, b).map(|o| o == std::cmp::Ordering::Less),
+            "lte" => numeric_cmp(a, b).map(|o| o != std::cmp::Ordering::Greater),
             "in" => b.as_array().map(|arr| arr.contains(a)),
             "contains" => {
                 let sa = a.as_str()?;
@@ -26,6 +26,18 @@ impl FilterOperator {
             _ => None,
         }
     }
+}
+
+fn numeric_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    if let (Some(x), Some(y)) = (a.as_i64(), b.as_i64()) {
+        return Some(x.cmp(&y));
+    }
+    if let (Some(x), Some(y)) = (a.as_u64(), b.as_u64()) {
+        return Some(x.cmp(&y));
+    }
+    a.as_f64()
+        .zip(b.as_f64())
+        .and_then(|(x, y)| x.partial_cmp(&y))
 }
 
 #[async_trait]
@@ -67,5 +79,47 @@ impl Operator for FilterOperator {
             result.into_iter().next().unwrap_or(Value::Null)
         };
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn big_integer_gt_is_exact() {
+        let op = FilterOperator;
+        let inputs = json!({
+            "data": [9007199254740992_i64, 9007199254740993_i64],
+            "operator": "gt",
+            "value": 9007199254740992_i64
+        });
+        let out = op.run(inputs).await.expect("run");
+        assert_eq!(out, json!([9007199254740993_i64]));
+    }
+
+    #[tokio::test]
+    async fn big_integer_lt_is_exact() {
+        let op = FilterOperator;
+        let inputs = json!({
+            "data": [9007199254740992_i64, 9007199254740993_i64],
+            "operator": "lt",
+            "value": 9007199254740993_i64
+        });
+        let out = op.run(inputs).await.expect("run");
+        assert_eq!(out, json!([9007199254740992_i64]));
+    }
+
+    #[tokio::test]
+    async fn float_fallback_still_works() {
+        let op = FilterOperator;
+        let inputs = json!({
+            "data": [1.5, 2.5, 3.5],
+            "operator": "gt",
+            "value": 2.0
+        });
+        let out = op.run(inputs).await.expect("run");
+        assert_eq!(out, json!([2.5, 3.5]));
     }
 }

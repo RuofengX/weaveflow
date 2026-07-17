@@ -113,6 +113,8 @@ pub struct MergeInputs {
     pub b: RefValue,
     #[serde(default)]
     pub a: Option<RefValue>,
+    #[serde(default)]
+    pub deep: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

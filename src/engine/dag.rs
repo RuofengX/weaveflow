@@ -408,6 +408,7 @@ mod tests {
                     }
                 })),
                 a: None,
+                deep: None,
             }),
         };
         let p = make_pipeline(vec![step("a", vec![]), s_b]);
