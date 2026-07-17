@@ -36,6 +36,9 @@ impl<'de> serde::Deserialize<'de> for Ttl {
         }
         let (num_str, unit) = s.split_at(s.len() - 1);
         let num: i64 = num_str.parse().map_err(serde::de::Error::custom)?;
+        if num < 0 {
+            return Err(serde::de::Error::custom(format!("TTL 不能为负: {}", s)));
+        }
         let delta = match unit {
             "s" => chrono::TimeDelta::try_seconds(num),
             "m" => chrono::TimeDelta::try_minutes(num),
@@ -61,6 +64,12 @@ mod tests {
     #[test]
     fn ttl_overflow_returns_error_not_panic() {
         let r: Result<Ttl, _> = serde_json::from_str("\"200000000000d\"");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn ttl_negative_returns_error() {
+        let r: Result<Ttl, _> = serde_json::from_str("\"-5m\"");
         assert!(r.is_err());
     }
 

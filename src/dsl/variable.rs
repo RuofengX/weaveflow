@@ -44,7 +44,12 @@ impl VariablePath {
         if parts.is_empty() {
             return None;
         }
-        if parts.iter().any(|p| p.is_empty() || p.contains(char::is_whitespace)) {
+        if parts.iter().any(|p| {
+            p.is_empty()
+                || !p
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        }) {
             return None;
         }
         Some(VariablePath { parts })
@@ -67,5 +72,44 @@ impl RefValue {
             RefValue::Literal(v) => v.clone(),
             RefValue::Ref(path) => Value::String(format!("{{{}}}", path.parts.join("."))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_valid_paths() {
+        assert_eq!(
+            VariablePath::parse("{step.output.field}").unwrap().parts,
+            vec!["step", "output", "field"]
+        );
+        assert_eq!(
+            VariablePath::parse("{env.API_KEY}").unwrap().parts,
+            vec!["env", "API_KEY"]
+        );
+        assert_eq!(
+            VariablePath::parse("{{a-b_c.d}}").unwrap().parts,
+            vec!["a-b_c", "d"]
+        );
+    }
+
+    #[test]
+    fn parse_rejects_adjacent_refs() {
+        assert!(VariablePath::parse("{a.b}{c.d}").is_none());
+    }
+
+    #[test]
+    fn parse_rejects_illegal_part_chars() {
+        assert!(VariablePath::parse("{a.b c}").is_none());
+        assert!(VariablePath::parse("{a.b/c}").is_none());
+        assert!(VariablePath::parse("{}").is_none());
+    }
+
+    #[test]
+    fn parse_rejects_non_template() {
+        assert!(VariablePath::parse("plain").is_none());
+        assert!(VariablePath::parse("prefix {a.b}").is_none());
     }
 }

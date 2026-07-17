@@ -41,9 +41,12 @@ pub struct RawStepDef {
 
     #[serde(flatten)]
     pub op: RawStepOp,
+    #[serde(flatten)]
+    pub extra: HashMap<String, Value>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawIterateConfig {
     pub over: String,
     #[serde(rename = "as")]
@@ -75,6 +78,7 @@ pub enum RawStepOp {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawHttpInputs {
     pub url: Value,
     #[serde(default)]
@@ -86,6 +90,7 @@ pub struct RawHttpInputs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawJsInputs {
     pub code: Value,
     #[serde(default)]
@@ -95,6 +100,7 @@ pub struct RawJsInputs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawFilterInputs {
     #[serde(default)]
     pub data: Option<Value>,
@@ -107,6 +113,7 @@ pub struct RawFilterInputs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawSortInputs {
     #[serde(default)]
     pub data: Option<Value>,
@@ -117,6 +124,7 @@ pub struct RawSortInputs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawDedupInputs {
     #[serde(default)]
     pub data: Option<Value>,
@@ -125,6 +133,7 @@ pub struct RawDedupInputs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawMergeInputs {
     pub b: Value,
     #[serde(default)]
@@ -132,6 +141,7 @@ pub struct RawMergeInputs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawBase64Inputs {
     #[serde(default)]
     pub data: Option<Value>,
@@ -140,6 +150,7 @@ pub struct RawBase64Inputs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawFileInputs {
     #[serde(default)]
     pub path: Option<Value>,
@@ -148,6 +159,7 @@ pub struct RawFileInputs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawCommandInputs {
     pub command: Value,
     #[serde(default)]
@@ -157,6 +169,7 @@ pub struct RawCommandInputs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawLlmInputs {
     pub url: Value,
     pub model: String,
@@ -176,6 +189,7 @@ pub struct RawLlmInputs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawVarInputs {
     #[serde(default)]
     pub value: Option<Value>,
@@ -208,6 +222,11 @@ impl TryFrom<RawStepDef> for StepDef {
     type Error = ParseError;
 
     fn try_from(raw: RawStepDef) -> Result<Self, Self::Error> {
+        if !raw.extra.is_empty() {
+            let mut keys: Vec<String> = raw.extra.into_keys().collect();
+            keys.sort();
+            return Err(ParseError::UnknownStepFields(raw.id, keys.join(", ")));
+        }
         Ok(StepDef {
             id: StepId::from(raw.id),
             after: raw.after.map(|a| a.into_iter().map(StepId::from).collect()),
@@ -367,6 +386,8 @@ pub enum ParseError {
     Yaml(String),
     #[error("iterate.over 必须是 {{...}} 形式的变量路径: {0}")]
     InvalidIterateOver(String),
+    #[error("步骤 {0} 存在未知字段: {1}")]
+    UnknownStepFields(String, String),
 }
 
 impl From<rust_yaml::Error> for ParseError {
@@ -378,5 +399,91 @@ impl From<rust_yaml::Error> for ParseError {
 impl From<serde_json::Error> for ParseError {
     fn from(e: serde_json::Error) -> Self {
         ParseError::Yaml(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_inputs_field_rejected() {
+        let yaml = r#"
+name: t
+steps:
+  - id: s
+    type: http
+    inputs:
+      url: "http://example.com"
+      methd: post
+output: "{s.output}"
+"#;
+        let r: Result<RawPipelineDef, _> = rust_yaml::from_str(yaml);
+        assert!(r.is_err(), "typo field `methd` should be rejected");
+    }
+
+    #[test]
+    fn unknown_iterate_field_rejected() {
+        let yaml = r#"
+name: t
+steps:
+  - id: s
+    type: noop
+    iterate:
+      over: "{slots.items}"
+      as: item
+      max_worker: 4
+output: "{s.output}"
+"#;
+        let r: Result<RawPipelineDef, _> = rust_yaml::from_str(yaml);
+        assert!(r.is_err(), "typo field `max_worker` should be rejected");
+    }
+
+    #[test]
+    fn unknown_step_field_rejected() {
+        let yaml = r#"
+name: t
+steps:
+  - id: s
+    type: noop
+    cach: true
+output: "{s.output}"
+"#;
+        let raw: RawPipelineDef = rust_yaml::from_str(yaml).unwrap();
+        let err = PipelineDef::try_from(raw).unwrap_err();
+        assert!(matches!(err, ParseError::UnknownStepFields(_, _)));
+        assert!(err.to_string().contains("cach"));
+    }
+
+    #[test]
+    fn all_known_step_fields_accepted() {
+        let yaml = r#"
+name: t
+steps:
+  - id: s
+    type: http
+    after: [a]
+    iterate:
+      over: "{slots.items}"
+      as: item
+      max_workers: 4
+      batch:
+        size: 10
+    cache: false
+    retry:
+      max_attempts: 2
+      backoff: fixed
+      delay_ms: 100
+    timeout_sec: 30
+    inputs:
+      url: "http://example.com"
+      method: get
+      headers:
+        X-Key: v
+      body: "{}"
+output: "{s.output}"
+"#;
+        let raw: RawPipelineDef = rust_yaml::from_str(yaml).unwrap();
+        assert!(PipelineDef::try_from(raw).is_ok());
     }
 }
