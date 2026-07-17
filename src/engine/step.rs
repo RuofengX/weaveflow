@@ -94,42 +94,19 @@ pub async fn execute_step(
     execute_with_retry(db, op.as_ref(), inputs, &cache_key, step, cache_enabled).await
 }
 
-/// 调用 op.run(inputs)，失败时按重试配置自动重试。
-/// 成功且缓存开启时输出写入缓存；最终失败时返回最后一次错误。
-pub async fn execute_with_retry(
-    db: Arc<Mutex<Database>>,
+/// 调用 op.run(inputs)，失败时按重试配置自动重试（不含缓存）。
+pub(crate) async fn retry_with_op(
     op: &dyn Operator,
     inputs: Value,
-    cache_key: &[u8],
     step: &StepDef,
-    cache_enabled: bool,
-) -> WeaveResult<Value> {
-    let max_attempts = step.retry.as_ref().map(|r| r.max_attempts).unwrap_or(1);
-    let delay_ms = step.retry.as_ref().map(|r| r.delay_ms).unwrap_or(1000);
+) -> Result<Value, OperatorError> {
+    let retry = step.retry.as_ref();
+    let max_attempts = retry.map(|r| r.max_attempts.max(1)).unwrap_or(1);
+    let delay_ms = retry.map(|r| r.delay_ms).unwrap_or(1000);
+    let backoff = retry.map(|r| &r.backoff);
 
-    // Fast path: no retry configured — move inputs, zero clone.
-    if max_attempts == 1 {
-        debug!(step = %step.id, attempt = 1, max_attempts, "executing operator");
-        return match run_with_timeout(op, inputs, step).await {
-            Ok(output) => {
-                if cache_enabled {
-                    let db_lock = db.lock().await;
-                    db_lock.set_cache_bytes(cache_key, &output)?;
-                    trace!(step = %step.id, "output cached");
-                }
-                Ok(output)
-            }
-            Err(e) => {
-                warn!(step = %step.id, attempt = 1, "operator failed");
-                Err(e.into())
-            }
-        };
-    }
-
-    // Retry path: clone per attempt (last attempt moves).
     let mut inputs = inputs;
     for attempt in 0..max_attempts {
-        debug!(step = %step.id, attempt = attempt + 1, max_attempts, "executing operator");
         let is_last = attempt + 1 == max_attempts;
         let attempt_inputs = if is_last {
             std::mem::take(&mut inputs)
@@ -141,25 +118,44 @@ pub async fn execute_with_retry(
                 if attempt > 0 {
                     info!(step = %step.id, attempt = attempt + 1, "retry succeeded");
                 }
-                if cache_enabled {
-                    let db_lock = db.lock().await;
-                    db_lock.set_cache_bytes(cache_key, &output)?;
-                    trace!(step = %step.id, attempt = attempt + 1, "output cached");
-                }
                 return Ok(output);
             }
             Err(_) if !is_last => {
-                warn!(step = %step.id, attempt = attempt + 1, max_attempts, delay_ms, "retrying");
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                let wait = match backoff {
+                    None | Some(crate::dsl::BackoffStrategy::Fixed) => delay_ms,
+                    Some(crate::dsl::BackoffStrategy::Exponential) => {
+                        delay_ms.saturating_mul(1u64 << attempt.min(20)).min(60_000)
+                    }
+                };
+                warn!(step = %step.id, attempt = attempt + 1, max_attempts, wait_ms = wait, "retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
             }
             Err(e) => {
                 warn!(step = %step.id, attempt = attempt + 1, max_attempts, "operator failed");
-                return Err(e.into());
+                return Err(e);
             }
         }
     }
     warn!(step = %step.id, max_attempts, "retry exhausted");
-    Err(WeaveError::Operator("retry exhausted".into()))
+    Err(OperatorError::Runtime("retry exhausted".into()))
+}
+
+/// 调用 retry_with_op 执行算子并缓存成功输出。
+pub async fn execute_with_retry(
+    db: Arc<Mutex<Database>>,
+    op: &dyn Operator,
+    inputs: Value,
+    cache_key: &[u8],
+    step: &StepDef,
+    cache_enabled: bool,
+) -> WeaveResult<Value> {
+    let output = retry_with_op(op, inputs, step).await?;
+    if cache_enabled {
+        let db_lock = db.lock().await;
+        db_lock.set_cache_bytes(cache_key, &output)?;
+        trace!(step = %step.id, "output cached");
+    }
+    Ok(output)
 }
 
 /// 执行算子；step.timeout 设置时用 tokio::time::timeout 包裹，超时映射 OperatorError::Timeout。

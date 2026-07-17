@@ -116,6 +116,14 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
             check_ref_in_json(&op_val, &all_step_ids, &step.id, &mut report);
         }
         check_iterate_config(step.iterate.as_ref(), &step.id, &all_step_ids, &mut report);
+        if let Some(ref retry) = step.retry {
+            if retry.max_attempts == 0 {
+                report.errors.push(ValidationError {
+                    code: "invalid_retry_config".into(),
+                    message: format!("步骤 {} 的 retry.max_attempts 不能为 0", step.id),
+                });
+            }
+        }
     }
 
     // ---- 2. slots ----
@@ -399,15 +407,17 @@ fn check_ref_in_json(
             }
         }
         Value::String(s) => {
-            for (prefix, _path) in extract_refs(s) {
-                if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
-                    report.errors.push(ValidationError {
-                        code: "variable_ref_not_found".into(),
-                        message: format!(
-                            "步骤 {} 中引用了不存在的步骤: {}",
-                            step_id, prefix
-                        ),
-                    });
+            if s.starts_with('{') && s.ends_with('}') {
+                for (prefix, _path) in extract_refs(s) {
+                    if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
+                        report.errors.push(ValidationError {
+                            code: "variable_ref_not_found".into(),
+                            message: format!(
+                                "步骤 {} 中引用了不存在的步骤: {}",
+                                step_id, prefix
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -437,12 +447,14 @@ fn check_output_ref(
         }
         RefValue::Literal(lit) => {
             if let Value::String(s) = lit {
-                for (prefix, _path) in extract_refs(s) {
-                    if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
-                        report.errors.push(ValidationError {
-                            code: "output_ref_not_found".into(),
-                            message: format!("output 引用了不存在的步骤: {}", prefix),
-                        });
+                if s.starts_with('{') && s.ends_with('}') {
+                    for (prefix, _path) in extract_refs(s) {
+                        if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
+                            report.errors.push(ValidationError {
+                                code: "output_ref_not_found".into(),
+                                message: format!("output 引用了不存在的步骤: {}", prefix),
+                            });
+                        }
                     }
                 }
             }
@@ -813,5 +825,57 @@ mod tests {
         def.output = var_ref("{ghost.output}");
         let report = validate(&def, &ValidateOptions::default());
         assert!(report.errors.len() >= 2);
+    }
+
+    #[test]
+    fn retry_max_attempts_zero() {
+        let mut def = valid_def();
+        def.steps[0].retry = Some(RetryDef {
+            max_attempts: 0,
+            backoff: BackoffStrategy::default(),
+            delay_ms: 1000,
+        });
+        let report = validate(&def, &ValidateOptions::default());
+        assert!(report.errors.iter().any(|e| e.code == "invalid_retry_config"));
+    }
+
+    #[test]
+    fn retry_max_attempts_one_passes() {
+        let mut def = valid_def();
+        def.steps[0].retry = Some(RetryDef {
+            max_attempts: 1,
+            backoff: BackoffStrategy::default(),
+            delay_ms: 1000,
+        });
+        let report = validate(&def, &ValidateOptions::default());
+        assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
+    }
+
+    #[test]
+    fn embedded_ref_in_longer_string_not_flagged() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Var(VarInputs {
+            value: Some(literal(json!("prefix {nonexistent.output} suffix"))),
+        });
+        let report = validate(&def, &ValidateOptions::default());
+        assert!(report.is_ok(), "embedded ref should not be flagged: {:?}", report.errors);
+    }
+
+    #[test]
+    fn whole_string_ref_still_flagged() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Var(VarInputs {
+            value: Some(literal(json!("{nonexistent.output}"))),
+        });
+        let report = validate(&def, &ValidateOptions::default());
+        assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
+    }
+
+    #[test]
+    fn embedded_ref_in_output_literal_not_flagged() {
+        let mut def = valid_def();
+        def.output = literal(json!("prefix {ghost.output} suffix"));
+        let report = validate(&def, &ValidateOptions::default());
+        assert!(report.is_ok(), "embedded ref in output should not be flagged: {:?}", report.errors);
     }
 }

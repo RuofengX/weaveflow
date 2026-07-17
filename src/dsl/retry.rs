@@ -9,7 +9,6 @@ pub struct RetryDef {
     pub backoff: BackoffStrategy,
     #[serde(default = "default_delay_ms")]
     pub delay_ms: u64,
-    pub validator: Option<String>,
 }
 
 fn default_max_attempts() -> u32 {

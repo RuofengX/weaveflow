@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::dsl::{IterateConfig, StepDef};
-use crate::engine::step::{resolve_operator, run_with_timeout};
+use crate::engine::step::{resolve_operator, retry_with_op};
 use crate::error::{WeaveError, WeaveResult};
 use crate::operator::Operator;
 use crate::store::Database;
@@ -117,7 +117,7 @@ pub async fn execute_iterate(
             }
 
             batch_futures.push(async move {
-                let output = run_with_timeout(op.as_ref(), item_inputs, step).await?;
+                let output = retry_with_op(op.as_ref(), item_inputs, step).await?;
                 Ok::<_, WeaveError>((idx, output))
             });
         }
