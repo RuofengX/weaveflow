@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -17,6 +17,13 @@ pub fn run_tui(
     task_id: &str,
     pipeline_name: &str,
 ) -> io::Result<()> {
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        prev_hook(info);
+    }));
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -82,8 +89,9 @@ pub fn run_tui(
 }
 
 /// Run text output mode (for CI/CD, agents). Prints one line per layer on completion.
-pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) {
+pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), String> {
     let mut completed_layers: HashSet<usize> = HashSet::new();
+    let mut finished = false;
     loop {
         match rx.recv().await {
             Some(data) => {
@@ -164,12 +172,17 @@ pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) {
                     if let Some(dur) = data.get("total_duration_ms").and_then(|v| v.as_u64()) {
                         println!("[weave] completed in {}ms", dur);
                     }
+                    finished = true;
                     break;
                 }
             }
             None => break,
         }
     }
+    if !finished {
+        return Err("connection to daemon lost before task completion".to_string());
+    }
+    Ok(())
 }
 
 /// Print layer completion lines. Each layer is printed exactly once when all
@@ -307,24 +320,31 @@ fn run_app(
     rx: &mut mpsc::UnboundedReceiver<Value>,
 ) -> io::Result<()> {
     loop {
-        if let Ok(data) = rx.try_recv() {
-            let status = data
-                .get("status")
-                .and_then(|s| s.as_object())
-                .and_then(|o| o.keys().next().map(|k| k.as_str()))
-                .unwrap_or("unknown");
-
-            if status == "Failed" {
-                state.error = data
+        match rx.try_recv() {
+            Ok(data) => {
+                let status = data
                     .get("status")
-                    .and_then(|s| s.get("Failed"))
-                    .and_then(|f| f.as_str())
-                    .map(|s| s.to_string());
+                    .and_then(|s| s.as_object())
+                    .and_then(|o| o.keys().next().map(|k| k.as_str()))
+                    .unwrap_or("unknown");
+
+                if status == "Failed" {
+                    state.error = data
+                        .get("status")
+                        .and_then(|s| s.get("Failed"))
+                        .and_then(|f| f.as_str())
+                        .map(|s| s.to_string());
+                }
+                if status == "Completed" || status == "Failed" {
+                    state.done = true;
+                }
+                state.data = Some(data);
             }
-            if status == "Completed" || status == "Failed" {
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                state.error = Some("connection to daemon lost".to_string());
                 state.done = true;
             }
-            state.data = Some(data);
+            _ => {}
         }
 
         terminal.draw(|f| ui(f, state))?;
@@ -336,10 +356,13 @@ fn run_app(
 
         if event::poll(std::time::Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-                    && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+                && key.kind == KeyEventKind::Press {
+                    if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+                    {
                         return Ok(());
                     }
+                }
 
         std::thread::sleep(std::time::Duration::from_millis(50));
     }

@@ -221,6 +221,7 @@ impl Database {
             created_at: chrono::Utc::now(),
             result_ttl_secs,
             inputs,
+            status: crate::tracker::meta::TASK_STATUS_RUNNING.to_string(),
         };
         let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
             operation: "create_task begin_write",
@@ -260,6 +261,87 @@ impl Database {
         };
         drop(table);
         result
+    }
+
+    /// 更新 task 的 status 字段（其他字段保持不变）。
+    pub fn set_task_status(&self, task_id: &TaskId, status: &str) -> WeaveResult<()> {
+        let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
+            operation: "set_task_status begin_write",
+            source: Box::new(e.into()),
+        })?;
+        let mut table = txn.open_table(TASK).map_err(|e| WeaveError::Database {
+            operation: "set_task_status open_table",
+            source: Box::new(e.into()),
+        })?;
+        let existing: Option<TaskMeta> = table
+            .get(*task_id)
+            .map_err(|e| WeaveError::Database {
+                operation: "set_task_status get",
+                source: Box::new(e.into()),
+            })?
+            .map(|g| g.value());
+        if let Some(mut meta) = existing {
+            meta.status = status.to_string();
+            table.insert(*task_id, &meta).map_err(|e| WeaveError::Database {
+                operation: "set_task_status insert",
+                source: Box::new(e.into()),
+            })?;
+        }
+        drop(table);
+        txn.commit().map_err(|e| WeaveError::Database {
+            operation: "set_task_status commit",
+            source: Box::new(e.into()),
+        })?;
+        Ok(())
+    }
+
+    /// 启动时恢复：把残留的 running 状态 task 标记为 interrupted。返回标记数量。
+    pub fn mark_interrupted_tasks(&self) -> WeaveResult<u64> {
+        let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
+            operation: "mark_interrupted begin_write",
+            source: Box::new(e.into()),
+        })?;
+        let mut count = 0u64;
+        {
+            let mut table = match txn.open_table(TASK) {
+                Ok(t) => t,
+                Err(_) => return Ok(0),
+            };
+            let stale: Vec<TaskId> = table
+                .iter()
+                .map_err(|e| WeaveError::Database {
+                    operation: "mark_interrupted iter",
+                    source: Box::new(e.into()),
+                })?
+                .filter_map(|r| r.ok())
+                .filter(|(_, v)| {
+                    v.value().status == crate::tracker::meta::TASK_STATUS_RUNNING
+                })
+                .map(|(k, _)| k.value())
+                .collect();
+            for task_id in stale {
+                let existing: Option<TaskMeta> = table
+                    .get(task_id)
+                    .map_err(|e| WeaveError::Database {
+                        operation: "mark_interrupted get",
+                        source: Box::new(e.into()),
+                    })?
+                    .map(|g| g.value());
+                if let Some(mut meta) = existing {
+                    meta.status = crate::tracker::meta::TASK_STATUS_INTERRUPTED.to_string();
+                    table.insert(task_id, &meta).map_err(|e| WeaveError::Database {
+                        operation: "mark_interrupted insert",
+                        source: Box::new(e.into()),
+                    })?;
+                    count += 1;
+                }
+            }
+        }
+        txn.commit().map_err(|e| WeaveError::Database {
+            operation: "mark_interrupted commit",
+            source: Box::new(e.into()),
+        })?;
+        Ok(count)
     }
 
     pub fn list_tasks(&self) -> WeaveResult<Vec<TaskMeta>> {
@@ -312,12 +394,17 @@ impl Database {
             let start = SnapshotKey { task_id: task_id.0, seq: 0 };
             let end   = SnapshotKey { task_id: task_id.0, seq: u64::MAX };
             let mut max = 0u64;
-            if let Ok(iter) = table.range(start..=end) {
-                for result in iter.flatten() {
-                    let (k, _) = result;
-                    if k.value().seq > max {
-                        max = k.value().seq;
-                    }
+            let iter = table.range(start..=end).map_err(|e| WeaveError::Database {
+                operation: "save_snapshot range",
+                source: Box::new(e.into()),
+            })?;
+            for result in iter {
+                let (k, _) = result.map_err(|e| WeaveError::Database {
+                    operation: "save_snapshot read_row",
+                    source: Box::new(e.into()),
+                })?;
+                if k.value().seq > max {
+                    max = k.value().seq;
                 }
             }
             max
@@ -365,6 +452,28 @@ impl Database {
             items.push((k.value().seq, v.value()));
         }
         Ok(items)
+    }
+
+    /// 按 seq 点查单条 snapshot，避免全量加载。
+    pub fn load_snapshot_by_seq(
+        &self,
+        task_id: &TaskId,
+        seq: u64,
+    ) -> WeaveResult<Option<Snapshot>> {
+        let txn = self.db.begin_read().map_err(|e| WeaveError::Database {
+            operation: "load_snapshot_by_seq begin_read",
+            source: Box::new(e.into()),
+        })?;
+        let table = txn.open_table(SNAPSHOT).map_err(|e| WeaveError::Database {
+            operation: "load_snapshot_by_seq open_table",
+            source: Box::new(e.into()),
+        })?;
+        let key = SnapshotKey { task_id: task_id.0, seq };
+        let result = table.get(key).map_err(|e| WeaveError::Database {
+            operation: "load_snapshot_by_seq get",
+            source: Box::new(e.into()),
+        })?;
+        Ok(result.map(|g| g.value()))
     }
 
     // ── Object ──────────────────────────────────────────────────────────
@@ -550,25 +659,25 @@ impl Database {
 
     // ── Prune / Sweep ───────────────────────────────────────────────────
 
-    pub fn prune(&mut self, options: &PruneOptions) -> WeaveResult<PruneReport> {
-        let mut report = PruneReport::default();
-
+    /// 扫描阶段（只读事务）：选出待删 task 及其判定时刻的 snapshot max_seq、
+    /// 以及未被引用的 OBJECT / 悬空 CACHE 行。
+    pub fn prune_scan(&self, options: &PruneOptions) -> WeaveResult<PrunePlan> {
         let read_txn = self.db.begin_read().map_err(|e| WeaveError::Database {
-            operation: "prune begin_read",
+            operation: "prune_scan begin_read",
             source: Box::new(e.into()),
         })?;
         let table = read_txn.open_table(TASK).map_err(|e| WeaveError::Database {
-            operation: "prune open_table",
+            operation: "prune_scan open_table",
             source: Box::new(e.into()),
         })?;
         let now = Utc::now();
-        let mut to_delete: Vec<TaskMeta> = Vec::new();
+        let mut tasks: Vec<(TaskMeta, u64)> = Vec::new();
         for result in table.iter().map_err(|e| WeaveError::Database {
-            operation: "prune iter",
+            operation: "prune_scan iter",
             source: Box::new(e.into()),
         })? {
             let (_, value) = result.map_err(|e| WeaveError::Database {
-                operation: "prune read_row",
+                operation: "prune_scan read_row",
                 source: Box::new(e.into()),
             })?;
             let task: TaskMeta = value.value();
@@ -576,108 +685,129 @@ impl Database {
                 continue;
             }
             // 跳过没有 snapshot 的 task（尚在运行或新建）
-            if !has_snapshots(&read_txn, &task.task_id)? {
-                continue;
-            }
+            let max_seq = match max_snapshot_seq(&read_txn, &task.task_id)? {
+                Some(seq) => seq,
+                None => continue,
+            };
             if let Some(ref name) = options.pipeline
                 && &task.pipeline_name != name { continue; }
             if !options.force {
                 let age = now.signed_duration_since(task.created_at).num_seconds();
                 if age < task.result_ttl_secs { continue; }
             }
-            to_delete.push(task);
+            tasks.push((task, max_seq));
         }
         drop(table);
         drop(read_txn);
 
         let (dead_objects, freed_bytes, dangling_cache) = self.collect_object_garbage()?;
-        report.objects_removed = dead_objects.len() as u64;
-        report.bytes_freed = freed_bytes;
-        report.cache_entries_removed = dangling_cache.len() as u64;
+        Ok(PrunePlan {
+            tasks,
+            dead_objects,
+            dangling_cache,
+            freed_bytes,
+        })
+    }
 
-        if options.dry_run {
-            report.tasks_removed = to_delete.len() as u64;
+    /// 执行阶段（写事务）：按 plan 删除。snapshot 只删 seq ≤ 判定时 max_seq 的，
+    /// 判定后新写入的快照不受影响（读-写间隙竞态防护）。
+    pub fn prune_execute(&mut self, plan: &PrunePlan, dry_run: bool) -> WeaveResult<PruneReport> {
+        let mut report = PruneReport {
+            objects_removed: plan.dead_objects.len() as u64,
+            bytes_freed: plan.freed_bytes,
+            cache_entries_removed: plan.dangling_cache.len() as u64,
+            ..Default::default()
+        };
+
+        if dry_run {
+            report.tasks_removed = plan.tasks.len() as u64;
+            report.snapshots_removed = 0;
             return Ok(report);
         }
 
-        if to_delete.is_empty() && dead_objects.is_empty() && dangling_cache.is_empty() {
+        if plan.tasks.is_empty() && plan.dead_objects.is_empty() && plan.dangling_cache.is_empty() {
             return Ok(report);
         }
 
         let write_txn = self.db.begin_write().map_err(|e| WeaveError::Database {
-            operation: "prune begin_write",
+            operation: "prune_execute begin_write",
             source: Box::new(e.into()),
         })?;
         let mut snap_table = write_txn.open_table(SNAPSHOT).map_err(|e| WeaveError::Database {
-            operation: "prune open_snap_table",
+            operation: "prune_execute open_snap_table",
             source: Box::new(e.into()),
         })?;
         let mut task_table = write_txn.open_table(TASK).map_err(|e| WeaveError::Database {
-            operation: "prune open_task_table",
+            operation: "prune_execute open_task_table",
             source: Box::new(e.into()),
         })?;
         let mut obj_table = write_txn.open_table(OBJECT).map_err(|e| WeaveError::Database {
-            operation: "prune open_obj_table",
+            operation: "prune_execute open_obj_table",
             source: Box::new(e.into()),
         })?;
         let mut cache_table = write_txn.open_table(CACHE).map_err(|e| WeaveError::Database {
-            operation: "prune open_cache_table",
+            operation: "prune_execute open_cache_table",
             source: Box::new(e.into()),
         })?;
 
-        for task in &to_delete {
+        for (task, max_seq) in &plan.tasks {
             let task_id = task.task_id;
             let start = SnapshotKey { task_id: task_id.0, seq: 0 };
-            let end = SnapshotKey { task_id: task_id.0, seq: u64::MAX };
-            let snap_entries: Vec<(SnapshotKey, Snapshot)> = snap_table
+            let end = SnapshotKey { task_id: task_id.0, seq: *max_seq };
+            let snap_keys: Vec<SnapshotKey> = snap_table
                 .range(start..=end).map_err(|e| WeaveError::Database {
-                    operation: "prune range",
+                    operation: "prune_execute range",
                     source: Box::new(e.into()),
                 })?
                 .filter_map(|r| r.ok())
-                .map(|(k, v)| (k.value(), v.value()))
+                .map(|(k, _)| k.value())
                 .collect();
 
-            report.snapshots_removed += snap_entries.len() as u64;
+            report.snapshots_removed += snap_keys.len() as u64;
 
-            for (sk, _snap) in &snap_entries {
+            for sk in &snap_keys {
                 snap_table.remove(*sk).map_err(|e| WeaveError::Database {
-                    operation: "prune snap_remove",
+                    operation: "prune_execute snap_remove",
                     source: Box::new(e.into()),
                 })?;
             }
 
             task_table.remove(task_id).map_err(|e| WeaveError::Database {
-                operation: "prune task_remove",
+                operation: "prune_execute task_remove",
                 source: Box::new(e.into()),
             })?;
             report.tasks_removed += 1;
         }
 
-        for digest in &dead_objects {
+        for digest in &plan.dead_objects {
             obj_table.remove(*digest).map_err(|e| WeaveError::Database {
-                operation: "prune obj_remove",
+                operation: "prune_execute obj_remove",
                 source: Box::new(e.into()),
             })?;
         }
-        for key in &dangling_cache {
+        for key in &plan.dangling_cache {
             cache_table.remove(*key).map_err(|e| WeaveError::Database {
-                operation: "prune cache_remove",
+                operation: "prune_execute cache_remove",
                 source: Box::new(e.into()),
             })?;
         }
 
         drop((snap_table, task_table, obj_table, cache_table));
         write_txn.commit().map_err(|e| WeaveError::Database {
-            operation: "prune commit",
+            operation: "prune_execute commit",
             source: Box::new(e.into()),
         })?;
         self.db.compact().map_err(|e| WeaveError::Database {
-            operation: "prune compact",
+            operation: "prune_execute compact",
             source: Box::new(e.into()),
         })?;
 
         Ok(report)
+    }
+
+    pub fn prune(&mut self, options: &PruneOptions) -> WeaveResult<PruneReport> {
+        let plan = self.prune_scan(options)?;
+        self.prune_execute(&plan, options.dry_run)
     }
 
     fn collect_object_garbage(&self) -> WeaveResult<(Vec<ObjectDigest>, u64, Vec<CacheKey>)> {
@@ -735,18 +865,27 @@ impl Database {
 }
 
 /// 检查 task 是否已有 snapshot。
-fn has_snapshots(txn: &redb::ReadTransaction, task_id: &TaskId) -> WeaveResult<bool> {
+fn max_snapshot_seq(txn: &redb::ReadTransaction, task_id: &TaskId) -> WeaveResult<Option<u64>> {
     let table = txn.open_table(SNAPSHOT).map_err(|e| WeaveError::Database {
-        operation: "has_snapshots open_table",
+        operation: "max_snapshot_seq open_table",
         source: Box::new(e.into()),
     })?;
     let start = SnapshotKey { task_id: task_id.0, seq: 0 };
     let end = SnapshotKey { task_id: task_id.0, seq: u64::MAX };
-    if let Ok(iter) = table.range(start..=end) {
-        Ok(iter.flatten().next().is_some())
-    } else {
-        Ok(false)
+    let iter = table.range(start..=end).map_err(|e| WeaveError::Database {
+        operation: "max_snapshot_seq range",
+        source: Box::new(e.into()),
+    })?;
+    let mut max: Option<u64> = None;
+    for result in iter {
+        let (k, _) = result.map_err(|e| WeaveError::Database {
+            operation: "max_snapshot_seq read_row",
+            source: Box::new(e.into()),
+        })?;
+        let seq = k.value().seq;
+        max = Some(max.map_or(seq, |m: u64| m.max(seq)));
     }
+    Ok(max)
 }
 
 /// Prune 选项。
@@ -756,6 +895,14 @@ pub struct PruneOptions {
     pub force: bool,
     pub pipeline: Option<String>,
     pub skip_tasks: std::collections::HashSet<TaskId>,
+}
+
+/// prune_scan 的产出：待删 task 及判定时刻的 snapshot max_seq、待回收对象。
+pub struct PrunePlan {
+    pub tasks: Vec<(TaskMeta, u64)>,
+    pub dead_objects: Vec<ObjectDigest>,
+    pub dangling_cache: Vec<CacheKey>,
+    pub freed_bytes: u64,
 }
 
 /// Prune 报告。

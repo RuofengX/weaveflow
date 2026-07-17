@@ -82,14 +82,15 @@ impl RedbValue for ObjectDigest {
     type AsBytes<'a> = Vec<u8> where Self: 'a;
     fn fixed_width() -> Option<usize> { Some(32) }
     fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where Self: 'a {
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&data[..32.min(data.len())]);
+        let bytes: [u8; 32] = data
+            .try_into()
+            .expect("ObjectDigest: 需要 32 字节");
         ObjectDigest(bytes)
     }
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
         value.as_bytes().to_vec()
     }
-    fn type_name() -> TypeName { TypeName::new("weave::ObjectDigest") }
+    fn type_name() -> TypeName { TypeName::new("weave::ObjectDigest::v1") }
 }
 
 impl RedbKey for ObjectDigest {
@@ -107,9 +108,9 @@ impl RedbValue for PipelineDef {
             .expect("反序列化 PipelineDef 失败")
     }
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
-        serde_json::to_vec(value).unwrap_or_default()
+        serde_json::to_vec(value).expect("序列化 PipelineDef 失败")
     }
-    fn type_name() -> TypeName { TypeName::new("weave::PipelineDef") }
+    fn type_name() -> TypeName { TypeName::new("weave::PipelineDef::v1") }
 }
 
 impl RedbValue for TaskMeta {
@@ -121,9 +122,9 @@ impl RedbValue for TaskMeta {
             .expect("反序列化 TaskMeta 失败")
     }
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
-        serde_json::to_vec(value).unwrap_or_default()
+        serde_json::to_vec(value).expect("序列化 TaskMeta 失败")
     }
-    fn type_name() -> TypeName { TypeName::new("weave::TaskMeta") }
+    fn type_name() -> TypeName { TypeName::new("weave::TaskMeta::v1") }
 }
 
 impl RedbValue for Snapshot {
@@ -135,9 +136,9 @@ impl RedbValue for Snapshot {
             .expect("反序列化 Snapshot 失败")
     }
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
-        serde_json::to_vec(value).unwrap_or_default()
+        serde_json::to_vec(value).expect("序列化 Snapshot 失败")
     }
-    fn type_name() -> TypeName { TypeName::new("weave::Snapshot") }
+    fn type_name() -> TypeName { TypeName::new("weave::Snapshot::v1") }
 }
 
 impl RedbValue for ObjectValue {
@@ -149,9 +150,9 @@ impl RedbValue for ObjectValue {
             .expect("反序列化 ObjectValue 失败")
     }
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
-        serde_json::to_vec(value).unwrap_or_default()
+        serde_json::to_vec(value).expect("序列化 ObjectValue 失败")
     }
-    fn type_name() -> TypeName { TypeName::new("weave::Object") }
+    fn type_name() -> TypeName { TypeName::new("weave::Object::v1") }
 }
 
 pub const PIPELINE: TableDefinition<PipelineId, PipelineDef> = TableDefinition::new("pipeline");
@@ -169,8 +170,9 @@ impl RedbValue for CacheKey {
     type AsBytes<'a> = Vec<u8> where Self: 'a;
     fn fixed_width() -> Option<usize> { Some(32) }
     fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where Self: 'a {
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&data[..32]);
+        let bytes: [u8; 32] = data
+            .try_into()
+            .expect("CacheKey: 需要 32 字节");
         CacheKey(ObjectDigest(bytes))
     }
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
@@ -184,3 +186,46 @@ impl RedbKey for CacheKey {
 }
 
 pub const CACHE: TableDefinition<CacheKey, ObjectDigest> = TableDefinition::new("cache");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_type_names_carry_v1_schema_version() {
+        let names = [
+            <PipelineDef as RedbValue>::type_name(),
+            <TaskMeta as RedbValue>::type_name(),
+            <Snapshot as RedbValue>::type_name(),
+            <ObjectValue as RedbValue>::type_name(),
+            <ObjectDigest as RedbValue>::type_name(),
+        ];
+        for name in names {
+            let dbg = format!("{name:?}");
+            assert!(
+                dbg.contains("::v1"),
+                "type name {dbg} missing ::v1 suffix"
+            );
+        }
+    }
+
+    #[test]
+    fn object_digest_from_bytes_roundtrip() {
+        let digest = ObjectDigest::compute(b"hello");
+        let bytes = <ObjectDigest as RedbValue>::as_bytes(&digest);
+        let back = <ObjectDigest as RedbValue>::from_bytes(&bytes);
+        assert_eq!(digest.as_bytes(), back.as_bytes());
+    }
+
+    #[test]
+    #[should_panic(expected = "32")]
+    fn object_digest_from_bytes_rejects_short_data() {
+        let _ = <ObjectDigest as RedbValue>::from_bytes(&[0u8; 8]);
+    }
+
+    #[test]
+    #[should_panic(expected = "32")]
+    fn cache_key_from_bytes_rejects_short_data() {
+        let _ = <CacheKey as RedbValue>::from_bytes(&[0u8; 8]);
+    }
+}

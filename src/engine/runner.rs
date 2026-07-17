@@ -44,6 +44,10 @@ impl Runner {
         .await;
         if let Err(ref e) = result {
             self.tracker.fail(&task_id, e.to_string()).await;
+            let _ = self.db.lock().await.set_task_status(
+                &task_id,
+                crate::tracker::meta::TASK_STATUS_FAILED,
+            );
         }
         result
     }
@@ -261,6 +265,10 @@ pub async fn run_inner(
 
     info!(task_id = %task_id, pipeline = %pipeline.name, "pipeline run completed");
     tracker.complete(&task_id, output_val).await;
+    let _ = db.lock().await.set_task_status(
+        &task_id,
+        crate::tracker::meta::TASK_STATUS_COMPLETED,
+    );
 
     Ok(final_output)
 }

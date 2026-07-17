@@ -1,7 +1,33 @@
 use futures::StreamExt;
 use serde_json::Value;
+use std::sync::OnceLock;
+use std::time::Duration;
 use tokio_tungstenite::connect_async;
 use tungstenite::Message;
+
+fn http_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .expect("build CLI reqwest client")
+    }).clone()
+}
+
+fn encode_segment(s: &str) -> String {
+    let mut r = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+            r.push(b as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(r, "%{b:02X}");
+        }
+    }
+    r
+}
 
 fn api_url(daemon: &str, path: &str) -> String {
     format!("http://{daemon}{path}")
@@ -28,7 +54,8 @@ async fn parse_response(resp: reqwest::Response, url: &str) -> Result<Value, Str
 
 async fn get(daemon: &str, path: &str) -> Result<Value, String> {
     let url = api_url(daemon, path);
-    let resp = reqwest::get(&url)
+    let resp = http_client().get(&url)
+        .send()
         .await
         .map_err(|e| daemon_error(&url, e))?;
     parse_response(resp, &url).await
@@ -36,8 +63,7 @@ async fn get(daemon: &str, path: &str) -> Result<Value, String> {
 
 async fn post(daemon: &str, path: &str, body: Value) -> Result<Value, String> {
     let url = api_url(daemon, path);
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http_client()
         .post(&url)
         .json(&body)
         .send()
@@ -48,8 +74,7 @@ async fn post(daemon: &str, path: &str, body: Value) -> Result<Value, String> {
 
 async fn post_body(daemon: &str, path: &str, body: String) -> Result<Value, String> {
     let url = api_url(daemon, path);
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http_client()
         .post(&url)
         .header("content-type", "text/plain")
         .body(body)
@@ -86,13 +111,13 @@ pub async fn pipeline_ls(daemon: &str) -> Result<(), String> {
 }
 
 pub async fn pipeline_inspect(daemon: &str, name: &str) -> Result<(), String> {
-    let result = get(daemon, &format!("/pipelines/{name}")).await?;
+    let result = get(daemon, &format!("/pipelines/{}", encode_segment(name))).await?;
     println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
     Ok(())
 }
 
 pub async fn pipeline_delete(daemon: &str, name: &str) -> Result<(), String> {
-    let result = delete(daemon, &format!("/pipelines/{name}")).await?;
+    let result = delete(daemon, &format!("/pipelines/{}", encode_segment(name))).await?;
     println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
     Ok(())
 }
@@ -180,8 +205,8 @@ pub async fn system_prune(daemon: &str, force: bool, dry_run: bool) -> Result<()
 }
 
 async fn delete(daemon: &str, path: &str) -> Result<Value, String> {
-    let url = format!("http://{daemon}{path}");
-    let resp = reqwest::Client::new()
+    let url = api_url(daemon, path);
+    let resp = http_client()
         .delete(&url)
         .send()
         .await
@@ -259,7 +284,7 @@ pub async fn run_pipeline_watch(
 
     // 3. Render
     if text_mode {
-        crate::cli::watch::run_text(&mut rx).await;
+        crate::cli::watch::run_text(&mut rx).await?;
     } else {
         crate::cli::watch::run_tui(&mut rx, &task_id, &pipeline_name)
             .map_err(|e| format!("TUI 渲染失败: {e}"))?;

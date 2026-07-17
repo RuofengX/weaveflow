@@ -17,7 +17,7 @@ use weave::dsl::validator::{validate, ValidateOptions};
 use weave::error::WeaveError;
 use weave::engine::dag::Dag;
 use weave::engine::runner::Runner;
-use weave::store::{Database, PruneOptions};
+use weave::store::{Database, PruneOptions, PruneReport};
 use weave::tracker::{LayerInfo, TaskId, TaskSnapshot, TaskStatus, TaskTracker};
 
 use super::logging::RingWriter;
@@ -75,6 +75,7 @@ struct PruneRequest {
 struct PruneResponse {
     tasks_removed: u64,
     objects_removed: u64,
+    cache_entries_removed: u64,
     bytes_freed: u64,
     dry_run: bool,
 }
@@ -222,20 +223,22 @@ async fn run_pipeline(
         )
         .await;
 
-    // Acquire a concurrency permit
-    let permit = state
-        .semaphore
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| WeaveError::Internal("task semaphore closed".into()))?;
-
-    // Spawn executor in background
+    // Spawn executor in background; permit 在后台任务内获取，HTTP 立即返回，
+    // 避免并发打满时请求挂起无界。
     let state_clone = state.clone();
     let pipeline_clone = pipeline.clone();
     let tid = task_id;
     let handle = tokio::spawn(async move {
-        let _permit = permit;
+        let _permit = match state_clone.semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                state_clone
+                    .tracker
+                    .fail(&tid, "task semaphore closed".into())
+                    .await;
+                return;
+            }
+        };
         let runner = Runner::new(
             pipeline_clone,
             state_clone.db.clone(),
@@ -298,6 +301,7 @@ async fn list_tasks(
                 "task_id": t.task_id.to_string(),
                 "pipeline_name": t.pipeline_name,
                 "created_at": t.created_at.to_rfc3339(),
+                "status": t.status,
             })
         })
         .collect();
@@ -365,9 +369,9 @@ async fn get_snapshot_by_seq(
     tracing::info!(task_id = %task_id, seq = seq, "GET /runs/:task_id/snapshots/:seq");
     let tid = parse_task_id(&task_id)?;
     let db = state.db.lock().await;
-    let snapshots = db.load_snapshots(&tid)?;
-    match snapshots.into_iter().find(|(s, _)| *s == seq) {
-        Some((_, snap)) => {
+    let snap = db.load_snapshot_by_seq(&tid, seq)?;
+    match snap {
+        Some(snap) => {
             let output: Value = match serde_json::from_slice::<Value>(&snap.output) {
                 Ok(v) => {
                     if v.is_null() && !snap.output.is_empty() {
@@ -414,12 +418,29 @@ async fn prune_tasks(
         dry_run: req.dry_run.unwrap_or(false),
         skip_tasks: state.tracker.running_task_ids(),
     };
-    let mut db = state.db.lock().await;
-    let report = db.prune(&options)?;
+    let plan = {
+        let db = state.db.lock().await;
+        db.prune_scan(&options)?
+    };
+    let report = if options.dry_run {
+        let mut rpt = PruneReport {
+            tasks_removed: plan.tasks.len() as u64,
+            objects_removed: plan.dead_objects.len() as u64,
+            cache_entries_removed: plan.dangling_cache.len() as u64,
+            bytes_freed: plan.freed_bytes,
+            ..Default::default()
+        };
+        rpt.snapshots_removed = 0;
+        rpt
+    } else {
+        let mut db = state.db.lock().await;
+        db.prune_execute(&plan, false)?
+    };
     tracing::info!(tasks = report.tasks_removed, objects = report.objects_removed, bytes = report.bytes_freed, "prune complete");
     Ok(Json(PruneResponse {
         tasks_removed: report.tasks_removed,
         objects_removed: report.objects_removed,
+        cache_entries_removed: report.cache_entries_removed,
         bytes_freed: report.bytes_freed,
         dry_run: options.dry_run,
     }))
@@ -634,7 +655,11 @@ pub async fn serve(args: Vec<String>) {
 
     let data_dir = resolve_data_dir(&args);
 
-    let db = Database::open(data_dir.join("weave.redb")).expect("open database");
+    let mut db = Database::open(data_dir.join("weave.redb")).expect("open database");
+    let interrupted = db.mark_interrupted_tasks().unwrap_or(0);
+    if interrupted > 0 {
+        tracing::warn!(interrupted, "marked tasks from previous run as interrupted");
+    }
     let state = Arc::new(AppState {
         db: Arc::new(Mutex::new(db)),
         tracker: TaskTracker::new(),
@@ -660,7 +685,27 @@ pub async fn serve(args: Vec<String>) {
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .expect("bind");
-    axum::serve(listener, app).await.expect("serve");
+    let shutdown_signal = async {
+        #[cfg(unix)]
+        let sigterm = async {
+            let mut s = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("SIGTERM handler");
+            s.recv().await;
+            tracing::info!("received SIGTERM, shutting down");
+        };
+        #[cfg(not(unix))]
+        let sigterm = std::future::pending();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("received Ctrl-C, shutting down");
+            }
+            _ = sigterm => {}
+        }
+    };
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal)
+        .await
+        .expect("serve");
 }
 
 fn resolve_data_dir(args: &[String]) -> std::path::PathBuf {

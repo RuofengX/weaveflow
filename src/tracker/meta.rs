@@ -52,7 +52,7 @@ impl std::fmt::Display for PipelineId {
 
 use chrono::{DateTime, Utc};
 
-/// Task 元数据（存储在 redb task 表中）。创建后不可变。
+/// Task 元数据（存储在 redb task 表中）。创建后仅 status 字段可更新。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskMeta {
     pub task_id: TaskId,
@@ -60,4 +60,15 @@ pub struct TaskMeta {
     pub created_at: DateTime<Utc>,
     pub result_ttl_secs: i64,
     pub inputs: serde_json::Value,
+    #[serde(default = "default_task_status")]
+    pub status: String,
 }
+
+fn default_task_status() -> String {
+    "unknown".to_string()
+}
+
+pub const TASK_STATUS_RUNNING: &str = "running";
+pub const TASK_STATUS_COMPLETED: &str = "completed";
+pub const TASK_STATUS_FAILED: &str = "failed";
+pub const TASK_STATUS_INTERRUPTED: &str = "failed_interrupted";
