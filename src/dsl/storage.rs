@@ -36,13 +36,14 @@ impl<'de> serde::Deserialize<'de> for Ttl {
         }
         let (num_str, unit) = s.split_at(s.len() - 1);
         let num: i64 = num_str.parse().map_err(serde::de::Error::custom)?;
-        match unit {
-            "s" => Ok(Ttl(chrono::TimeDelta::seconds(num))),
-            "m" => Ok(Ttl(chrono::TimeDelta::minutes(num))),
-            "h" => Ok(Ttl(chrono::TimeDelta::hours(num))),
-            "d" => Ok(Ttl(chrono::TimeDelta::days(num))),
-            _ => Err(serde::de::Error::custom(format!("无效单位: {}", unit))),
-        }
+        let delta = match unit {
+            "s" => chrono::TimeDelta::try_seconds(num),
+            "m" => chrono::TimeDelta::try_minutes(num),
+            "h" => chrono::TimeDelta::try_hours(num),
+            "d" => chrono::TimeDelta::try_days(num),
+            _ => return Err(serde::de::Error::custom(format!("无效单位: {}", unit))),
+        };
+        delta.map(Ttl).ok_or_else(|| serde::de::Error::custom(format!("TTL 溢出: {}", s)))
     }
 }
 
@@ -51,4 +52,21 @@ impl<'de> serde::Deserialize<'de> for Ttl {
 pub struct StorageDef {
     pub snapshot_ttl: Option<Ttl>,
     pub result_ttl: Option<Ttl>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ttl_overflow_returns_error_not_panic() {
+        let r: Result<Ttl, _> = serde_json::from_str("\"200000000000d\"");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn ttl_valid_units() {
+        let t: Ttl = serde_json::from_str("\"30d\"").unwrap();
+        assert_eq!(t.0, chrono::TimeDelta::days(30));
+    }
 }
