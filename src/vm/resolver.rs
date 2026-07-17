@@ -16,13 +16,14 @@ pub fn resolve_inputs(
     let op_value = serde_json::to_value(&step.op)
         .map_err(|e| WeaveError::Internal(format!("step op serialize: {e}")))?;
 
-    resolve_value_tree(scope, &op_value, as_name)
+    resolve_value_tree(scope, &op_value, as_name, true)
 }
 
 fn resolve_value_tree(
     scope: &Scope,
     val: &Value,
     as_name: Option<&str>,
+    is_top: bool,
 ) -> WeaveResult<Value> {
     match val {
         Value::Object(map) => {
@@ -38,13 +39,16 @@ fn resolve_value_tree(
                 Ok((*value).clone())
             } else if map.len() == 1 && map.contains_key("Literal") {
                 let lit = &map["Literal"];
-                resolve_value_tree(scope, lit, as_name)
-            } else if let Some(inputs_val) = map.get("inputs") {
-                resolve_value_tree(scope, inputs_val, as_name)
+                resolve_value_tree(scope, lit, as_name, false)
+            } else if is_top
+                && let Some(inputs_val) = map.get("inputs")
+            {
+                resolve_value_tree(scope, inputs_val, as_name, false)
             } else {
                 let mut resolved_map = serde_json::Map::new();
                 for (k, v) in map {
-                    resolved_map.insert(k.clone(), resolve_value_tree(scope, v, as_name)?);
+                    resolved_map
+                        .insert(k.clone(), resolve_value_tree(scope, v, as_name, false)?);
                 }
                 Ok(Value::Object(resolved_map))
             }
@@ -52,7 +56,7 @@ fn resolve_value_tree(
         Value::Array(arr) => {
             let resolved: Vec<Value> = arr
                 .iter()
-                .map(|v| resolve_value_tree(scope, v, as_name))
+                .map(|v| resolve_value_tree(scope, v, as_name, false))
                 .collect::<Result<_, _>>()?;
             Ok(Value::Array(resolved))
         }
@@ -113,10 +117,62 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Arc<Value>
                     1
                 };
                 for part in &path.parts[start..] {
-                    current = current.get(part).unwrap_or(&Value::Null);
+                    let next = match current {
+                        Value::Array(arr) => part
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|i| arr.get(i)),
+                        Value::Object(map) => map.get(part),
+                        _ => None,
+                    };
+                    current = next.ok_or_else(|| {
+                        WeaveError::Internal(format!(
+                            "ref path {} not found at segment '{part}'",
+                            path.parts.join(".")
+                        ))
+                    })?;
                 }
                 Ok(Arc::new(current.clone()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn scope_with_step(value: Value) -> Scope {
+        let mut scope = Scope::new(HashMap::new());
+        scope.set_output(&StepId::from("s"), value);
+        scope
+    }
+
+    #[test]
+    fn array_index_path_resolves_element_field() {
+        let scope = scope_with_step(serde_json::json!([
+            { "name": "a" },
+            { "name": "b" }
+        ]));
+        let path = VariablePath::parse("{s.output.1.name}").unwrap();
+        let value = resolve_ref(&scope, &path).unwrap();
+        assert_eq!(*value, Value::String("b".to_string()));
+    }
+
+    #[test]
+    fn array_index_out_of_bounds_returns_error() {
+        let scope = scope_with_step(serde_json::json!([1, 2]));
+        let path = VariablePath::parse("{s.output.5}").unwrap();
+        let err = resolve_ref(&scope, &path).expect_err("out of bounds must error");
+        assert!(err.to_string().contains("s.output.5"), "err: {err}");
+    }
+
+    #[test]
+    fn missing_object_field_returns_error() {
+        let scope = scope_with_step(serde_json::json!({ "a": 1 }));
+        let path = VariablePath::parse("{s.output.missing}").unwrap();
+        let err = resolve_ref(&scope, &path).expect_err("missing field must error");
+        assert!(err.to_string().contains("missing"), "err: {err}");
     }
 }

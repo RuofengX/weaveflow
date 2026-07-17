@@ -183,7 +183,7 @@ fn collect_refs(
                         }
             } else if map.len() == 1 && map.contains_key("Literal") {
                 if let Some(lit) = map.get("Literal") {
-                    collect_string_refs(lit, results, known_steps);
+                    collect_refs(lit, results, known_steps);
                 }
             } else {
                 for v in map.values() {
@@ -381,6 +381,33 @@ mod tests {
                 method: None,
                 headers: None,
                 body: None,
+            }),
+        };
+        let p = make_pipeline(vec![step("a", vec![]), s_b]);
+        let dag = Dag::from_pipeline(&p).unwrap();
+        let layers = dag.topological_sort().unwrap();
+        assert_eq!(layers[0], vec![sid("a")]);
+        assert_eq!(layers[1], vec![sid("b")]);
+    }
+
+    #[test]
+    fn implicit_dep_via_ref_tag_nested_in_literal_object() {
+        let s_b = StepDef {
+            id: StepId::from("b"),
+            after: None,
+            iterate: None,
+            cache: None,
+            retry: None,
+            timeout_sec: None,
+            op: StepOp::Merge(step_op::MergeInputs {
+                b: RefValue::Literal(serde_json::json!({
+                    "nested": {
+                        "deep": [
+                            { "Ref": { "parts": ["a", "output", "val"] } }
+                        ]
+                    }
+                })),
+                a: None,
             }),
         };
         let p = make_pipeline(vec![step("a", vec![]), s_b]);

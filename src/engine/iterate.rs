@@ -136,12 +136,20 @@ pub async fn execute_iterate(
     }
 
     let final_result: Value = if batched {
-        Value::Array(
-            results
-                .into_iter()
-                .flat_map(|v| v.as_array().cloned().unwrap_or_default())
-                .collect()
-        )
+        let mut merged = Vec::new();
+        for (idx, v) in results.into_iter().enumerate() {
+            match v {
+                Value::Array(arr) => merged.extend(arr),
+                other => {
+                    return Err(WeaveError::Internal(format!(
+                        "步骤 {} 的第 {idx} 个 batch chunk 返回了非数组结果: {}",
+                        step.id,
+                        serde_json::to_string(&other).unwrap_or_default()
+                    )));
+                }
+            }
+        }
+        Value::Array(merged)
     } else {
         Value::Array(results)
     };
@@ -217,5 +225,44 @@ mod tests {
         .await;
         let err = result.expect_err("batch.size 0 must be rejected");
         assert!(err.to_string().contains("batch.size"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn batched_non_array_chunk_result_returns_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(Mutex::new(
+            Database::open(dir.path().join("weave.redb")).expect("open db"),
+        ));
+        let mut slots = HashMap::new();
+        slots.insert("items".to_string(), serde_json::json!([1, 2]));
+        let mut scope = Scope::new(slots);
+        let tracker = TaskTracker::new();
+        let step = StepDef {
+            id: StepId::from("s"),
+            after: None,
+            iterate: Some(IterateConfig {
+                over: VariablePath::parse("{slots.items}").unwrap(),
+                as_name: "item".into(),
+                max_workers: Some(1),
+                batch: Some(BatchConfig { size: 1 }),
+            }),
+            cache: None,
+            retry: None,
+            timeout_sec: None,
+            op: StepOp::Var(crate::dsl::step_op::VarInputs { value: None }),
+        };
+        let cfg = step.iterate.clone().unwrap();
+        let result = execute_iterate(
+            db,
+            &mut scope,
+            &step,
+            &Value::Null,
+            &cfg,
+            &TaskId(uuid::Uuid::new_v4()),
+            &tracker,
+        )
+        .await;
+        let err = result.expect_err("non-array chunk result must be rejected");
+        assert!(err.to_string().contains("非数组"), "err: {err}");
     }
 }

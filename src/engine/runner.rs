@@ -12,7 +12,7 @@ use crate::engine::step::execute_step;
 use crate::error::{WeaveError, WeaveResult};
 use crate::store::Database;
 use crate::tracker::{Snapshot, StepState, TaskId, TaskTracker};
-use crate::vm::{Scope, redact_env_values};
+use crate::vm::{Scope, redact_env_values, resolve_ref};
 
 pub struct Runner {
     pub pipeline: PipelineDef,
@@ -125,7 +125,15 @@ pub async fn run_inner(
             .await;
     }
 
-    let last_step_id = layers.last().and_then(|l| l.last()).cloned();
+    let last_step_id = match &pipeline.output {
+        RefValue::Ref(path) => path
+            .parts
+            .first()
+            .map(|p| StepId::from(p.clone()))
+            .filter(|id| dag.step(id).is_some()),
+        RefValue::Literal(_) => None,
+    }
+    .or_else(|| layers.last().and_then(|l| l.last()).cloned());
 
     for layer in layers.iter() {
         let mut futures = Vec::new();
@@ -243,29 +251,10 @@ pub async fn run_inner(
                 if path.parts.is_empty() {
                     return Err(WeaveError::Internal("empty output ref".into()));
                 }
-                let step_id = StepId::from(path.parts[0].clone());
-                let value = scope.get_output(&step_id).ok_or_else(|| {
-                    WeaveError::Internal(format!("output step {step_id} not found"))
-                })?;
-
-                if path.parts.len() <= 2 {
-                    output_val = (*value).clone();
-                    final_output = serde_json::to_vec(&output_val)
-                        .map_err(|e| WeaveError::Internal(format!("output serialize: {e}")))?;
-                } else {
-                    let mut current = &*value;
-                    let start = if path.parts.len() >= 2 && path.parts[1] == "output" {
-                        2
-                    } else {
-                        1
-                    };
-                    for part in &path.parts[start..] {
-                        current = current.get(part).unwrap_or(&Value::Null);
-                    }
-                    output_val = current.clone();
-                    final_output = serde_json::to_vec(&output_val)
-                        .map_err(|e| WeaveError::Internal(format!("output serialize: {e}")))?;
-                }
+                let value = resolve_ref(&scope, path)?;
+                output_val = (*value).clone();
+                final_output = serde_json::to_vec(&output_val)
+                    .map_err(|e| WeaveError::Internal(format!("output serialize: {e}")))?;
             }
         }
     }
