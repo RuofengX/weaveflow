@@ -89,7 +89,7 @@ pub enum TaskStatus {
 }
 
 /// DAG 层的结构信息（用于前端渲染并行括号）。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LayerInfo {
     pub index: usize,
     pub step_ids: Vec<StepId>,

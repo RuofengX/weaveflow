@@ -18,7 +18,7 @@ use weave::error::WeaveError;
 use weave::engine::dag::Dag;
 use weave::engine::runner::Runner;
 use weave::store::{Database, PruneOptions};
-use weave::tracker::{LayerInfo, TaskId, TaskTracker};
+use weave::tracker::{LayerInfo, TaskId, TaskSnapshot, TaskStatus, TaskTracker};
 
 use super::logging::RingWriter;
 
@@ -234,7 +234,7 @@ async fn run_pipeline(
     let state_clone = state.clone();
     let pipeline_clone = pipeline.clone();
     let tid = task_id;
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let _permit = permit;
         let runner = Runner::new(
             pipeline_clone,
@@ -246,6 +246,32 @@ async fn run_pipeline(
         match &result {
             Ok(_) => tracing::info!(task_id = %tid, "pipeline run completed"),
             Err(e) => tracing::error!(task_id = %tid, error = %e, "pipeline run failed"),
+        }
+    });
+
+    tokio::spawn(async move {
+        match handle.await {
+            Ok(()) => {}
+            Err(e) => {
+                if e.is_panic() {
+                    let msg = e
+                        .try_into_panic()
+                        .map(|p| {
+                            p.downcast_ref::<String>()
+                                .cloned()
+                                .or_else(|| {
+                                    p.downcast_ref::<&str>().map(|s| s.to_string())
+                                })
+                                .unwrap_or_else(|| "unknown panic".to_string())
+                        })
+                        .unwrap_or_else(|_| "internal panic (cancelled)".to_string());
+                    tracing::error!(task_id = %tid, error = %msg, "runner panicked");
+                    state
+                        .tracker
+                        .fail(&tid, format!("internal panic: {msg}"))
+                        .await;
+                }
+            }
         }
     });
 
@@ -445,13 +471,11 @@ async fn ws_task(
     tracing::info!(task_id = %task_id, "GET /runs/:task_id/ws");
     let tid = parse_task_id(&task_id)?;
 
-    let initial = state.tracker.get(&tid).await;
-
-    let rx = match state.tracker.subscribe(&tid).await {
-        Some(rx) => rx,
+    let (initial, rx) = match state.tracker.snapshot_and_subscribe(&tid).await {
+        Some((snap, rx)) => (Some(snap), rx),
         None => {
             return Err(WeaveError::NotFound(format!(
-                "task {task_id} not running"
+                "task {task_id} not found"
             )));
         }
     };
@@ -462,7 +486,7 @@ async fn ws_task(
 async fn handle_ws(
     mut socket: WebSocket,
     mut rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
-    initial: Option<weave::tracker::TaskSnapshot>,
+    initial: Option<TaskSnapshot>,
 ) {
     if let Some(ref snap) = initial {
         let bytes = serde_json::to_vec(snap).unwrap_or_default();
@@ -473,23 +497,52 @@ async fn handle_ws(
         {
             return;
         }
+        if matches!(
+            snap.status,
+            TaskStatus::Completed(_) | TaskStatus::Failed(_)
+        ) {
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
     }
 
     loop {
-        match rx.recv().await {
-            Ok(bytes) => {
-                if socket
-                    .send(Message::Text(
-                        String::from_utf8_lossy(&bytes).into(),
-                    ))
-                    .await
-                    .is_err()
-                {
-                    break;
+        tokio::select! {
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                    Some(Ok(_)) => {}
                 }
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            result = rx.recv() => {
+                match result {
+                    Ok(bytes) => {
+                        if socket
+                            .send(Message::Text(
+                                String::from_utf8_lossy(&bytes).into(),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        let v: Value =
+                            serde_json::from_slice(&bytes).unwrap_or_default();
+                        if v["status"]
+                            .as_object()
+                            .map_or(false, |o| {
+                                o.contains_key("Completed")
+                                    || o.contains_key("Failed")
+                            })
+                        {
+                            let _ = socket.send(Message::Close(None)).await;
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
         }
     }
 }
@@ -588,6 +641,19 @@ pub async fn serve(args: Vec<String>) {
         log_ring,
     });
 
+    {
+        let tracker = state.tracker.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let removed = tracker.cleanup_stale();
+                if removed > 0 {
+                    tracing::info!(removed, "tracker cleanup: removed stale tasks");
+                }
+            }
+        });
+    }
+
     let app = build_app(state);
     tracing::info!("weave serve listening on {bind}");
     let listener = tokio::net::TcpListener::bind(&bind)
@@ -613,9 +679,22 @@ fn resolve_data_dir(args: &[String]) -> std::path::PathBuf {
 // ── Daemon ────────────────────────────────────────────────────────────────
 
 fn pid_path() -> std::path::PathBuf {
-    dirs_next::home_dir()
-        .map(|h| h.join(".weave").join("weave.pid"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".weave/weave.pid"))
+    resolve_data_dir(&[]).join("weave.pid")
+}
+
+fn log_file_path() -> std::path::PathBuf {
+    resolve_data_dir(&[]).join("weave.log")
+}
+
+fn verify_pid_binary(pid: u32, expected_exe: &std::path::Path) -> bool {
+    let exe_link = format!("/proc/{pid}/exe");
+    match std::fs::canonicalize(&exe_link) {
+        Ok(pid_exe) => match std::fs::canonicalize(expected_exe) {
+            Ok(my_exe) => pid_exe == my_exe,
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
 }
 
 fn is_daemon_running() -> bool {
@@ -646,6 +725,20 @@ pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote
         return;
     }
     enforce_bind_safety(bind, allow_remote);
+
+    let log_path = log_file_path();
+    let log_file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("warning: cannot open log file {}: {e}", log_path.display());
+            std::process::exit(1);
+        }
+    };
+
     let exe = std::env::current_exe().expect("current exe path");
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.arg("serve")
@@ -653,7 +746,7 @@ pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote
         .arg(bind)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(log_file));
     if let Some(n) = max_concurrent_tasks {
         cmd.arg("--max-concurrent-tasks").arg(n.to_string());
     }
@@ -661,8 +754,41 @@ pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote
         cmd.arg("--allow-remote");
     }
     let child = cmd.spawn().expect("spawn daemon");
-
     let pid = child.id().expect("child PID");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_default();
+    let check_bind = if bind.starts_with("0.0.0.0") {
+        format!("127.0.0.1{}", &bind[7..])
+    } else if bind.starts_with("[::]") {
+        "[::1]".to_string() + &bind[4..]
+    } else {
+        bind.to_string()
+    };
+    let check_url = format!("http://{}/system/operators", check_bind);
+
+    let healthy = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match client.get(&check_url).send().await {
+                Ok(resp) if resp.status().is_success() => return true,
+                _ => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    if !healthy {
+        eprintln!(
+            "daemon failed to start (health check timed out). Check log: {}",
+            log_path.display()
+        );
+        let _ = std::fs::remove_file(&pid_path());
+        return;
+    }
+
     let path = pid_path();
     std::fs::create_dir_all(path.parent().unwrap()).ok();
     std::fs::write(&path, pid.to_string()).expect("write PID file");
@@ -682,18 +808,59 @@ pub async fn stop() {
             return;
         }
     };
-    let pid: u32 = pid_str.parse().expect("parse PID");
+    let pid: u32 = match pid_str.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("stale PID file found (invalid content), removing...");
+            let _ = std::fs::remove_file(&path);
+            eprintln!("daemon not running");
+            return;
+        }
+    };
+
+    let exe = std::env::current_exe().unwrap_or_default();
+    if !verify_pid_binary(pid, &exe) {
+        eprintln!(
+            "PID {pid} does not belong to this binary — refusing to kill (PID may have been reused).\n\
+             Removing stale PID file."
+        );
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+
     unsafe {
         libc::kill(pid as i32, libc::SIGTERM);
     }
-    std::fs::remove_file(&path).ok();
+
+    let exited = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        async {
+            loop {
+                if unsafe { libc::kill(pid as i32, 0) } != 0 {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        },
+    )
+    .await
+    .unwrap_or(false);
+
+    if !exited {
+        eprintln!("daemon did not exit after SIGTERM, sending SIGKILL...");
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    let _ = std::fs::remove_file(&path);
     println!("daemon stopped (PID {pid})");
 }
 
 pub async fn restart(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote: bool) {
     if is_daemon_running() {
         stop().await;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
     start(bind, max_concurrent_tasks, allow_remote).await;
 }
@@ -726,6 +893,33 @@ mod tests {
         assert!(!is_loopback_bind("[::]:9928"));
         assert!(!is_loopback_bind("192.168.1.10:9928"));
         assert!(!is_loopback_bind("example.com:9928"));
+    }
+
+    #[test]
+    fn verify_pid_binary_own_process() {
+        let pid = std::process::id();
+        let exe = std::env::current_exe().unwrap();
+        assert!(verify_pid_binary(pid, &exe));
+    }
+
+    #[test]
+    fn verify_pid_binary_wrong_binary() {
+        let pid = std::process::id();
+        let fake_exe = std::path::PathBuf::from("/usr/bin/false");
+        assert!(!verify_pid_binary(pid, &fake_exe));
+    }
+
+    #[test]
+    fn verify_pid_binary_nonexistent_pid() {
+        assert!(!verify_pid_binary(99999999, &std::env::current_exe().unwrap()));
+    }
+
+    #[test]
+    fn parse_pid_rejects_garbage() {
+        assert!("abc".parse::<u32>().is_err());
+        assert!("".parse::<u32>().is_err());
+        assert!("123xyz".parse::<u32>().is_err());
+        assert_eq!("12345".parse::<u32>().unwrap(), 12345);
     }
 
     #[tokio::test]

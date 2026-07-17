@@ -9,7 +9,7 @@ use super::meta::TaskId;
 use super::state::{Progress, StepProgress, StepState, TaskStatus, LayerInfo};
 
 /// 对外暴露的 task 状态快照。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TaskSnapshot {
     pub task_id: String,
     pub pipeline_name: String,
@@ -157,6 +157,39 @@ impl TaskTracker {
     ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
         let runs = self.runs.lock().unwrap();
         runs.get(task_id).map(|r| r.tx.subscribe())
+    }
+
+    /// 原子化获取快照 + 订阅：同一次锁内构建快照并 subscribe，
+    /// 避免先 get 后 subscribe 之间丢失终态广播的竞态。
+    pub async fn snapshot_and_subscribe(
+        &self,
+        task_id: &TaskId,
+    ) -> Option<(TaskSnapshot, tokio::sync::broadcast::Receiver<Vec<u8>>)> {
+        let runs = self.runs.lock().unwrap();
+        runs.get(task_id)
+            .map(|r| (self.build_snapshot(r), r.tx.subscribe()))
+    }
+
+    /// 清理终态超过 10 分钟的任务，释放内存。
+    pub fn cleanup_stale(&self) -> usize {
+        let mut runs = self.runs.lock().unwrap();
+        let now = Utc::now();
+        let stale: Vec<TaskId> = runs
+            .iter()
+            .filter(|(_, r)| match &r.status {
+                RunStatus::Completed(_) | RunStatus::Failed(_) => r
+                    .completed_at
+                    .map(|t| now - t > chrono::TimeDelta::try_minutes(10).unwrap())
+                    .unwrap_or(false),
+                _ => false,
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let count = stale.len();
+        for id in &stale {
+            runs.remove(id);
+        }
+        count
     }
 
     // ── internal ──
@@ -331,5 +364,86 @@ mod tests {
             snapshot.steps[0].state,
             StepState::Completed { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn snapshot_and_subscribe_atomic() {
+        let tracker = TaskTracker::new();
+        let task_id = TaskId::new();
+        let (_rx, _initial) = tracker
+            .create(task_id, "p".to_string(), vec![step_id("a")], vec![])
+            .await;
+
+        let (snapshot, mut rx2) =
+            tracker.snapshot_and_subscribe(&task_id).await.unwrap();
+        assert!(matches!(snapshot.status, TaskStatus::Running(_)));
+
+        tracker
+            .complete(&task_id, serde_json::json!({"ok": true}))
+            .await;
+        let bytes = rx2.recv().await.unwrap();
+        let pushed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(pushed["status"]["Completed"], serde_json::json!({"ok": true}));
+    }
+
+    #[tokio::test]
+    async fn snapshot_and_subscribe_sees_completed_state() {
+        let tracker = TaskTracker::new();
+        let task_id = TaskId::new();
+        let (_rx, _initial) = tracker
+            .create(task_id, "p".to_string(), vec![step_id("a")], vec![])
+            .await;
+        tracker
+            .complete(&task_id, serde_json::json!({"ok": true}))
+            .await;
+
+        let (snapshot, _rx2) =
+            tracker.snapshot_and_subscribe(&task_id).await.unwrap();
+        assert!(matches!(snapshot.status, TaskStatus::Completed(_)));
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_removes_old_terminal_tasks() {
+        let tracker = TaskTracker::new();
+        let task_id = TaskId::new();
+        let (_rx, _initial) = tracker
+            .create(task_id, "p".to_string(), vec![step_id("a")], vec![])
+            .await;
+        tracker
+            .complete(&task_id, serde_json::json!({"ok": true}))
+            .await;
+
+        {
+            let mut runs = tracker.runs.lock().unwrap();
+            if let Some(run) = runs.get_mut(&task_id) {
+                run.completed_at =
+                    Some(Utc::now() - chrono::TimeDelta::try_minutes(11).unwrap());
+            }
+        }
+
+        let removed = tracker.cleanup_stale();
+        assert_eq!(removed, 1);
+        assert!(tracker.get(&task_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_keeps_running_tasks() {
+        let tracker = TaskTracker::new();
+        let task_id = TaskId::new();
+        let (_rx, _initial) = tracker
+            .create(task_id, "p".to_string(), vec![step_id("a")], vec![])
+            .await;
+
+        {
+            let mut runs = tracker.runs.lock().unwrap();
+            if let Some(run) = runs.get_mut(&task_id) {
+                run.started_at =
+                    Some(Utc::now() - chrono::TimeDelta::try_minutes(30).unwrap());
+            }
+        }
+
+        let removed = tracker.cleanup_stale();
+        assert_eq!(removed, 0);
+        assert!(tracker.get(&task_id).await.is_some());
     }
 }

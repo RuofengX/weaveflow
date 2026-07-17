@@ -189,3 +189,56 @@ output: "{r.output}"
     assert!(result["encoded"].as_str().unwrap().len() > 0);
     assert_eq!(result["restored"], json!("Hello, QuickJS!"));
 }
+
+#[test]
+fn js_infinite_loop_is_interrupted_by_timeout() {
+    let yaml = r#"
+name: js_infinite_loop
+steps:
+  - id: hang
+    type: js
+    timeout: 30
+    inputs:
+      timeout: 2000
+      code: |
+        function run() {
+          while (1) {}
+          return {};
+        }
+output: "{hang.output}"
+"#;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let yaml_owned = yaml.to_string();
+    std::thread::spawn(move || {
+        let result = run_yaml(&yaml_owned, HashMap::new());
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(15)) {
+        Ok(result) => {
+            assert!(result.is_err(), "expected error from infinite loop timeout");
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("test hung for 15s: JS interrupt mechanism failed");
+        }
+        Err(_) => panic!("channel disconnected"),
+    }
+}
+
+#[test]
+fn js_normal_completion_with_timeout() {
+    let yaml = r#"
+name: js_normal_timeout
+steps:
+  - id: quick
+    type: js
+    inputs:
+      timeout: 5000
+      code: |
+        function run() {
+          return { ok: true };
+        }
+output: "{quick.output}"
+"#;
+    let result = run_yaml(yaml, HashMap::new()).expect("run");
+    assert_eq!(result["ok"], json!(true));
+}

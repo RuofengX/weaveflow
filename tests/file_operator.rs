@@ -97,3 +97,25 @@ output: "{read.output}"
     let result = run_yaml(yaml, HashMap::new());
     assert!(result.is_err(), "expected error for non-existent file");
 }
+
+#[test]
+fn file_operator_rejects_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir_path = dir.path().to_string_lossy().to_string();
+
+    let yaml = format!(
+        r#"
+name: file_dir
+steps:
+  - id: read
+    type: file
+    inputs:
+      path: "{dir_path}"
+output: "{{{{read.output}}}}"
+"#
+    );
+    let result = run_yaml(&yaml, HashMap::new());
+    assert!(result.is_err(), "expected error for directory path");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("not a regular file"), "expected 'not a regular file' in error, got: {err}");
+}

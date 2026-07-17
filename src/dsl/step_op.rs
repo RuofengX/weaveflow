@@ -66,6 +66,8 @@ pub struct JsInputs {
     pub code: RefValue,
     #[serde(default)]
     pub data: Option<RefValue>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

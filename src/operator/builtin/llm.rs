@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tracing::{debug, warn};
 
+use super::http_client;
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
-/// LLM 算子：调用 OpenAI 兼容的 chat completions API，直接返回文本内容。
 pub struct LlmOperator;
 
 fn extract_images(inputs: &Value) -> (Vec<&str>, bool) {
@@ -21,6 +21,14 @@ fn extract_images(inputs: &Value) -> (Vec<&str>, bool) {
     };
 
     (images, found)
+}
+
+fn safe_truncate(s: &str, n: usize) -> &str {
+    let end = s.char_indices()
+        .nth(n)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    &s[..end]
 }
 
 #[async_trait]
@@ -108,7 +116,9 @@ impl Operator for LlmOperator {
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| OperatorError::Runtime(format!("llm serialize body: {e}")))?;
 
-        let client = reqwest::Client::new();
+        http_client::block_private_ips(url).await?;
+
+        let client = http_client::http_client();
         let resp = client
             .post(url)
             .header("Content-Type", "application/json")
@@ -117,16 +127,22 @@ impl Operator for LlmOperator {
             .await
             .map_err(|e| OperatorError::Runtime(format!("llm request: {e}")))?;
 
+        http_client::check_content_length(resp.content_length()).ok_or_else(|| {
+            OperatorError::Runtime("response body exceeds 64MB limit".into())
+        })?;
+
         let status = resp.status();
         let body_text = resp
             .text()
             .await
             .map_err(|e| OperatorError::Runtime(format!("llm read response: {e}")))?;
 
+        http_client::check_body_size(body_text.len())?;
+
         if !status.is_success() {
+            let preview = safe_truncate(&body_text, 500);
             return Err(OperatorError::Runtime(format!(
-                "llm HTTP {status}: {}",
-                &body_text[..body_text.len().min(500)]
+                "llm HTTP {status}: {preview}"
             )));
         }
 
@@ -168,5 +184,42 @@ impl Operator for LlmOperator {
             })?;
 
         Ok(Value::String(content.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_truncate;
+
+    #[test]
+    fn safe_truncate_ascii_boundary() {
+        assert_eq!(safe_truncate("hello world", 5), "hello");
+        assert_eq!(safe_truncate("hello world", 20), "hello world");
+    }
+
+    #[test]
+    fn safe_truncate_multibyte_utf8() {
+        let s = "你好世界！这是中文。";
+        let truncated = safe_truncate(s, 3);
+        assert_eq!(truncated, "你好世");
+        assert_eq!(truncated.chars().count(), 3);
+    }
+
+    #[test]
+    fn safe_truncate_does_not_panic_on_char_boundary() {
+        let s = "😀😃😄😁😆";
+        let truncated = safe_truncate(s, 3);
+        assert_eq!(truncated.chars().count(), 3);
+        assert_eq!(truncated, "😀😃😄");
+    }
+
+    #[test]
+    fn safe_truncate_zero() {
+        assert_eq!(safe_truncate("hello", 0), "");
+    }
+
+    #[test]
+    fn safe_truncate_empty_string() {
+        assert_eq!(safe_truncate("", 5), "");
     }
 }

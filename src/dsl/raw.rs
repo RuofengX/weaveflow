@@ -89,6 +89,8 @@ pub struct RawJsInputs {
     pub code: Value,
     #[serde(default)]
     pub data: Option<Value>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -229,6 +231,7 @@ impl From<RawStepOp> for StepOp {
             RawStepOp::Js(r) => StepOp::Js(step_op::JsInputs {
                 code: yaml_to_refvalue(&r.code),
                 data: r.data.as_ref().map(yaml_to_refvalue),
+                timeout: r.timeout,
             }),
             RawStepOp::Filter(r) => StepOp::Filter(step_op::FilterInputs {
                 data: r.data.as_ref().map(yaml_to_refvalue),

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tracing::debug;
 
+use super::http_client;
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
 pub struct HttpOperator;
@@ -21,13 +22,16 @@ impl Operator for HttpOperator {
         let method = inputs.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
         debug!(url = %url, method, "http request");
 
-        let client = reqwest::Client::new();
+        let client = http_client::http_client();
+
         let body_data = inputs.get("body");
         let body_bytes = match body_data {
             Some(Value::String(s)) => s.clone().into_bytes(),
             Some(v) if !v.is_null() => serde_json::to_vec(v).unwrap_or_default(),
             _ => Vec::new(),
         };
+
+        http_client::block_private_ips(url).await?;
 
         let mut req_builder = match method.to_uppercase().as_str() {
             "GET" => client.get(url),
@@ -48,9 +52,15 @@ impl Operator for HttpOperator {
         let resp = req_builder.send().await
             .map_err(|e| OperatorError::Runtime(format!("HTTP: {e}")))?;
 
+        http_client::check_content_length(resp.content_length()).ok_or_else(|| {
+            OperatorError::Runtime("response body exceeds 64MB limit".into())
+        })?;
+
         let status = resp.status().as_u16();
         let body = resp.text().await
             .map_err(|e| OperatorError::Runtime(format!("HTTP read body: {e}")))?;
+
+        http_client::check_body_size(body.len())?;
 
         Ok(serde_json::json!({
             "status": status,

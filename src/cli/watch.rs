@@ -57,8 +57,9 @@ pub fn run_tui(
                             serde_json::to_string_pretty(out).unwrap_or_default()
                         );
                     } else if let Some(s) = out.as_str() {
-                        if s.len() > 200 {
-                            println!("\n{}... ({} chars)", &s[..200], s.len());
+                        if s.chars().count() > 200 {
+                            let preview: String = s.chars().take(200).collect();
+                            println!("\n{preview}... ({} chars)", s.chars().count());
                         } else {
                             println!("\n{s}");
                         }
@@ -103,9 +104,10 @@ pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) {
                             if out.get("_binary").and_then(|v| v.as_bool()).unwrap_or(false) {
                                 let size = out.get("_size").and_then(|v| v.as_u64()).unwrap_or(0);
                                 println!("[weave] output: [binary {size} bytes]");
-                            } else if out.is_string() && out.as_str().map(|s| s.len()).unwrap_or(0) > 200 {
+                            } else if out.is_string() && out.as_str().map(|s| s.chars().count()).unwrap_or(0) > 200 {
                                 let s = out.as_str().unwrap();
-                                println!("[weave] output: {}... ({} chars)", &s[..200], s.len());
+                                let preview: String = s.chars().take(200).collect();
+                                println!("[weave] output: {preview}... ({} chars)", s.chars().count());
                             } else {
                                 println!(
                                     "[weave] output: {}",

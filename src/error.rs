@@ -113,6 +113,8 @@ impl IntoResponse for WeaveError {
     fn into_response(self) -> Response {
         let (status, msg) = match &self {
             WeaveError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
+            WeaveError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            WeaveError::Parse(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             WeaveError::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             WeaveError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             WeaveError::Operator(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
@@ -124,3 +126,61 @@ impl IntoResponse for WeaveError {
 }
 
 pub type WeaveResult<T> = Result<T, WeaveError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_status_codes() {
+        assert_eq!(
+            WeaveError::BadRequest("test".into())
+                .into_response()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            WeaveError::Parse("test".into())
+                .into_response()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            WeaveError::Validation("test".into())
+                .into_response()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            WeaveError::NotFound("test".into())
+                .into_response()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            WeaveError::Internal("test".into())
+                .into_response()
+                .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            WeaveError::Operator("test".into())
+                .into_response()
+                .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            WeaveError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"))
+                .into_response()
+                .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn error_response_body_contains_error() {
+        let resp = WeaveError::BadRequest("invalid task id: xyz".into()).into_response();
+        let status = resp.status();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}

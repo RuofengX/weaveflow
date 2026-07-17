@@ -4,6 +4,7 @@ pub mod dedup;
 pub mod file;
 pub mod filter;
 pub mod http;
+pub mod http_client;
 pub mod js;
 pub mod llm;
 pub mod merge;
