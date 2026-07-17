@@ -30,6 +30,34 @@ impl Database {
             operation: "create",
             source: Box::new(e.into()),
         })?;
+        let txn = db.begin_write().map_err(|e| WeaveError::Database {
+            operation: "init_tables begin_write",
+            source: Box::new(e.into()),
+        })?;
+        let _ = txn.open_table(PIPELINE).map_err(|e| WeaveError::Database {
+            operation: "init_tables pipeline",
+            source: Box::new(e.into()),
+        })?;
+        let _ = txn.open_table(TASK).map_err(|e| WeaveError::Database {
+            operation: "init_tables task",
+            source: Box::new(e.into()),
+        })?;
+        let _ = txn.open_table(SNAPSHOT).map_err(|e| WeaveError::Database {
+            operation: "init_tables snapshot",
+            source: Box::new(e.into()),
+        })?;
+        let _ = txn.open_table(OBJECT).map_err(|e| WeaveError::Database {
+            operation: "init_tables object",
+            source: Box::new(e.into()),
+        })?;
+        let _ = txn.open_table(CACHE).map_err(|e| WeaveError::Database {
+            operation: "init_tables cache",
+            source: Box::new(e.into()),
+        })?;
+        txn.commit().map_err(|e| WeaveError::Database {
+            operation: "init_tables commit",
+            source: Box::new(e.into()),
+        })?;
         debug!(path = %path.display(), "database opened");
         Ok(Database { db })
     }
@@ -544,6 +572,9 @@ impl Database {
                 source: Box::new(e.into()),
             })?;
             let task: TaskMeta = value.value();
+            if options.skip_tasks.contains(&task.task_id) {
+                continue;
+            }
             // 跳过没有 snapshot 的 task（尚在运行或新建）
             if !has_snapshots(&read_txn, &task.task_id)? {
                 continue;
@@ -559,69 +590,147 @@ impl Database {
         drop(table);
         drop(read_txn);
 
-        if to_delete.is_empty() { return Ok(report); }
+        let (dead_objects, freed_bytes, dangling_cache) = self.collect_object_garbage()?;
+        report.objects_removed = dead_objects.len() as u64;
+        report.bytes_freed = freed_bytes;
+        report.cache_entries_removed = dangling_cache.len() as u64;
 
-        if !options.dry_run {
-            let write_txn = self.db.begin_write().map_err(|e| WeaveError::Database {
-                operation: "prune begin_write",
-                source: Box::new(e.into()),
-            })?;
-            let mut snap_table = write_txn.open_table(SNAPSHOT).map_err(|e| WeaveError::Database {
-                operation: "prune open_snap_table",
-                source: Box::new(e.into()),
-            })?;
-            let mut task_table = write_txn.open_table(TASK).map_err(|e| WeaveError::Database {
-                operation: "prune open_task_table",
-                source: Box::new(e.into()),
-            })?;
-            let obj_table = write_txn.open_table(OBJECT).map_err(|e| WeaveError::Database {
-                operation: "prune open_obj_table",
-                source: Box::new(e.into()),
-            })?;
-
-            for task in &to_delete {
-                let task_id = task.task_id;
-                let start = SnapshotKey { task_id: task_id.0, seq: 0 };
-                let end = SnapshotKey { task_id: task_id.0, seq: u64::MAX };
-                let snap_entries: Vec<(SnapshotKey, Snapshot)> = snap_table
-                    .range(start..=end).map_err(|e| WeaveError::Database {
-                        operation: "prune range",
-                        source: Box::new(e.into()),
-                    })?
-                    .filter_map(|r| r.ok())
-                    .map(|(k, v)| (k.value(), v.value()))
-                    .collect();
-
-                report.snapshots_removed += snap_entries.len() as u64;
-
-                for (sk, _snap) in &snap_entries {
-                    snap_table.remove(*sk).map_err(|e| WeaveError::Database {
-                        operation: "prune snap_remove",
-                        source: Box::new(e.into()),
-                    })?;
-                }
-
-                task_table.remove(task_id).map_err(|e| WeaveError::Database {
-                    operation: "prune task_remove",
-                    source: Box::new(e.into()),
-                })?;
-                report.tasks_removed += 1;
-            }
-
-            drop((snap_table, task_table, obj_table));
-            write_txn.commit().map_err(|e| WeaveError::Database {
-                operation: "prune commit",
-                source: Box::new(e.into()),
-            })?;
-            self.db.compact().map_err(|e| WeaveError::Database {
-                operation: "prune compact",
-                source: Box::new(e.into()),
-            })?;
-        } else {
+        if options.dry_run {
             report.tasks_removed = to_delete.len() as u64;
+            return Ok(report);
         }
 
+        if to_delete.is_empty() && dead_objects.is_empty() && dangling_cache.is_empty() {
+            return Ok(report);
+        }
+
+        let write_txn = self.db.begin_write().map_err(|e| WeaveError::Database {
+            operation: "prune begin_write",
+            source: Box::new(e.into()),
+        })?;
+        let mut snap_table = write_txn.open_table(SNAPSHOT).map_err(|e| WeaveError::Database {
+            operation: "prune open_snap_table",
+            source: Box::new(e.into()),
+        })?;
+        let mut task_table = write_txn.open_table(TASK).map_err(|e| WeaveError::Database {
+            operation: "prune open_task_table",
+            source: Box::new(e.into()),
+        })?;
+        let mut obj_table = write_txn.open_table(OBJECT).map_err(|e| WeaveError::Database {
+            operation: "prune open_obj_table",
+            source: Box::new(e.into()),
+        })?;
+        let mut cache_table = write_txn.open_table(CACHE).map_err(|e| WeaveError::Database {
+            operation: "prune open_cache_table",
+            source: Box::new(e.into()),
+        })?;
+
+        for task in &to_delete {
+            let task_id = task.task_id;
+            let start = SnapshotKey { task_id: task_id.0, seq: 0 };
+            let end = SnapshotKey { task_id: task_id.0, seq: u64::MAX };
+            let snap_entries: Vec<(SnapshotKey, Snapshot)> = snap_table
+                .range(start..=end).map_err(|e| WeaveError::Database {
+                    operation: "prune range",
+                    source: Box::new(e.into()),
+                })?
+                .filter_map(|r| r.ok())
+                .map(|(k, v)| (k.value(), v.value()))
+                .collect();
+
+            report.snapshots_removed += snap_entries.len() as u64;
+
+            for (sk, _snap) in &snap_entries {
+                snap_table.remove(*sk).map_err(|e| WeaveError::Database {
+                    operation: "prune snap_remove",
+                    source: Box::new(e.into()),
+                })?;
+            }
+
+            task_table.remove(task_id).map_err(|e| WeaveError::Database {
+                operation: "prune task_remove",
+                source: Box::new(e.into()),
+            })?;
+            report.tasks_removed += 1;
+        }
+
+        for digest in &dead_objects {
+            obj_table.remove(*digest).map_err(|e| WeaveError::Database {
+                operation: "prune obj_remove",
+                source: Box::new(e.into()),
+            })?;
+        }
+        for key in &dangling_cache {
+            cache_table.remove(*key).map_err(|e| WeaveError::Database {
+                operation: "prune cache_remove",
+                source: Box::new(e.into()),
+            })?;
+        }
+
+        drop((snap_table, task_table, obj_table, cache_table));
+        write_txn.commit().map_err(|e| WeaveError::Database {
+            operation: "prune commit",
+            source: Box::new(e.into()),
+        })?;
+        self.db.compact().map_err(|e| WeaveError::Database {
+            operation: "prune compact",
+            source: Box::new(e.into()),
+        })?;
+
         Ok(report)
+    }
+
+    fn collect_object_garbage(&self) -> WeaveResult<(Vec<ObjectDigest>, u64, Vec<CacheKey>)> {
+        let txn = self.db.begin_read().map_err(|e| WeaveError::Database {
+            operation: "gc begin_read",
+            source: Box::new(e.into()),
+        })?;
+        let cache_table = txn.open_table(CACHE).map_err(|e| WeaveError::Database {
+            operation: "gc open_cache_table",
+            source: Box::new(e.into()),
+        })?;
+        let obj_table = txn.open_table(OBJECT).map_err(|e| WeaveError::Database {
+            operation: "gc open_obj_table",
+            source: Box::new(e.into()),
+        })?;
+        let mut referenced = std::collections::HashSet::new();
+        let mut dangling = Vec::new();
+        for result in cache_table.iter().map_err(|e| WeaveError::Database {
+            operation: "gc cache_iter",
+            source: Box::new(e.into()),
+        })? {
+            let (k, v) = result.map_err(|e| WeaveError::Database {
+                operation: "gc cache_read_row",
+                source: Box::new(e.into()),
+            })?;
+            let digest = v.value();
+            if obj_table.get(digest).map_err(|e| WeaveError::Database {
+                operation: "gc obj_get",
+                source: Box::new(e.into()),
+            })?.is_some() {
+                referenced.insert(digest);
+            } else {
+                dangling.push(k.value());
+            }
+        }
+        let mut dead = Vec::new();
+        let mut freed = 0u64;
+        for result in obj_table.iter().map_err(|e| WeaveError::Database {
+            operation: "gc obj_iter",
+            source: Box::new(e.into()),
+        })? {
+            let (k, v) = result.map_err(|e| WeaveError::Database {
+                operation: "gc obj_read_row",
+                source: Box::new(e.into()),
+            })?;
+            if !referenced.contains(&k.value()) {
+                freed += serde_json::to_vec(&v.value())
+                    .map(|b| b.len() as u64)
+                    .unwrap_or(0);
+                dead.push(k.value());
+            }
+        }
+        Ok((dead, freed, dangling))
     }
 }
 
@@ -646,6 +755,7 @@ pub struct PruneOptions {
     pub dry_run: bool,
     pub force: bool,
     pub pipeline: Option<String>,
+    pub skip_tasks: std::collections::HashSet<TaskId>,
 }
 
 /// Prune 报告。
@@ -654,5 +764,127 @@ pub struct PruneReport {
     pub tasks_removed: u64,
     pub snapshots_removed: u64,
     pub objects_removed: u64,
+    pub cache_entries_removed: u64,
     pub bytes_freed: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dsl::StepId;
+
+    fn temp_db() -> (Database, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(dir.path().join("weave.redb")).expect("open db");
+        (db, dir)
+    }
+
+    fn save_one_snapshot(db: &Database, task_id: &TaskId) {
+        let snap = Snapshot {
+            seq: 0,
+            step_id: StepId("s".to_string()),
+            output: serde_json::to_vec(&serde_json::json!({"ok": true})).unwrap(),
+        };
+        db.save_snapshot(task_id, snap).expect("save snapshot");
+    }
+
+    #[test]
+    fn fresh_db_reads_return_empty_not_error() {
+        let (mut db, _dir) = temp_db();
+        let tid = TaskId::new();
+        assert!(db.load_task(&tid).unwrap().is_none());
+        assert!(db.load_snapshots(&tid).unwrap().is_empty());
+        assert!(db
+            .load_object(&ObjectDigest::compute(b"missing"))
+            .unwrap()
+            .is_none());
+        assert!(db.check_cache_bytes(b"missing").unwrap().is_none());
+        assert!(db.list_tasks().unwrap().is_empty());
+        let report = db.prune(&PruneOptions::default()).unwrap();
+        assert_eq!(report.tasks_removed, 0);
+        assert_eq!(report.objects_removed, 0);
+        assert_eq!(report.cache_entries_removed, 0);
+    }
+
+    #[test]
+    fn prune_skips_tasks_in_skip_set() {
+        let (mut db, _dir) = temp_db();
+        let running = db.create_task("p", serde_json::json!({}), 0).unwrap();
+        let finished = db.create_task("p", serde_json::json!({}), 0).unwrap();
+        save_one_snapshot(&db, &running);
+        save_one_snapshot(&db, &finished);
+
+        let mut options = PruneOptions {
+            force: true,
+            ..Default::default()
+        };
+        options.skip_tasks.insert(running);
+        let report = db.prune(&options).unwrap();
+
+        assert_eq!(report.tasks_removed, 1);
+        assert!(db.load_task(&running).unwrap().is_some());
+        assert_eq!(db.load_snapshots(&running).unwrap().len(), 1);
+        assert!(db.load_task(&finished).unwrap().is_none());
+    }
+
+    #[test]
+    fn prune_gc_removes_unreferenced_objects() {
+        let (mut db, _dir) = temp_db();
+        db.set_cache_bytes(b"key-live", &serde_json::json!({"v": 1}))
+            .unwrap();
+        let dead = db.store_object(&serde_json::json!({"v": 2})).unwrap();
+
+        let report = db.prune(&PruneOptions::default()).unwrap();
+
+        assert_eq!(report.objects_removed, 1);
+        assert!(report.bytes_freed > 0);
+        assert!(db.load_object(&dead).unwrap().is_none());
+        assert!(db.check_cache_bytes(b"key-live").unwrap().is_some());
+    }
+
+    #[test]
+    fn prune_gc_removes_dangling_cache_entries() {
+        let (mut db, _dir) = temp_db();
+        let missing = ObjectDigest::compute(b"missing-object");
+        db.set_cache(&serde_json::json!({"op": "noop"}), &missing)
+            .unwrap();
+
+        let report = db.prune(&PruneOptions::default()).unwrap();
+
+        assert_eq!(report.cache_entries_removed, 1);
+        assert_eq!(report.objects_removed, 0);
+        assert!(db
+            .check_cache(&serde_json::json!({"op": "noop"}))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn prune_gc_clears_all_objects_when_cache_empty() {
+        let (mut db, _dir) = temp_db();
+        let d1 = db.store_object(&serde_json::json!({"v": 1})).unwrap();
+        let d2 = db.store_object(&serde_json::json!({"v": 2})).unwrap();
+
+        let report = db.prune(&PruneOptions::default()).unwrap();
+
+        assert_eq!(report.objects_removed, 2);
+        assert!(db.load_object(&d1).unwrap().is_none());
+        assert!(db.load_object(&d2).unwrap().is_none());
+    }
+
+    #[test]
+    fn prune_dry_run_reports_gc_without_deleting() {
+        let (mut db, _dir) = temp_db();
+        let dead = db.store_object(&serde_json::json!({"v": 1})).unwrap();
+
+        let report = db
+            .prune(&PruneOptions {
+                dry_run: true,
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(report.objects_removed, 1);
+        assert!(db.load_object(&dead).unwrap().is_some());
+    }
 }

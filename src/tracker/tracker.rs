@@ -170,6 +170,15 @@ impl TaskTracker {
             .map(|r| (self.build_snapshot(r), r.tx.subscribe()))
     }
 
+    /// 仍在 Running 状态的 task id 集合（供 prune 跳过运行中任务）。
+    pub fn running_task_ids(&self) -> std::collections::HashSet<TaskId> {
+        let runs = self.runs.lock().unwrap();
+        runs.iter()
+            .filter(|(_, r)| matches!(r.status, RunStatus::Running))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// 清理终态超过 10 分钟的任务，释放内存。
     pub fn cleanup_stale(&self) -> usize {
         let mut runs = self.runs.lock().unwrap();
@@ -400,6 +409,27 @@ mod tests {
         let (snapshot, _rx2) =
             tracker.snapshot_and_subscribe(&task_id).await.unwrap();
         assert!(matches!(snapshot.status, TaskStatus::Completed(_)));
+    }
+
+    #[tokio::test]
+    async fn running_task_ids_only_includes_running() {
+        let tracker = TaskTracker::new();
+        let running = TaskId::new();
+        let completed = TaskId::new();
+        let (_rx, _i1) = tracker
+            .create(running, "p".to_string(), vec![step_id("a")], vec![])
+            .await;
+        let (_rx2, _i2) = tracker
+            .create(completed, "p".to_string(), vec![step_id("a")], vec![])
+            .await;
+        tracker
+            .complete(&completed, serde_json::json!({"ok": true}))
+            .await;
+
+        let ids = tracker.running_task_ids();
+        assert!(ids.contains(&running));
+        assert!(!ids.contains(&completed));
+        assert_eq!(ids.len(), 1);
     }
 
     #[tokio::test]

@@ -11,12 +11,27 @@ fn daemon_error(url: &str, e: impl std::fmt::Display) -> String {
     format!("无法连接 daemon ({url}): {e}")
 }
 
+fn check_http_status(status: u16, body: &str) -> Result<(), String> {
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        Err(format!("HTTP {status}: {}", body.trim()))
+    }
+}
+
+async fn parse_response(resp: reqwest::Response, url: &str) -> Result<Value, String> {
+    let status = resp.status().as_u16();
+    let body = resp.text().await.map_err(|e| daemon_error(url, e))?;
+    check_http_status(status, &body)?;
+    serde_json::from_str(&body).map_err(|e| daemon_error(url, e))
+}
+
 async fn get(daemon: &str, path: &str) -> Result<Value, String> {
     let url = api_url(daemon, path);
     let resp = reqwest::get(&url)
         .await
         .map_err(|e| daemon_error(&url, e))?;
-    resp.json().await.map_err(|e| daemon_error(&url, e))
+    parse_response(resp, &url).await
 }
 
 async fn post(daemon: &str, path: &str, body: Value) -> Result<Value, String> {
@@ -28,7 +43,7 @@ async fn post(daemon: &str, path: &str, body: Value) -> Result<Value, String> {
         .send()
         .await
         .map_err(|e| daemon_error(&url, e))?;
-    resp.json().await.map_err(|e| daemon_error(&url, e))
+    parse_response(resp, &url).await
 }
 
 async fn post_body(daemon: &str, path: &str, body: String) -> Result<Value, String> {
@@ -41,7 +56,7 @@ async fn post_body(daemon: &str, path: &str, body: String) -> Result<Value, Stri
         .send()
         .await
         .map_err(|e| daemon_error(&url, e))?;
-    resp.json().await.map_err(|e| daemon_error(&url, e))
+    parse_response(resp, &url).await
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────
@@ -171,7 +186,7 @@ async fn delete(daemon: &str, path: &str) -> Result<Value, String> {
         .send()
         .await
         .map_err(|e| daemon_error(&url, e))?;
-    resp.json().await.map_err(|e| daemon_error(&url, e))
+    parse_response(resp, &url).await
 }
 
 // ── Watch (WS + TUI) ──────────────────────────────────────────────────────
@@ -250,4 +265,32 @@ pub async fn run_pipeline_watch(
             .map_err(|e| format!("TUI 渲染失败: {e}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_http_status_accepts_2xx() {
+        for status in [200, 201, 204, 299] {
+            assert!(check_http_status(status, "{}").is_ok(), "status {status}");
+        }
+    }
+
+    #[test]
+    fn check_http_status_rejects_error_status() {
+        let body = r#"{"error":"pipeline foo not found"}"#;
+        for status in [400, 404, 500] {
+            let err = check_http_status(status, body).unwrap_err();
+            assert!(err.starts_with(&format!("HTTP {status}:")), "err: {err}");
+            assert!(err.contains("pipeline foo not found"), "err: {err}");
+        }
+    }
+
+    #[test]
+    fn check_http_status_trims_body() {
+        let err = check_http_status(404, "  not found\n").unwrap_err();
+        assert_eq!(err, "HTTP 404: not found");
+    }
 }

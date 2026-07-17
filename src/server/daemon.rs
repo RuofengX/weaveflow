@@ -412,6 +412,7 @@ async fn prune_tasks(
         pipeline: req.pipeline,
         force: req.force.unwrap_or(false),
         dry_run: req.dry_run.unwrap_or(false),
+        skip_tasks: state.tracker.running_task_ids(),
     };
     let mut db = state.db.lock().await;
     let report = db.prune(&options)?;
