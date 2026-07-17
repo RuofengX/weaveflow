@@ -288,9 +288,12 @@ fn save_step_snapshot(
         step_id: step_id.clone(),
         output: bytes,
     };
-    let _ = if is_last {
+    let result = if is_last {
         db.save_snapshot_durable(task_id, snap)
     } else {
         db.save_snapshot(task_id, snap)
     };
+    if let Err(e) = result {
+        warn!(task_id = %task_id, step = %step_id, error = %e, "snapshot save failed");
+    }
 }
