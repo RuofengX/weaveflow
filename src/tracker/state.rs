@@ -7,15 +7,15 @@ use crate::dsl::StepId;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepProgress {
     pub step_id: StepId,
-    pub timeout: Option<u64>,
+    pub timeout_sec: Option<f64>,
     pub state: StepState,
 }
 
 impl StepProgress {
-    pub fn new(step_id: &StepId, timeout: Option<u64>) -> Self {
+    pub fn new(step_id: &StepId, timeout_sec: Option<f64>) -> Self {
         StepProgress {
             step_id: step_id.clone(),
-            timeout,
+            timeout_sec,
             state: StepState::Pending,
         }
     }

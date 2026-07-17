@@ -197,9 +197,9 @@ name: js_infinite_loop
 steps:
   - id: hang
     type: js
-    timeout: 30
+    timeout_sec: 30
     inputs:
-      timeout: 2000
+      timeout_sec: 2
       code: |
         function run() {
           while (1) {}
@@ -232,7 +232,7 @@ steps:
   - id: quick
     type: js
     inputs:
-      timeout: 5000
+      timeout_sec: 5
       code: |
         function run() {
           return { ok: true };

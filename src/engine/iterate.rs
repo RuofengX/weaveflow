@@ -201,7 +201,7 @@ mod tests {
             }),
             cache: None,
             retry: None,
-            timeout: None,
+            timeout_sec: None,
             op: StepOp::Noop,
         };
         let cfg = step.iterate.clone().unwrap();

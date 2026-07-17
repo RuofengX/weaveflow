@@ -31,6 +31,7 @@
 |------|------|------|------|------|
 | `code` | RefValue | ✓ | — | JS 源码字符串或 `{step_id.output}` 引用 |
 | `data` | RefValue | — | — | 传给 JS 的输入数据 |
+| `timeout_sec` | f64 | — | — | JS 执行超时秒数（支持小数；经中断处理强制终止死循环） |
 
 JS 运行时规范：
 - 顶层必须定义 `function run(data) { ... }`，返回可 JSON 序列化的值

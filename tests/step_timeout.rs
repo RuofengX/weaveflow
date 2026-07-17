@@ -14,7 +14,7 @@ name: timeout_test
 steps:
   - id: slow
     type: command
-    timeout: 1
+    timeout_sec: 0.5
     inputs:
       command: "sleep 5"
 output: "{slow.output}"
@@ -34,7 +34,7 @@ slots:
 steps:
   - id: slow
     type: command
-    timeout: 1
+    timeout_sec: 1
     iterate:
       over: "{slots.items}"
       as: "item"
@@ -56,7 +56,7 @@ name: timeout_ok
 steps:
   - id: fast
     type: command
-    timeout: 30
+    timeout_sec: 30
     inputs:
       command: "echo hi"
 output: "{fast.output.stdout}"

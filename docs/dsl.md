@@ -32,7 +32,7 @@ steps:                      # 必填，至少 1 步
       max_attempts: 3
       backoff: exponential
       delay_ms: 1000
-    timeout: 60
+    timeout_sec: 60
 
 output: "{step_id.output}"  # 必填
 ```
@@ -72,7 +72,7 @@ slots:
 | `inputs` | object | — | — | 算子输入（JS 算子的 `code` 字段也在此） |
 | `cache` | bool | — | 算子默认 | 是否启用缓存 |
 | `retry` | object | — | — | 重试策略 |
-| `timeout` | u64 | — | — | 超时秒数 |
+| `timeout_sec` | f64 | — | — | 超时秒数（支持小数，如 `0.5`；旧名 `timeout` 仍兼容） |
 
 ### retry
 

@@ -249,7 +249,7 @@ mod tests {
             iterate: None,
             cache: None,
             retry: None,
-            timeout: None,
+            timeout_sec: None,
             op: StepOp::Noop,
         }
     }
@@ -354,7 +354,7 @@ mod tests {
             iterate: None,
             cache: None,
             retry: None,
-            timeout: None,
+            timeout_sec: None,
             op: StepOp::Var(step_op::VarInputs {
                 value: Some(RefValue::Ref(VariablePath::parse("{d.output.items}").unwrap())),
             }),
@@ -375,7 +375,7 @@ mod tests {
             iterate: None,
             cache: None,
             retry: None,
-            timeout: None,
+            timeout_sec: None,
             op: StepOp::Http(step_op::HttpInputs {
                 url: RefValue::Ref(VariablePath::parse("{a.output.url}").unwrap()),
                 method: None,

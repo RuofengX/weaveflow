@@ -158,20 +158,20 @@ pub async fn execute_with_retry(
     Ok(output)
 }
 
-/// 执行算子；step.timeout 设置时用 tokio::time::timeout 包裹，超时映射 OperatorError::Timeout。
+/// 执行算子；step.timeout_sec 设置时用 tokio::time::timeout 包裹，超时映射 OperatorError::Timeout。
 pub(crate) async fn run_with_timeout(
     op: &dyn Operator,
     inputs: Value,
     step: &StepDef,
 ) -> Result<Value, OperatorError> {
-    match step.timeout {
-        Some(secs) => {
-            match tokio::time::timeout(std::time::Duration::from_secs(secs), op.run(inputs)).await {
+    match step.timeout_sec {
+        Some(secs) if secs.is_finite() && secs > 0.0 => {
+            match tokio::time::timeout(std::time::Duration::from_secs_f64(secs), op.run(inputs)).await {
                 Ok(result) => result,
                 Err(_) => Err(OperatorError::Timeout),
             }
         }
-        None => op.run(inputs).await,
+        _ => op.run(inputs).await,
     }
 }
 

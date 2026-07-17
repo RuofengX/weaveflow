@@ -97,12 +97,12 @@ steps:
       max_attempts: 3
       backoff: exponential
       delay_ms: 2000
-    timeout: 60
+    timeout_sec: 60
 output: "{s1.output}"
 "#;
         let def = parse(yaml).unwrap();
         let step = &def.steps[0];
-        assert_eq!(step.timeout, Some(60));
+        assert_eq!(step.timeout_sec, Some(60.0));
         let retry = step.retry.as_ref().unwrap();
         assert_eq!(retry.max_attempts, 3);
     }

@@ -36,7 +36,8 @@ pub struct RawStepDef {
     pub iterate: Option<RawIterateConfig>,
     pub cache: Option<bool>,
     pub retry: Option<RetryDef>,
-    pub timeout: Option<u64>,
+    #[serde(default, alias = "timeout")]
+    pub timeout_sec: Option<f64>,
 
     #[serde(flatten)]
     pub op: RawStepOp,
@@ -89,8 +90,8 @@ pub struct RawJsInputs {
     pub code: Value,
     #[serde(default)]
     pub data: Option<Value>,
-    #[serde(default)]
-    pub timeout: Option<u64>,
+    #[serde(default, alias = "timeout")]
+    pub timeout_sec: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -213,7 +214,7 @@ impl TryFrom<RawStepDef> for StepDef {
             iterate: raw.iterate.map(IterateConfig::try_from).transpose()?,
             cache: raw.cache,
             retry: raw.retry,
-            timeout: raw.timeout,
+            timeout_sec: raw.timeout_sec,
             op: raw.op.into(),
         })
     }
@@ -231,7 +232,7 @@ impl From<RawStepOp> for StepOp {
             RawStepOp::Js(r) => StepOp::Js(step_op::JsInputs {
                 code: yaml_to_refvalue(&r.code),
                 data: r.data.as_ref().map(yaml_to_refvalue),
-                timeout: r.timeout,
+                timeout_sec: r.timeout_sec,
             }),
             RawStepOp::Filter(r) => StepOp::Filter(step_op::FilterInputs {
                 data: r.data.as_ref().map(yaml_to_refvalue),

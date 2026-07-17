@@ -124,6 +124,14 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
                 });
             }
         }
+        if let Some(t) = step.timeout_sec {
+            if !t.is_finite() || t <= 0.0 {
+                report.errors.push(ValidationError {
+                    code: "invalid_timeout".into(),
+                    message: format!("步骤 {} 的 timeout_sec 必须为正数", step.id),
+                });
+            }
+        }
     }
 
     // ---- 2. slots ----
@@ -559,7 +567,7 @@ mod tests {
             iterate: None,
             cache: None,
             retry: None,
-            timeout: None,
+            timeout_sec: None,
             op: StepOp::Http(HttpInputs {
                 url: var_ref(url),
                 method: None,
@@ -576,7 +584,7 @@ mod tests {
             iterate: None,
             cache: None,
             retry: None,
-            timeout: None,
+            timeout_sec: None,
             op: StepOp::Noop,
         }
     }

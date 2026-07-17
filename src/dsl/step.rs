@@ -47,7 +47,8 @@ impl From<&str> for StepId {
     pub iterate: Option<IterateConfig>,
     pub cache: Option<bool>,
     pub retry: Option<RetryDef>,
-    pub timeout: Option<u64>,
+    #[serde(default, alias = "timeout")]
+    pub timeout_sec: Option<f64>,
 
     #[serde(flatten)]
     pub op: StepOp,
