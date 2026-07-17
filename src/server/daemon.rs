@@ -655,7 +655,7 @@ pub async fn serve(args: Vec<String>) {
 
     let data_dir = resolve_data_dir(&args);
 
-    let mut db = Database::open(data_dir.join("weave.redb")).expect("open database");
+    let db = Database::open(data_dir.join("weave.redb")).expect("open database");
     let interrupted = db.mark_interrupted_tasks().unwrap_or(0);
     if interrupted > 0 {
         tracing::warn!(interrupted, "marked tasks from previous run as interrupted");

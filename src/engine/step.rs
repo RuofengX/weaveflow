@@ -30,7 +30,7 @@ pub async fn execute_step(
     step: &StepDef,
     task_id: &TaskId,
     tracker: &TaskTracker,
-) -> WeaveResult<Value> {
+) -> WeaveResult<(Value, u32, bool)> {
     // 1. 解析输入：将 scope 中的 slots、env、上游输出填入 step 的 inputs 占位符。
     let inputs = resolve_inputs(scope, step)?;
     trace!(step = %step.id, op = %step.op.op_type(), "inputs resolved");
@@ -56,7 +56,7 @@ pub async fn execute_step(
         if let Some(v) = db_lock.check_cache_bytes(&cache_key)? {
             debug!(step = %step.id, op = %step.op.op_type(), "cache hit");
             scope.set_output(&step.id, v.clone());
-            return Ok(v);
+            return Ok((v, 1, true));
         }
     }
     debug!(step = %step.id, op = %step.op.op_type(), "cache miss");
@@ -86,12 +86,12 @@ pub async fn execute_step(
             db_lock.set_cache_bytes(&cache_key, &result)?;
             debug!(step = %step.id, "iterate result cached");
         }
-        return Ok(result);
+        return Ok((result, 1, false));
     }
 
-    // 5. 直接执行（含重试与超时）。
     info!(step = %step.id, op = %step.op.op_type(), "executing");
-    execute_with_retry(db, op.as_ref(), inputs, &cache_key, step, cache_enabled).await
+    let (output, attempts) = execute_with_retry(db, op.as_ref(), inputs, &cache_key, step, cache_enabled).await?;
+    Ok((output, attempts, false))
 }
 
 /// 调用 op.run(inputs)，失败时按重试配置自动重试（不含缓存）。
@@ -99,7 +99,7 @@ pub(crate) async fn retry_with_op(
     op: &dyn Operator,
     inputs: Value,
     step: &StepDef,
-) -> Result<Value, OperatorError> {
+) -> Result<(Value, u32), OperatorError> {
     let retry = step.retry.as_ref();
     let max_attempts = retry.map(|r| r.max_attempts.max(1)).unwrap_or(1);
     let delay_ms = retry.map(|r| r.delay_ms).unwrap_or(1000);
@@ -115,10 +115,11 @@ pub(crate) async fn retry_with_op(
         };
         match run_with_timeout(op, attempt_inputs, step).await {
             Ok(output) => {
+                let tries = attempt + 1;
                 if attempt > 0 {
-                    info!(step = %step.id, attempt = attempt + 1, "retry succeeded");
+                    info!(step = %step.id, attempt = tries, "retry succeeded");
                 }
-                return Ok(output);
+                return Ok((output, tries));
             }
             Err(_) if !is_last => {
                 let wait = match backoff {
@@ -148,14 +149,14 @@ pub async fn execute_with_retry(
     cache_key: &[u8],
     step: &StepDef,
     cache_enabled: bool,
-) -> WeaveResult<Value> {
-    let output = retry_with_op(op, inputs, step).await?;
+) -> WeaveResult<(Value, u32)> {
+    let (output, attempts) = retry_with_op(op, inputs, step).await?;
     if cache_enabled {
         let db_lock = db.lock().await;
         db_lock.set_cache_bytes(cache_key, &output)?;
         trace!(step = %step.id, "output cached");
     }
-    Ok(output)
+    Ok((output, attempts))
 }
 
 /// 执行算子；step.timeout_sec 设置时用 tokio::time::timeout 包裹，超时映射 OperatorError::Timeout。

@@ -116,9 +116,18 @@ impl IntoResponse for WeaveError {
             WeaveError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             WeaveError::Parse(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             WeaveError::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            WeaveError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
-            WeaveError::Operator(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            WeaveError::Internal(detail) => {
+                tracing::error!(%detail, "internal error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".into())
+            }
+            WeaveError::Operator(detail) => {
+                tracing::error!(%detail, "operator error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".into())
+            }
+            _ => {
+                tracing::error!(error = %self, "unhandled error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".into())
+            }
         };
         let body = axum::Json(json!({"error": msg}));
         (status, body).into_response()
@@ -182,5 +191,16 @@ mod tests {
         let resp = WeaveError::BadRequest("invalid task id: xyz".into()).into_response();
         let status = resp.status();
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn internal_error_masks_detail_in_body() {
+        let resp = WeaveError::Internal("secret redb corruption detail".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        assert!(body_str.contains("internal server error"));
+        assert!(!body_str.contains("secret"));
+        assert!(!body_str.contains("redb"));
     }
 }

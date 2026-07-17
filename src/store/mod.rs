@@ -519,67 +519,6 @@ impl Database {
         Ok(digest)
     }
 
-    /// 查询缓存。返回 (output_digest, output_value) 或 None。
-    pub fn check_cache(
-        &self,
-        inputs_val: &serde_json::Value,
-    ) -> WeaveResult<Option<(ObjectDigest, serde_json::Value)>> {
-        let ck = CacheKey(ObjectDigest::compute(
-            &serde_json::to_vec(inputs_val).unwrap_or_default(),
-        ));
-        let txn = self.db.begin_read().map_err(|e| WeaveError::Database {
-            operation: "check_cache begin_read",
-            source: Box::new(e.into()),
-        })?;
-        let table_result = txn.open_table(CACHE);
-        match table_result {
-            Ok(table) => {
-                match table.get(ck).map_err(|e| WeaveError::Database {
-                    operation: "check_cache get",
-                    source: Box::new(e.into()),
-                })? {
-                    Some(guard) => {
-                        let digest = guard.value();
-                        let value = self.load_object(&digest)?;
-                        Ok(value.map(|v| (digest, v)))
-                    }
-                    None => Ok(None),
-                }
-            }
-            Err(_) => Ok(None),
-        }
-    }
-
-    /// 写入缓存。
-    pub fn set_cache(
-        &self,
-        inputs_val: &serde_json::Value,
-        output_digest: &ObjectDigest,
-    ) -> WeaveResult<()> {
-        let ck = CacheKey(ObjectDigest::compute(
-            &serde_json::to_vec(inputs_val).unwrap_or_default(),
-        ));
-        let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
-            operation: "set_cache begin_write",
-            source: Box::new(e.into()),
-        })?;
-        let mut table = txn.open_table(CACHE).map_err(|e| WeaveError::Database {
-            operation: "set_cache open_table",
-            source: Box::new(e.into()),
-        })?;
-        table.insert(ck, *output_digest).map_err(|e| WeaveError::Database {
-            operation: "set_cache insert",
-            source: Box::new(e.into()),
-        })?;
-        drop(table);
-        txn.commit().map_err(|e| WeaveError::Database {
-            operation: "set_cache commit",
-            source: Box::new(e.into()),
-        })?;
-        Ok(())
-    }
-
-    /// Value-based cache: check if output is cached. Returns the output Value.
     pub fn check_cache_bytes(&self, key: &[u8]) -> WeaveResult<Option<serde_json::Value>> {
         let digest = ObjectDigest::compute(key);
         let ck = CacheKey(digest);
@@ -992,18 +931,23 @@ mod tests {
     #[test]
     fn prune_gc_removes_dangling_cache_entries() {
         let (mut db, _dir) = temp_db();
-        let missing = ObjectDigest::compute(b"missing-object");
-        db.set_cache(&serde_json::json!({"op": "noop"}), &missing)
-            .unwrap();
+        let orphan_digest = ObjectDigest::compute(b"phantom-object-never-stored");
+        {
+            let ck = CacheKey(ObjectDigest::compute(b"dangling-cache-entry"));
+            let txn = db.db.begin_write().unwrap();
+            {
+                let mut table = txn.open_table(CACHE).unwrap();
+                table.insert(ck, orphan_digest).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        let alive_digest = db.store_object(&serde_json::json!({"alive": 1})).unwrap();
 
         let report = db.prune(&PruneOptions::default()).unwrap();
 
+        assert_eq!(report.objects_removed, 1);
         assert_eq!(report.cache_entries_removed, 1);
-        assert_eq!(report.objects_removed, 0);
-        assert!(db
-            .check_cache(&serde_json::json!({"op": "noop"}))
-            .unwrap()
-            .is_none());
+        assert!(db.load_object(&alive_digest).unwrap().is_none());
     }
 
     #[test]

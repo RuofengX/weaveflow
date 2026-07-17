@@ -47,7 +47,7 @@ pub async fn execute_iterate(
         total_items
     };
 
-    let max_workers = cfg.max_workers.map(|n| n as usize).unwrap_or_else(|| {
+    let max_workers = cfg.max_workers.map(|n| n as usize).max(Some(1)).unwrap_or_else(|| {
         std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
@@ -117,7 +117,7 @@ pub async fn execute_iterate(
             }
 
             batch_futures.push(async move {
-                let output = retry_with_op(op.as_ref(), item_inputs, step).await?;
+                let (output, _attempts) = retry_with_op(op.as_ref(), item_inputs, step).await?;
                 Ok::<_, WeaveError>((idx, output))
             });
         }

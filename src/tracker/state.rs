@@ -25,6 +25,7 @@ impl StepProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StepState {
     Pending,
+    Skipped,
     Running {
         started_at: DateTime<Utc>,
         attempts: u32,

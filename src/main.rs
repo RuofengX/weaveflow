@@ -184,6 +184,9 @@ enum SystemCmd {
 
 fn parse_key_val(s: &str) -> Result<(String, String), String> {
     let (k, v) = s.split_once('=').ok_or_else(|| format!("invalid KEY=value: {s}"))?;
+    if k.is_empty() {
+        return Err(format!("empty key in KEY=value: {s}"));
+    }
     Ok((k.to_string(), v.to_string()))
 }
 
@@ -191,11 +194,15 @@ async fn daemon_log(addr: &str, live: bool) {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
-        .unwrap();
+        .unwrap_or_default();
     let mut offset = 0usize;
+    let host = addr
+        .strip_prefix("https://")
+        .or_else(|| addr.strip_prefix("http://"))
+        .unwrap_or(addr);
 
     loop {
-        let url = format!("http://{addr}/system/logs?offset={offset}");
+        let url = format!("http://{host}/system/logs?offset={offset}");
         match client.get(&url).send().await {
             Ok(resp) => {
                 let new_offset_hdr = resp
@@ -278,14 +285,6 @@ async fn main() {
             }
             if allow_remote {
                 args.push("--allow-remote".to_string());
-            }
-            // pass through original data-dir args
-            let orig: Vec<String> = std::env::args().collect();
-            for w in orig.windows(2) {
-                if w[0] == "--data-dir" || w[0] == "-d" {
-                    args.push(w[0].clone());
-                    args.push(w[1].clone());
-                }
             }
             server::daemon::serve(args).await;
         }

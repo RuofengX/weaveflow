@@ -139,6 +139,8 @@ pub async fn run_inner(
     }
     .or_else(|| layers.last().and_then(|l| l.last()).cloned());
 
+    let mut current_layer_idx = 0;
+
     for layer in layers.iter() {
         let mut futures = Vec::new();
         debug!(layer_steps = ?layer, "executing parallel layer");
@@ -169,12 +171,12 @@ pub async fn run_inner(
                     .await;
 
                 let out = execute_step(db_clone, &mut sc, &sd, &tid, &tracker_clone).await;
-                (sd.id.clone(), started_at, out)
+                (sd.id.clone(), started_at, out.map(|(v, a, c)| (v, a, c)))
             });
         }
 
         // 这里等待层中所有步骤完成后再处理错误，提高可观测性
-        let results: Vec<(StepId, DateTime<Utc>, WeaveResult<Value>)> =
+        let results: Vec<(StepId, DateTime<Utc>, WeaveResult<(Value, u32, bool)>)> =
             futures::future::join_all(futures).await;
 
         let mut layer_failed = false;
@@ -182,7 +184,7 @@ pub async fn run_inner(
 
         for (step_id, started_at, result) in results {
             match result {
-                Ok(output) => {
+                Ok((output, attempts_used, cache_hit)) => {
                     let completed_at = Utc::now();
                     let duration_ms = (completed_at - started_at).num_milliseconds() as u64;
                     debug!(step = %step_id, duration_ms, "parallel step completed");
@@ -198,8 +200,6 @@ pub async fn run_inner(
                             &scope,
                         );
                     }
-                    let completed_at = Utc::now();
-                    let duration_ms = (completed_at - started_at).num_milliseconds() as u64;
                     tracker
                         .update_step(
                             &task_id,
@@ -207,8 +207,8 @@ pub async fn run_inner(
                             StepState::Completed {
                                 started_at,
                                 completed_at,
-                                attempts: 1,
-                                cached: false,
+                                attempts: attempts_used,
+                                cached: cache_hit,
                                 duration_ms,
                             },
                         )
@@ -221,6 +221,10 @@ pub async fn run_inner(
                         layer_failed = true;
                     }
                     let now = Utc::now();
+                    let retry = dag.step(&step_id)
+                        .and_then(|s| s.retry.as_ref())
+                        .map(|r| r.max_attempts.max(1))
+                        .unwrap_or(1);
                     tracker
                         .update_step(
                             &task_id,
@@ -229,7 +233,7 @@ pub async fn run_inner(
                                 started_at: Some(started_at),
                                 completed_at: now,
                                 error: e.to_string(),
-                                attempts: 1,
+                                attempts: retry,
                             },
                         )
                         .await;
@@ -238,8 +242,16 @@ pub async fn run_inner(
         }
 
         if layer_failed {
+            for remaining_layer in layers.iter().skip(current_layer_idx + 1) {
+                for step_id in remaining_layer {
+                    tracker
+                        .update_step(&task_id, step_id, StepState::Skipped)
+                        .await;
+                }
+            }
             return Err(WeaveError::Internal(first_error));
         }
+        current_layer_idx += 1;
     }
 
     let final_output;

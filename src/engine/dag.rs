@@ -9,6 +9,8 @@ pub enum DagError {
     CycleFound(Vec<StepId>),
     #[error("after reference not found: {0}")]
     RefNotFound(StepId),
+    #[error("duplicate step id: {0}")]
+    DuplicateStepId(StepId),
     #[error("DAG has no steps")]
     EmptyGraph,
 }
@@ -36,7 +38,7 @@ impl Dag {
 
         for step in &def.steps {
             if steps.contains_key(&step.id) {
-                continue;
+                return Err(DagError::DuplicateStepId(step.id.clone()));
             }
             steps.insert(step.id.clone(), step.clone());
             step_ids.insert(step.id.clone());
@@ -388,6 +390,18 @@ mod tests {
         let layers = dag.topological_sort().unwrap();
         assert_eq!(layers[0], vec![sid("a")]);
         assert_eq!(layers[1], vec![sid("b")]);
+    }
+
+    #[test]
+    fn duplicate_step_id_errors() {
+        let steps = vec![
+            step("a", vec![]),
+            step("a", vec![]),
+        ];
+        let p = make_pipeline(steps);
+        let result = Dag::from_pipeline(&p);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DagError::DuplicateStepId(_)));
     }
 
     #[test]

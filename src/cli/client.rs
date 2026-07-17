@@ -29,8 +29,19 @@ fn encode_segment(s: &str) -> String {
     r
 }
 
+fn parse_daemon_addr(daemon: &str) -> (&str, &str) {
+    if let Some(rest) = daemon.strip_prefix("https://") {
+        ("https://", rest)
+    } else if let Some(rest) = daemon.strip_prefix("http://") {
+        ("http://", rest)
+    } else {
+        ("http://", daemon)
+    }
+}
+
 fn api_url(daemon: &str, path: &str) -> String {
-    format!("http://{daemon}{path}")
+    let (scheme, host) = parse_daemon_addr(daemon);
+    format!("{scheme}{host}{path}")
 }
 
 fn daemon_error(url: &str, e: impl std::fmt::Display) -> String {
@@ -143,8 +154,8 @@ fn resolve_input_value(v: &str) -> Result<Value, String> {
     if let Some(path) = v.strip_prefix('@') {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("读取 {path}: {e}"))?;
-        Ok(serde_json::from_str(&content)
-            .unwrap_or(Value::String(content)))
+        serde_json::from_str(&content)
+            .map_err(|e| format!("解析 JSON 文件 {path} 失败: {e}"))
     } else {
         Ok(serde_json::from_str(v).unwrap_or(Value::String(v.to_string())))
     }
@@ -243,10 +254,9 @@ pub async fn run_pipeline_watch(
         .to_string();
 
     // 2. Connect WS
-    let ws_url = format!(
-        "ws://{}/runs/{task_id}/ws",
-        daemon.trim_start_matches("http://")
-    );
+    let (_http_scheme, host) = parse_daemon_addr(daemon);
+    let ws_scheme = if _http_scheme == "https://" { "wss://" } else { "ws://" };
+    let ws_url = format!("{ws_scheme}{host}/runs/{task_id}/ws");
     let (ws_stream, _) = connect_async(&ws_url)
         .await
         .map_err(|e| format!("WebSocket 连接失败 ({ws_url}): {e}"))?;
@@ -317,5 +327,25 @@ mod tests {
     fn check_http_status_trims_body() {
         let err = check_http_status(404, "  not found\n").unwrap_err();
         assert_eq!(err, "HTTP 404: not found");
+    }
+
+    #[test]
+    fn resolve_input_value_rejects_broken_json_at_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, b"not json").expect("write");
+        let arg = format!("@{}", path.display());
+        let err = resolve_input_value(&arg).unwrap_err();
+        assert!(err.contains("解析 JSON"), "err: {err}");
+    }
+
+    #[test]
+    fn resolve_input_value_accepts_valid_json_at_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("good.json");
+        std::fs::write(&path, b"{\"k\": 1}").expect("write");
+        let arg = format!("@{}", path.display());
+        let val = resolve_input_value(&arg).unwrap();
+        assert_eq!(val, serde_json::json!({"k": 1}));
     }
 }

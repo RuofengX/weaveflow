@@ -152,6 +152,7 @@ pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), Str
                                             }
                                             "Iterating" => "◐".to_string(),
                                             "Running" => "●".to_string(),
+                                            "Skipped" => "—".to_string(),
                                             _ => variant.to_string(),
                                         }
                                     }
@@ -214,7 +215,7 @@ fn print_text_layer(data: &Value, completed: &mut HashSet<usize>) {
         let all_terminal = step_ids.iter().all(|sid| {
             matches!(
                 step_details.get(*sid).map(|(v, _)| v.as_str()),
-                Some("Completed") | Some("Failed")
+                Some("Completed") | Some("Failed") | Some("Skipped")
             )
         });
 
@@ -234,6 +235,7 @@ fn print_text_layer(data: &Value, completed: &mut HashSet<usize>) {
                 let icon = match variant {
                     "Completed" => "✓",
                     "Failed" => "✗",
+                    "Skipped" => "—",
                     _ => "?",
                 };
                 format!("{sid} {icon} ({detail})")
@@ -421,6 +423,10 @@ fn ui(f: &mut Frame, state: &TuiState) {
                             counts.pending += 1;
                             ("○", "pending".to_string())
                         }
+                        "Skipped" => {
+                            counts.skipped += 1;
+                            ("—", "skipped".to_string())
+                        }
                         "Running" => {
                             counts.running += 1;
                             ("●", detail_str.clone())
@@ -478,8 +484,8 @@ fn ui(f: &mut Frame, state: &TuiState) {
         Style::default().fg(Color::DarkGray),
     )));
     lines.push(Line::from(format!(
-        "● {} running  ◐ {} iterating  ✓ {} done  ○ {} pending  ✗ {} failed",
-        counts.running, counts.iterating, counts.completed, counts.pending, counts.failed,
+        "● {} running  ◐ {} iterating  ✓ {} done  — {} skipped  ○ {} pending  ✗ {} failed",
+        counts.running, counts.iterating, counts.completed, counts.skipped, counts.pending, counts.failed,
     )));
 
     let status = data
@@ -506,6 +512,7 @@ struct Counts {
     completed: u32,
     pending: u32,
     failed: u32,
+    skipped: u32,
 }
 
 /// Build step_id → (state_variant, detail_string).
@@ -542,6 +549,7 @@ fn build_step_states(data: &Value) -> HashMap<String, (String, String)> {
                 let variant = obj.keys().next().map(|k| k.as_str()).unwrap_or("?").to_string();
                 let detail = match variant.as_str() {
                     "Pending" => "pending".to_string(),
+                    "Skipped" => "skipped".to_string(),
                     "Running" => {
                         let started = obj
                             .get("Running")
