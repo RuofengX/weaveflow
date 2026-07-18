@@ -34,7 +34,8 @@ impl<'de> serde::Deserialize<'de> for Ttl {
         if s.len() < 2 {
             return Err(serde::de::Error::custom(format!("无效: {}", s)));
         }
-        let (num_str, unit) = s.split_at(s.len() - 1);
+        let unit_char = s.chars().last().expect("len >= 2");
+        let (num_str, unit) = s.split_at(s.len() - unit_char.len_utf8());
         let num: i64 = num_str.parse().map_err(serde::de::Error::custom)?;
         if num < 0 {
             return Err(serde::de::Error::custom(format!("TTL 不能为负: {}", s)));
@@ -52,8 +53,8 @@ impl<'de> serde::Deserialize<'de> for Ttl {
 
 /// 存储 TTL 配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StorageDef {
-    pub snapshot_ttl: Option<Ttl>,
     pub result_ttl: Option<Ttl>,
 }
 
@@ -77,5 +78,17 @@ mod tests {
     fn ttl_valid_units() {
         let t: Ttl = serde_json::from_str("\"30d\"").unwrap();
         assert_eq!(t.0, chrono::TimeDelta::days(30));
+    }
+
+    #[test]
+    fn ttl_multibyte_unit_returns_error_not_panic() {
+        let r: Result<Ttl, _> = serde_json::from_str("\"5é\"");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn ttl_only_multibyte_char_returns_error_not_panic() {
+        let r: Result<Ttl, _> = serde_json::from_str("\"é\"");
+        assert!(r.is_err());
     }
 }

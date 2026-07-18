@@ -211,20 +211,13 @@ fn collect_string_refs(
     known_steps: &HashSet<StepId>,
 ) {
     let Some(s) = val.as_str() else { return };
-    let mut start = 0;
-    while let Some(brace) = s[start..].find('{') {
-        let brace_abs = start + brace;
-        if let Some(end) = s[brace_abs..].find('}') {
-            let inner = &s[brace_abs..brace_abs + end + 1];
-            if let Some(var_ref) = VariablePath::parse(inner)
-                && let Some(first) = var_ref.parts.first()
-                    && known_steps.contains(first.as_str()) {
-                        results.push(StepId::from(first.clone()));
-                    }
-            start = brace_abs + end + 1;
-        } else {
-            break;
-        }
+    // 与 parser/resolver/validator 的约定一致：只有整串 "{...}" 才是 ref，
+    // 内嵌在长字符串中的 {...} 永不插值，不构成依赖。
+    if let Some(var_ref) = VariablePath::parse(s)
+        && let Some(first) = var_ref.parts.first()
+        && known_steps.contains(first.as_str())
+    {
+        results.push(StepId::from(first.clone()));
     }
 }
 
@@ -427,6 +420,42 @@ mod tests {
         };
         let p = make_pipeline(vec![step("a", vec![]), s_b]);
         let dag = Dag::from_pipeline(&p).unwrap();
+        let layers = dag.topological_sort().unwrap();
+        assert_eq!(layers[0], vec![sid("a")]);
+        assert_eq!(layers[1], vec![sid("b")]);
+    }
+
+    #[test]
+    fn embedded_ref_in_string_literal_creates_no_ghost_edge() {
+        // a 的 inputs 含内嵌 "{b.output}" 的字面量字符串（不插值、非依赖），
+        // b 真实引用 a —— 不应构成环，a 也不应有幽灵入边。
+        let s_a = StepDef {
+            id: StepId::from("a"),
+            after: None,
+            iterate: None,
+            cache: None,
+            retry: None,
+            timeout_sec: None,
+            op: StepOp::Var(step_op::VarInputs {
+                value: Some(RefValue::Literal(serde_json::json!(
+                    "prefix {b.output} suffix"
+                ))),
+            }),
+        };
+        let s_b = StepDef {
+            id: StepId::from("b"),
+            after: None,
+            iterate: None,
+            cache: None,
+            retry: None,
+            timeout_sec: None,
+            op: StepOp::Var(step_op::VarInputs {
+                value: Some(RefValue::Ref(VariablePath::parse("{a.output}").unwrap())),
+            }),
+        };
+        let p = make_pipeline(vec![s_a, s_b]);
+        let dag = Dag::from_pipeline(&p).expect("no cycle from embedded literal");
+        assert!(dag.predecessors(&sid("a")).unwrap().is_empty());
         let layers = dag.topological_sort().unwrap();
         assert_eq!(layers[0], vec![sid("a")]);
         assert_eq!(layers[1], vec![sid("b")]);

@@ -5,17 +5,20 @@ use serde_json::Value;
 
 use crate::error::WeaveResult;
 
-pub async fn run_js(code: &str, func_name: &str, input: &Value, timeout_ms: Option<u64>) -> WeaveResult<Value> {
+/// run_js future 被 drop（如 step 层 timeout 取消）时置位中断标志，
+/// QuickJS interrupt handler 随之触发，spawn_blocking 线程退出。
+struct InterruptGuard(Arc<AtomicBool>);
+
+impl Drop for InterruptGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+pub async fn run_js(code: &str, func_name: &str, input: &Value) -> WeaveResult<Value> {
     let script = build_script(code, func_name, &serde_json::to_string(input)?);
     let interrupted = Arc::new(AtomicBool::new(false));
-
-    if let Some(ms) = timeout_ms {
-        let timer_interrupted = interrupted.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-            timer_interrupted.store(true, Ordering::SeqCst);
-        });
-    }
+    let _guard = InterruptGuard(interrupted.clone());
 
     tokio::task::spawn_blocking(move || run_in_new_runtime(&script, interrupted))
         .await
@@ -27,9 +30,9 @@ fn build_script(code: &str, func_name: &str, input_json: &str) -> String {
         "{code}\n\
         try {{\n\
             var __result__ = {func_name}({input_json});\n\
-            JSON.stringify(__result__)\n\
+            JSON.stringify({{__weave_ok__: true, value: __result__}})\n\
         }} catch(__e__) {{\n\
-            JSON.stringify({{__weave_error__: true, message: __e__.message || String(__e__), stack: __e__.stack || ''}})\n\
+            JSON.stringify({{__weave_ok__: false, message: __e__.message || String(__e__), stack: __e__.stack || ''}})\n\
         }}\n"
     )
 }
@@ -89,18 +92,31 @@ fn run_in_new_runtime(script: &str, interrupted: Arc<AtomicBool>) -> WeaveResult
             .map_err(|e| crate::error::WeaveError::Internal(format!("JS runtime error: {e}")))?;
         let val: Value = serde_json::from_str(&json_str)
             .map_err(|e| crate::error::WeaveError::Internal(format!("parse JS output: {e}")))?;
-        if let Some(obj) = val.as_object()
-            && obj.get("__weave_error__").and_then(|v| v.as_bool()).unwrap_or(false) {
-                let msg = obj.get("message").and_then(|v| v.as_str()).unwrap_or("unknown error");
-                let stack = obj.get("stack").and_then(|v| v.as_str()).unwrap_or("");
-                return Err(crate::error::WeaveError::Internal(
+        let obj = val.as_object();
+        let ok = obj
+            .and_then(|o| o.get("__weave_ok__"))
+            .and_then(|v| v.as_bool());
+        match ok {
+            Some(true) => Ok(obj
+                .and_then(|o| o.get("value").cloned())
+                .unwrap_or(Value::Null)),
+            _ => {
+                let msg = obj
+                    .and_then(|o| o.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
+                let stack = obj
+                    .and_then(|o| o.get("stack"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                Err(crate::error::WeaveError::Internal(
                     if stack.is_empty() {
                         format!("JS: {msg}")
                     } else {
                         format!("JS: {msg}\n{stack}")
-                    }
-                ));
+                    },
+                ))
             }
-        Ok(val)
+        }
     })
 }

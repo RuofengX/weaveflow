@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// 重试配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetryDef {
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,

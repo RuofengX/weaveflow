@@ -1,5 +1,4 @@
 pub mod types;
-pub mod registry;
 pub mod builtin;
 
 pub use types::{Operator, OperatorSpec, OperatorError};

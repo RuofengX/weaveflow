@@ -7,9 +7,11 @@
 | 输入 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
 | `url` | RefValue | ✓ | — | 请求 URL，支持 `{...}` 变量引用 |
-| `method` | string | — | `"GET"` | HTTP 方法：`GET`/`POST`/`PUT`/`DELETE`/`PATCH` |
+| `method` | string | — | `"GET"` | HTTP 方法：`GET`/`POST`/`PUT`/`DELETE`，其他值报 Config 错误 |
 | `headers` | `{string: RefValue}` | — | — | 请求头键值对 |
-| `body` | RefValue | — | — | 请求体（字符串、对象或 `{...}` 引用） |
+| `body` | RefValue | — | — | 请求体（字符串、对象或 `{...}` 引用；GET/DELETE 忽略 body） |
+
+共享 HTTP client 的固定行为：**不跟随 redirect**（3xx 响应原样返回 `status`/`body`，不会跳转）；SSRF 预检对 DNS 解析出的**全部** IP 逐一检查（169.254.169.254 始终拒绝，私网地址需 `WEAVE_HTTP_BLOCK_PRIVATE=1` 才拒绝）；响应体边读边累计，超过 **64MB** 即中断报错；总超时 60s、连接超时 10s。
 
 ```yaml
 - id: fetch_data
@@ -31,7 +33,8 @@
 |------|------|------|------|------|
 | `code` | RefValue | ✓ | — | JS 源码字符串或 `{step_id.output}` 引用 |
 | `data` | RefValue | — | — | 传给 JS 的输入数据 |
-| `timeout_sec` | f64 | — | — | JS 执行超时秒数（支持小数；经中断处理强制终止死循环） |
+
+JS 超时由 step 层 `timeout_sec` 统一控制（inputs **没有** timeout 字段，写了会报 unknown field 错误）；step 超时 drop 执行 future，经 drop-guard 触发 QuickJS interrupt handler 强制终止执行（包括 `while(1){}` 死循环）。不设置 `timeout_sec` 时，死循环会一直占用一个 blocking 线程——请始终为 js 步骤配置 `timeout_sec`。
 
 JS 运行时规范：
 - 顶层必须定义 `function run(data) { ... }`，返回可 JSON 序列化的值
@@ -70,13 +73,13 @@ JS 运行时规范：
 
 对数组按字段条件过滤，rayon 并行。
 
-支持的 `operator`：`eq` `ne` `gt` `gte` `lt` `lte` `in` `contains`
+支持的 `operator`：`eq` `ne` `gt` `gte` `lt` `lte` `in` `contains`。其他值在 validator 校验阶段报错（`invalid_operator_config`），绕过校验运行时返回 Config 错误。
 
 | 输入 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `data` | RefValue | — | — | 输入数组，支持 `{...}` 引用 |
-| `field` | string | — | `""` | 比较的字段名（空 = 直接比较元素自身） |
-| `operator` | string | — | `"eq"` | 比较运算符 |
+| `data` | RefValue | — | — | 输入数组，支持 `{...}` 引用；缺失或为 null 时报 Config 错误 |
+| `field` | string | — | `""` | 比较的字段名（空 = 直接比较元素自身）；数字路径段可索引数组 |
+| `operator` | string | — | `"eq"` | 比较运算符，枚举值见上 |
 | `value` | RefValue | — | — | 比较值 |
 
 ```yaml
@@ -95,10 +98,12 @@ JS 运行时规范：
 
 对数组排序，rayon 并行。
 
+`order` 仅支持 `asc` / `desc`；其他值在 validator 校验阶段报错（`invalid_operator_config`），绕过校验运行时返回 Config 错误。
+
 | 输入 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `data` | RefValue | — | — | 输入数组 |
-| `field` | string | — | `""` | 排序字段名 |
+| `data` | RefValue | — | — | 输入数组；缺失或为 null 时报 Config 错误 |
+| `field` | string | — | `""` | 排序字段名；数字路径段可索引数组 |
 | `order` | string | — | `"asc"` | `asc` / `desc` |
 
 ```yaml
@@ -118,7 +123,7 @@ JS 运行时规范：
 
 | 输入 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `data` | RefValue | — | — | 输入数组 |
+| `data` | RefValue | — | — | 输入数组；缺失或为 null 时报 Config 错误 |
 | `field` | string | — | `""` | 去重字段名（空 = 直接比较元素自身） |
 
 ```yaml
@@ -139,6 +144,7 @@ JS 运行时规范：
 |------|------|------|------|------|
 | `a` | RefValue | — | — | 基础对象 |
 | `b` | RefValue | ✓ | — | 覆盖对象 |
+| `deep` | bool | — | `false` | 深合并：递归合并嵌套对象；默认浅合并（b 的同名字段整体覆盖 a）。数组与标量不做合并，始终由 b 覆盖 |
 
 ```yaml
 - id: merge_data
@@ -146,6 +152,7 @@ JS 运行时规范：
   inputs:
     a: "{step1.output}"
     b: "{step2.output}"
+    deep: true
 ```
 
 ---
@@ -156,8 +163,8 @@ JS 运行时规范：
 
 | 输入 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
-| `data` | RefValue | — | — | 输入字符串或 bytes |
-| `mode` | string | — | `"encode"` | `encode` / `decode` |
+| `data` | RefValue | — | — | 输入字符串或 bytes；缺失或为 null 时报 Config 错误 |
+| `mode` | string | — | `"encode"` | `encode` / `decode`，其他值报 Config 错误 |
 
 ```yaml
 - id: encode_pdf
@@ -210,6 +217,15 @@ JS 运行时规范：
 
 > 二选一：`path` 或 `url`，不可同时为空。
 
+本地路径经 canonicalize 后按 `WEAVE_FILE_ALLOW_ROOTS` 白名单（冒号分隔的根目录列表）校验：
+
+- **未配置**：放行所有路径，且进程内只打一次 warn（`Once`）建议配置白名单
+- **含空段**（如 `/tmp::/var` 或首尾冒号）：空段被忽略并打 warn 计数
+- **过滤空段后为空**（如 `:::`）：视为配置有误，拒绝所有路径并打 warn
+- 路径不在任一白名单根下 → Runtime 错误
+
+本地文件超过 64MB 报错；URL 模式走共享 HTTP client（SSRF 检查、不跟 redirect、64MB 流式限长）。
+
 **输出格式：**
 ```json
 {
@@ -243,6 +259,12 @@ JS 运行时规范：
 | `command` | RefValue | ✓ | — | 要执行的命令 |
 | `shell` | string | — | `"sh"` | shell 解释器：`sh` / `bash` |
 | `stdin` | RefValue | — | — | 传入 stdin 的数据 |
+
+stdout / stderr 各有 10MB 上限：超过上限的输出会被截断（仅保留前 10MB，超出部分读取后丢弃，子进程可正常退出），对应流追加 `[weave: ... truncated at 10MB]` 标记，且输出 JSON 的 `truncated` 字段为 `true`。
+
+子进程以 `env_clear` + 最小环境白名单（`PATH`/`HOME`/`LANG`/`LC_ALL`/`TZ`）启动，并启用 `kill_on_drop`：step 超时取消算子 future 时子进程会被回收。注意 `yes` 这类无限输出命令不会自行停止，会一直运行到 step `timeout_sec` 触发为止。
+
+输出 JSON：`stdout` / `stderr` / `exit_code` / `success` / `truncated`。
 
 ```yaml
 - id: run_script

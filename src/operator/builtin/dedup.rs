@@ -20,7 +20,14 @@ impl Operator for DedupOperator {
         let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("").to_string();
         debug!(field, "dedup operator");
         let data = if let Value::Object(mut m) = inputs {
-            m.remove("data").unwrap_or(Value::Null)
+            match m.remove("data") {
+                Some(v) if !v.is_null() => v,
+                _ => {
+                    return Err(OperatorError::Config(
+                        "dedup 算子 inputs.data 缺失或为 null".into(),
+                    ));
+                }
+            }
         } else {
             inputs
         };
@@ -32,9 +39,10 @@ impl Operator for DedupOperator {
 
         let mut seen = std::collections::HashSet::new();
         let mut result = Vec::new();
+        let mut missing_field = 0usize;
         for item in arr {
             if !field.is_empty() && resolve_nested(&item, &field).is_null() {
-                warn!(field = %field, "dedup 字段缺失，元素跳过判重直接保留");
+                missing_field += 1;
                 result.push(item);
                 continue;
             }
@@ -46,6 +54,13 @@ impl Operator for DedupOperator {
             if seen.insert(key) {
                 result.push(item);
             }
+        }
+        if missing_field > 0 {
+            warn!(
+                field = %field,
+                missing_field,
+                "dedup 部分元素字段缺失，跳过判重直接保留"
+            );
         }
 
         let output = if is_array {
@@ -94,5 +109,14 @@ mod tests {
         });
         let out = op.run(inputs).await.expect("run");
         assert_eq!(out.as_array().expect("array").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn missing_data_returns_config_error() {
+        let op = DedupOperator;
+        let err = op.run(json!({ "field": "id" })).await.expect_err("must fail");
+        assert!(matches!(err, OperatorError::Config(_)));
+        let err = op.run(json!({ "data": null, "field": "id" })).await.expect_err("must fail");
+        assert!(matches!(err, OperatorError::Config(_)));
     }
 }

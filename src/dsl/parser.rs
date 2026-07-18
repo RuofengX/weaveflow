@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 use crate::dsl::PipelineDef;
-use crate::dsl::raw::RawPipelineDef;
+use crate::dsl::raw::{self, RawPipelineDef};
 use tracing::debug;
 
 /// 将 YAML 字符串解析为 `PipelineDef`。
@@ -16,7 +16,7 @@ use tracing::debug;
 /// `rust_yaml` 的解析错误（含行号、上下文）直接透传到 `ParseError` 返回给调用方。
 pub fn parse(yaml: &str) -> Result<PipelineDef, ParseError> {
     let raw: RawPipelineDef = rust_yaml::from_str(yaml)?;
-    let pipeline = PipelineDef::try_from(raw).map_err(|e| ParseError::Yaml(e.to_string()))?;
+    let pipeline = PipelineDef::try_from(raw)?;
     debug!(name = %pipeline.name, steps = pipeline.steps.len(), "pipeline parsed");
     Ok(pipeline)
 }
@@ -25,6 +25,8 @@ pub fn parse(yaml: &str) -> Result<PipelineDef, ParseError> {
 pub enum ParseError {
     #[error("YAML 解析失败: {0}")]
     Yaml(String),
+    #[error("{0}")]
+    Raw(#[from] raw::ParseError),
 }
 
 impl From<rust_yaml::Error> for ParseError {

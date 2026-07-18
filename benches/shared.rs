@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::json;
-use tokio::sync::Mutex;
 use weave::engine::dag::Dag;
 use weave::engine::runner::Runner;
 use weave::store::Database;
@@ -188,26 +187,29 @@ output: "{v.output}""#
 pub fn setup(
     rt: &tokio::runtime::Runtime,
     def: &weave::dsl::PipelineDef,
-    db: Arc<Mutex<Database>>,
+    db: Arc<Database>,
     slots: HashMap<String, serde_json::Value>,
 ) -> (Runner, TaskId, HashMap<String, serde_json::Value>) {
     let tracker = TaskTracker::new();
 
     let dag = Dag::from_pipeline(def).expect("dag");
     let layers = dag.topological_sort().expect("topo");
-    let all_step_ids = layers.iter().flatten().cloned().collect::<Vec<_>>();
+    let steps_with_timeout: Vec<(weave::dsl::StepId, Option<f64>)> = layers
+        .iter()
+        .flatten()
+        .map(|id| (id.clone(), dag.step(id).and_then(|s| s.timeout_sec)))
+        .collect();
     let layer_infos: Vec<LayerInfo> = layers
         .iter()
         .enumerate()
         .map(|(i, step_ids)| LayerInfo { index: i, step_ids: step_ids.clone() })
         .collect();
 
-    let task_id = {
-        let db_guard = db.try_lock().expect("db lock");
-        db_guard.create_task(&def.name, json!(slots), 3600).expect("create task")
-    };
+    let task_id = db
+        .create_task(&def.name, json!(slots), 3600)
+        .expect("create task");
 
-    rt.block_on(tracker.create(task_id, def.name.clone(), all_step_ids, layer_infos));
+    rt.block_on(tracker.create(task_id, def.name.clone(), steps_with_timeout, layer_infos));
 
     let runner = Runner::new(def.clone(), db.clone(), tracker);
     (runner, task_id, slots)
@@ -216,7 +218,7 @@ pub fn setup(
 pub fn run_once(
     rt: &tokio::runtime::Runtime,
     def: &weave::dsl::PipelineDef,
-    db: &Arc<Mutex<Database>>,
+    db: &Arc<Database>,
     slots: HashMap<String, serde_json::Value>,
 ) -> usize {
     let (runner, task_id, slots) = setup(rt, def, db.clone(), slots);
@@ -224,9 +226,9 @@ pub fn run_once(
     result.len()
 }
 
-pub fn fresh_db(tmpdir: &TempDir, prefix: &str, counter: &AtomicUsize) -> (Arc<Mutex<Database>>, PathBuf) {
+pub fn fresh_db(tmpdir: &TempDir, prefix: &str, counter: &AtomicUsize) -> (Arc<Database>, PathBuf) {
     let n = counter.fetch_add(1, Ordering::Relaxed);
     let dir = tmpdir.0.join(format!("{prefix}-{n}"));
     let _ = std::fs::create_dir_all(&dir);
-    (Arc::new(Mutex::new(Database::open(dir.join("weave.redb")).expect("open db"))), dir)
+    (Arc::new(Database::open(dir.join("weave.redb")).expect("open db")), dir)
 }

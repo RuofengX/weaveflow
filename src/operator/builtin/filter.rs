@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use serde_json::Value;
 use tracing::debug;
 
-use crate::operator::builtin::resolve_nested;
+use crate::operator::builtin::{compare_json_numbers, resolve_nested};
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
 pub struct FilterOperator;
@@ -13,10 +13,10 @@ impl FilterOperator {
         match op {
             "eq" => Some(a == b),
             "ne" => Some(a != b),
-            "gt" => numeric_cmp(a, b).map(|o| o == std::cmp::Ordering::Greater),
-            "gte" => numeric_cmp(a, b).map(|o| o != std::cmp::Ordering::Less),
-            "lt" => numeric_cmp(a, b).map(|o| o == std::cmp::Ordering::Less),
-            "lte" => numeric_cmp(a, b).map(|o| o != std::cmp::Ordering::Greater),
+            "gt" => compare_json_numbers(a, b).map(|o| o == std::cmp::Ordering::Greater),
+            "gte" => compare_json_numbers(a, b).map(|o| o != std::cmp::Ordering::Less),
+            "lt" => compare_json_numbers(a, b).map(|o| o == std::cmp::Ordering::Less),
+            "lte" => compare_json_numbers(a, b).map(|o| o != std::cmp::Ordering::Greater),
             "in" => b.as_array().map(|arr| arr.contains(a)),
             "contains" => {
                 let sa = a.as_str()?;
@@ -26,18 +26,6 @@ impl FilterOperator {
             _ => None,
         }
     }
-}
-
-fn numeric_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
-    if let (Some(x), Some(y)) = (a.as_i64(), b.as_i64()) {
-        return Some(x.cmp(&y));
-    }
-    if let (Some(x), Some(y)) = (a.as_u64(), b.as_u64()) {
-        return Some(x.cmp(&y));
-    }
-    a.as_f64()
-        .zip(b.as_f64())
-        .and_then(|(x, y)| x.partial_cmp(&y))
 }
 
 #[async_trait]
@@ -53,9 +41,24 @@ impl Operator for FilterOperator {
         let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("").to_string();
         debug!(field, "filter operator");
         let operator = inputs.get("operator").and_then(|v| v.as_str()).unwrap_or("eq").to_string();
+        if !matches!(
+            operator.as_str(),
+            "eq" | "ne" | "gt" | "gte" | "lt" | "lte" | "in" | "contains"
+        ) {
+            return Err(OperatorError::Config(format!(
+                "filter 不支持 operator: {operator}（可选: eq/ne/gt/gte/lt/lte/in/contains）"
+            )));
+        }
         let ref_value = inputs.get("value").cloned().unwrap_or(Value::Null);
         let data = if let Value::Object(mut m) = inputs {
-            m.remove("data").unwrap_or(Value::Null)
+            match m.remove("data") {
+                Some(v) if !v.is_null() => v,
+                _ => {
+                    return Err(OperatorError::Config(
+                        "filter 算子 inputs.data 缺失或为 null".into(),
+                    ));
+                }
+            }
         } else {
             inputs
         };
@@ -121,5 +124,22 @@ mod tests {
         });
         let out = op.run(inputs).await.expect("run");
         assert_eq!(out, json!([2.5, 3.5]));
+    }
+
+    #[tokio::test]
+    async fn unknown_operator_returns_config_error() {
+        let op = FilterOperator;
+        let inputs = json!({ "data": [1, 2], "operator": "like", "value": 1 });
+        let err = op.run(inputs).await.expect_err("must fail");
+        assert!(matches!(err, OperatorError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn missing_data_returns_config_error() {
+        let op = FilterOperator;
+        let err = op.run(json!({ "operator": "eq", "value": 1 })).await.expect_err("must fail");
+        assert!(matches!(err, OperatorError::Config(_)));
+        let err = op.run(json!({ "data": null, "operator": "eq", "value": 1 })).await.expect_err("must fail");
+        assert!(matches!(err, OperatorError::Config(_)));
     }
 }

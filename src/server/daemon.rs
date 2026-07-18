@@ -1,5 +1,6 @@
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -10,20 +11,22 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use tokio::sync::Mutex;
 
 use weave::dsl::{parser::parse, StepId};
-use weave::dsl::validator::{validate, ValidateOptions};
+use weave::dsl::validator::validate;
 use weave::error::WeaveError;
 use weave::engine::dag::Dag;
 use weave::engine::runner::Runner;
-use weave::store::{Database, PruneOptions, PruneReport};
+use weave::store::{Database, PruneOptions};
 use weave::tracker::{LayerInfo, TaskId, TaskSnapshot, TaskStatus, TaskTracker};
 
 use super::logging::RingWriter;
 
-type DbRef = Arc<Mutex<Database>>;
+type DbRef = Arc<Database>;
 type TrackerRef = TaskTracker;
+
+/// 优雅停机时等待后台任务排空的最长时间。
+const SHUTDOWN_DRAIN_SECS: u64 = 30;
 
 // ── State ────────────────────────────────────────────────────────────────
 
@@ -32,6 +35,11 @@ struct AppState {
     tracker: TrackerRef,
     semaphore: Arc<tokio::sync::Semaphore>,
     log_ring: RingWriter,
+    /// 停机中：/runs 拒绝新任务（503）。
+    draining: Arc<AtomicBool>,
+    /// 运行中的后台 pipeline 任务数。
+    in_flight: Arc<AtomicUsize>,
+    drain_notify: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +82,7 @@ struct PruneRequest {
 #[derive(Serialize)]
 struct PruneResponse {
     tasks_removed: u64,
+    snapshots_removed: u64,
     objects_removed: u64,
     cache_entries_removed: u64,
     bytes_freed: u64,
@@ -89,7 +98,7 @@ async fn create_pipeline(
     tracing::info!(len = body.len(), "POST /pipelines");
     let pipeline = parse(&body)?;
     tracing::info!(name = %pipeline.name, steps = pipeline.steps.len(), "pipeline parsed");
-    let report = validate(&pipeline, &ValidateOptions::default());
+    let report = validate(&pipeline);
     if !report.is_ok() {
         let msgs: Vec<String> = report
             .errors
@@ -111,7 +120,7 @@ async fn create_pipeline(
         }
     }
 
-    let pid = state.db.lock().await.save_pipeline_upsert(&pipeline)?;
+    let pid = state.db.save_pipeline_upsert(&pipeline)?;
     tracing::info!(pipeline_id = %pid, name = %pipeline.name, "pipeline saved");
     let response = serde_json::json!({
         "id": pid.to_string(),
@@ -127,11 +136,11 @@ async fn delete_pipeline(
     Path(name): Path<String>,
 ) -> Result<Json<Value>, WeaveError> {
     tracing::info!(pipeline = %name, "DELETE /pipelines/:name");
-    let db = state.db.lock().await;
-    let (pid, _) = db
+    let (pid, _) = state
+        .db
         .find_pipeline_by_name(&name)?
         .ok_or_else(|| WeaveError::NotFound(format!("pipeline {name} not found")))?;
-    db.delete_pipeline(&pid)?;
+    state.db.delete_pipeline(&pid)?;
     tracing::info!(pipeline_id = %pid, "pipeline deleted");
     Ok(Json(serde_json::json!({"deleted": name})))
 }
@@ -140,7 +149,7 @@ async fn list_pipelines(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, WeaveError> {
     tracing::info!("GET /pipelines");
-    let items = state.db.lock().await.list_pipelines()?;
+    let items = state.db.list_pipelines()?;
     let list: Vec<Value> = items
         .iter()
         .map(|(pid, def)| {
@@ -155,12 +164,13 @@ async fn get_pipeline(
     Path(name_or_id): Path<String>,
 ) -> Result<Json<Value>, WeaveError> {
     tracing::info!(pipeline = %name_or_id, "GET /pipelines/:name");
-    let db = state.db.lock().await;
-    let pipeline = if let Some((_, p)) = db.find_pipeline_by_name(&name_or_id)? {
+    let pipeline = if let Some((_, p)) = state.db.find_pipeline_by_name(&name_or_id)? {
         p
     } else if let Ok(uuid) = uuid::Uuid::parse_str(&name_or_id) {
         let pid = weave::tracker::PipelineId(uuid);
-        db.load_pipeline(&pid)?
+        state
+            .db
+            .load_pipeline(&pid)?
             .ok_or_else(|| WeaveError::NotFound(format!("pipeline {name_or_id} not found")))?
     } else {
         return Err(WeaveError::NotFound(format!("pipeline {name_or_id} not found")));
@@ -174,19 +184,21 @@ async fn run_pipeline(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<Value>, WeaveError> {
+    if state.draining.load(Ordering::SeqCst) {
+        return Err(WeaveError::Unavailable(
+            "daemon 正在停机，不再接受新任务".to_string(),
+        ));
+    }
     tracing::info!(pipeline = %req.pipeline, "POST /runs");
 
     // Load pipeline
-    let pipeline = {
-        let db = state.db.lock().await;
-        match db.find_pipeline_by_name(&req.pipeline)? {
-            Some((_pid, p)) => p,
-            None => {
-                return Err(WeaveError::NotFound(format!(
-                    "pipeline {} not found",
-                    req.pipeline
-                )))
-            }
+    let pipeline = match state.db.find_pipeline_by_name(&req.pipeline)? {
+        Some((_pid, p)) => p,
+        None => {
+            return Err(WeaveError::NotFound(format!(
+                "pipeline {} not found",
+                req.pipeline
+            )))
         }
     };
 
@@ -196,7 +208,11 @@ async fn run_pipeline(
     // Build DAG layers for progress display
     let dag = Dag::from_pipeline(&pipeline)?;
     let layers = dag.topological_sort()?;
-    let all_step_ids: Vec<StepId> = layers.iter().flatten().cloned().collect();
+    let steps_with_timeout: Vec<(StepId, Option<f64>)> = layers
+        .iter()
+        .flatten()
+        .map(|id| (id.clone(), dag.step(id).and_then(|s| s.timeout_sec)))
+        .collect();
     let layer_infos: Vec<LayerInfo> = layers
         .iter()
         .enumerate()
@@ -207,10 +223,11 @@ async fn run_pipeline(
         .collect();
 
     // Create task in DB
-    let task_id = {
-        let db = state.db.lock().await;
-        db.create_task(&pipeline.name, serde_json::json!(inputs), 3600)?
-    };
+    let task_id = state.db.create_task(
+        &pipeline.name,
+        serde_json::json!(inputs),
+        result_ttl_secs(&pipeline),
+    )?;
 
     // Register with tracker
     let (_rx, snapshot) = state
@@ -218,40 +235,53 @@ async fn run_pipeline(
         .create(
             task_id,
             pipeline.name.to_string(),
-            all_step_ids,
+            steps_with_timeout,
             layer_infos,
         )
         .await;
 
     // Spawn executor in background; permit 在后台任务内获取，HTTP 立即返回，
-    // 避免并发打满时请求挂起无界。
+    // 避免并发打满时请求挂起无界。in_flight 计数用于优雅停机排空。
     let state_clone = state.clone();
     let pipeline_clone = pipeline.clone();
     let tid = task_id;
+    state.in_flight.fetch_add(1, Ordering::SeqCst);
+    let in_flight = state.in_flight.clone();
+    let drain_notify = state.drain_notify.clone();
     let handle = tokio::spawn(async move {
-        let _permit = match state_clone.semaphore.clone().acquire_owned().await {
-            Ok(p) => p,
+        match state_clone.semaphore.clone().acquire_owned().await {
+            Ok(_permit) => {
+                let runner = Runner::new(
+                    pipeline_clone,
+                    state_clone.db.clone(),
+                    state_clone.tracker.clone(),
+                );
+
+                let result = runner.run(tid, inputs).await;
+                match &result {
+                    Ok(_) => tracing::info!(task_id = %tid, "pipeline run completed"),
+                    Err(e) => tracing::error!(task_id = %tid, error = %e, "pipeline run failed"),
+                }
+            }
             Err(_) => {
                 state_clone
                     .tracker
                     .fail(&tid, "task semaphore closed".into())
                     .await;
-                return;
+                if let Err(e) = state_clone
+                    .db
+                    .set_task_status(&tid, weave::tracker::meta::TASK_STATUS_FAILED)
+                {
+                    tracing::warn!(task_id = %tid, error = %e, "set_task_status(failed) failed");
+                }
             }
-        };
-        let runner = Runner::new(
-            pipeline_clone,
-            state_clone.db.clone(),
-            state_clone.tracker.clone(),
-        );
-
-        let result = runner.run(tid, inputs).await;
-        match &result {
-            Ok(_) => tracing::info!(task_id = %tid, "pipeline run completed"),
-            Err(e) => tracing::error!(task_id = %tid, error = %e, "pipeline run failed"),
+        }
+        if in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+            drain_notify.notify_waiters();
         }
     });
 
+    let state_watcher = state.clone();
     tokio::spawn(async move {
         match handle.await {
             Ok(()) => {}
@@ -269,10 +299,16 @@ async fn run_pipeline(
                         })
                         .unwrap_or_else(|_| "internal panic (cancelled)".to_string());
                     tracing::error!(task_id = %tid, error = %msg, "runner panicked");
-                    state
+                    state_watcher
                         .tracker
                         .fail(&tid, format!("internal panic: {msg}"))
                         .await;
+                    if let Err(db_err) = state_watcher
+                        .db
+                        .set_task_status(&tid, weave::tracker::meta::TASK_STATUS_FAILED)
+                    {
+                        tracing::warn!(task_id = %tid, error = %db_err, "set_task_status(failed) after panic failed");
+                    }
                 }
             }
         }
@@ -289,11 +325,21 @@ async fn run_pipeline(
     Ok(Json(response))
 }
 
+/// 任务结果保留时长：pipeline 的 storage.result_ttl（下限 60s），缺省 3600s。
+fn result_ttl_secs(pipeline: &weave::dsl::PipelineDef) -> i64 {
+    pipeline
+        .storage
+        .as_ref()
+        .and_then(|s| s.result_ttl)
+        .map(|td| td.0.num_seconds().max(60))
+        .unwrap_or(3600)
+}
+
 async fn list_tasks(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Value>, WeaveError> {
     tracing::info!("GET /tasks");
-    let tasks = state.db.lock().await.list_tasks()?;
+    let tasks = state.db.list_tasks()?;
     let list: Vec<Value> = tasks
         .iter()
         .map(|t| {
@@ -314,19 +360,15 @@ async fn get_task(
 ) -> Result<Json<TaskResponse>, WeaveError> {
     tracing::info!(task_id = %task_id, "GET /runs/:task_id");
     let tid = parse_task_id(&task_id)?;
-    let (task, snapshot_count) = {
-        let db = state.db.lock().await;
-        let task = match db.load_task(&tid)? {
-            Some(t) => t,
-            None => {
-                return Err(WeaveError::NotFound(format!(
-                    "task {task_id} not found"
-                )));
-            }
-        };
-        let snaps = db.load_snapshots(&tid)?;
-        (task, snaps.len() as u64)
+    let task = match state.db.load_task(&tid)? {
+        Some(t) => t,
+        None => {
+            return Err(WeaveError::NotFound(format!(
+                "task {task_id} not found"
+            )));
+        }
     };
+    let snapshot_count = state.db.count_snapshots(&tid)?;
 
     let progress = state
         .tracker
@@ -350,14 +392,10 @@ async fn list_snapshots(
 ) -> Result<Json<Vec<SnapshotMeta>>, WeaveError> {
     tracing::info!(task_id = %task_id, "GET /runs/:task_id/snapshots");
     let tid = parse_task_id(&task_id)?;
-    let db = state.db.lock().await;
-    let snapshots = db.load_snapshots(&tid)?;
-    let snaps: Vec<SnapshotMeta> = snapshots
-        .iter()
-        .map(|(seq, snap)| SnapshotMeta {
-            seq: *seq,
-            step_id: snap.step_id.clone(),
-        })
+    let keys = state.db.list_snapshot_keys(&tid)?;
+    let snaps: Vec<SnapshotMeta> = keys
+        .into_iter()
+        .map(|(seq, step_id)| SnapshotMeta { seq, step_id })
         .collect();
     Ok(Json(snaps))
 }
@@ -368,8 +406,7 @@ async fn get_snapshot_by_seq(
 ) -> Result<Json<SnapshotResponse>, WeaveError> {
     tracing::info!(task_id = %task_id, seq = seq, "GET /runs/:task_id/snapshots/:seq");
     let tid = parse_task_id(&task_id)?;
-    let db = state.db.lock().await;
-    let snap = db.load_snapshot_by_seq(&tid, seq)?;
+    let snap = state.db.load_snapshot_by_seq(&tid, seq)?;
     match snap {
         Some(snap) => {
             let output: Value = match serde_json::from_slice::<Value>(&snap.output) {
@@ -418,27 +455,12 @@ async fn prune_tasks(
         dry_run: req.dry_run.unwrap_or(false),
         skip_tasks: state.tracker.running_task_ids(),
     };
-    let plan = {
-        let db = state.db.lock().await;
-        db.prune_scan(&options)?
-    };
-    let report = if options.dry_run {
-        let mut rpt = PruneReport {
-            tasks_removed: plan.tasks.len() as u64,
-            objects_removed: plan.dead_objects.len() as u64,
-            cache_entries_removed: plan.dangling_cache.len() as u64,
-            bytes_freed: plan.freed_bytes,
-            ..Default::default()
-        };
-        rpt.snapshots_removed = 0;
-        rpt
-    } else {
-        let mut db = state.db.lock().await;
-        db.prune_execute(&plan, false)?
-    };
+    let plan = state.db.prune_scan(&options)?;
+    let report = state.db.prune_execute(&plan, options.dry_run)?;
     tracing::info!(tasks = report.tasks_removed, objects = report.objects_removed, bytes = report.bytes_freed, "prune complete");
     Ok(Json(PruneResponse {
         tasks_removed: report.tasks_removed,
+        snapshots_removed: report.snapshots_removed,
         objects_removed: report.objects_removed,
         cache_entries_removed: report.cache_entries_removed,
         bytes_freed: report.bytes_freed,
@@ -467,15 +489,21 @@ async fn get_logs(
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
 ) -> axum::response::Response {
-    let offset: usize = params.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let body = state.log_ring.read_since(offset);
-    let new_offset = offset + body.len();
-    let text = String::from_utf8_lossy(&body).to_string();
+    let offset: u64 = params.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let chunk = state.log_ring.read_since(offset);
+    let mut text = String::new();
+    if chunk.truncated {
+        text.push_str("…日志有缺失（ring buffer 已覆盖旧内容）…\n");
+    }
+    text.push_str(&String::from_utf8_lossy(&chunk.bytes));
     let mut resp = axum::response::Response::new(axum::body::Body::from(text));
     resp.headers_mut().insert(
         "X-Log-Offset",
-        new_offset.to_string().parse().unwrap(),
+        chunk.next_offset.to_string().parse().unwrap(),
     );
+    if chunk.truncated {
+        resp.headers_mut().insert("X-Log-Truncated", "1".parse().unwrap());
+    }
     resp.headers_mut().insert(
         "content-type",
         "text/plain; charset=utf-8".parse().unwrap(),
@@ -552,7 +580,7 @@ async fn handle_ws(
                             serde_json::from_slice(&bytes).unwrap_or_default();
                         if v["status"]
                             .as_object()
-                            .map_or(false, |o| {
+                            .is_some_and(|o| {
                                 o.contains_key("Completed")
                                     || o.contains_key("Failed")
                             })
@@ -636,35 +664,70 @@ fn enforce_bind_safety(bind: &str, allow_remote: bool) {
 pub async fn serve(args: Vec<String>) {
     let log_ring = super::logging::init_logging();
 
-    let bind = args
-        .iter()
-        .position(|a| a == "--bind")
-        .and_then(|i| args.get(i + 1).cloned())
-        .unwrap_or_else(|| "127.0.0.1:9928".to_string());
+    let bind = match args.iter().position(|a| a == "--bind") {
+        Some(i) => match args.get(i + 1) {
+            Some(v) => v.clone(),
+            None => {
+                eprintln!("error: --bind 缺少参数值");
+                std::process::exit(1);
+            }
+        },
+        None => "127.0.0.1:9928".to_string(),
+    };
 
     let allow_remote = args.iter().any(|a| a == "--allow-remote");
     enforce_bind_safety(&bind, allow_remote);
 
-    let max_concurrent = args
-        .iter()
-        .position(|a| a == "--max-concurrent-tasks")
-        .and_then(|i| args.get(i + 1).and_then(|s| s.parse::<usize>().ok()))
-        .or_else(|| std::env::var("WEAVE_MAX_CONCURRENT_TASKS").ok().and_then(|s| s.parse().ok()));
+    let max_concurrent = match args.iter().position(|a| a == "--max-concurrent-tasks") {
+        Some(i) => match args.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
+            Some(n) => Some(n),
+            None => {
+                eprintln!("error: --max-concurrent-tasks 需要一个非负整数参数值");
+                std::process::exit(1);
+            }
+        },
+        None => match std::env::var("WEAVE_MAX_CONCURRENT_TASKS") {
+            Ok(s) => match s.parse::<usize>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    eprintln!("error: WEAVE_MAX_CONCURRENT_TASKS 非法值: {s:?}（需要非负整数）");
+                    std::process::exit(1);
+                }
+            },
+            Err(_) => None,
+        },
+    };
 
     let semaphore_permits = max_concurrent.unwrap_or(usize::MAX >> 3).max(1);
 
-    let data_dir = resolve_data_dir(&args);
-
-    let db = Database::open(data_dir.join("weave.redb")).expect("open database");
+    let data_dir = resolve_data_dir();
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!(
+            "error: 无法创建数据目录 {}: {e}（检查权限或 WEAVE_DATA 设置）",
+            data_dir.display()
+        );
+        std::process::exit(1);
+    }
+    let db_path = data_dir.join("weave.redb");
+    let db = match Database::open(&db_path) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("error: 无法打开数据库 {}: {e}", db_path.display());
+            std::process::exit(1);
+        }
+    };
     let interrupted = db.mark_interrupted_tasks().unwrap_or(0);
     if interrupted > 0 {
         tracing::warn!(interrupted, "marked tasks from previous run as interrupted");
     }
     let state = Arc::new(AppState {
-        db: Arc::new(Mutex::new(db)),
+        db: Arc::new(db),
         tracker: TaskTracker::new(),
         semaphore: Arc::new(tokio::sync::Semaphore::new(semaphore_permits)),
         log_ring,
+        draining: Arc::new(AtomicBool::new(false)),
+        in_flight: Arc::new(AtomicUsize::new(0)),
+        drain_notify: Arc::new(tokio::sync::Notify::new()),
     });
 
     {
@@ -680,18 +743,29 @@ pub async fn serve(args: Vec<String>) {
         });
     }
 
-    let app = build_app(state);
+    let app = build_app(state.clone());
     tracing::info!("weave serve listening on {bind}");
-    let listener = tokio::net::TcpListener::bind(&bind)
-        .await
-        .expect("bind");
-    let shutdown_signal = async {
+    let listener = match tokio::net::TcpListener::bind(&bind).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: 无法监听 {bind}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let shutdown_state = state.clone();
+    let shutdown_signal = async move {
         #[cfg(unix)]
         let sigterm = async {
-            let mut s = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("SIGTERM handler");
-            s.recv().await;
-            tracing::info!("received SIGTERM, shutting down");
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut s) => {
+                    s.recv().await;
+                    tracing::info!("received SIGTERM, shutting down");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "SIGTERM handler 注册失败");
+                    std::future::pending::<()>().await;
+                }
+            }
         };
         #[cfg(not(unix))]
         let sigterm = std::future::pending();
@@ -701,19 +775,53 @@ pub async fn serve(args: Vec<String>) {
             }
             _ = sigterm => {}
         }
+
+        // 停止接受新任务，排空运行中的后台任务（最多 SHUTDOWN_DRAIN_SECS 秒）
+        shutdown_state.draining.store(true, Ordering::SeqCst);
+        let remaining = wait_for_drain(
+            &shutdown_state.in_flight,
+            &shutdown_state.drain_notify,
+            std::time::Duration::from_secs(SHUTDOWN_DRAIN_SECS),
+        )
+        .await;
+        if remaining > 0 {
+            tracing::warn!(remaining, "shutdown: 后台任务排空超时，强制退出");
+        }
     };
-    axum::serve(listener, app)
+    if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal)
         .await
-        .expect("serve");
+    {
+        eprintln!("error: HTTP server 异常退出: {e}");
+        std::process::exit(1);
+    }
 }
 
-fn resolve_data_dir(args: &[String]) -> std::path::PathBuf {
-    for i in 0..args.len().saturating_sub(1) {
-        if args[i] == "--data-dir" || args[i] == "-d" {
-            return std::path::PathBuf::from(&args[i + 1]);
+/// 等待 in_flight 归零；返回剩余任务数（0 = 排空完成）。
+async fn wait_for_drain(
+    in_flight: &AtomicUsize,
+    notify: &tokio::sync::Notify,
+    timeout: std::time::Duration,
+) -> usize {
+    let start = std::time::Instant::now();
+    loop {
+        let n = in_flight.load(Ordering::SeqCst);
+        if n == 0 {
+            tracing::info!("shutdown: 后台任务已排空");
+            return 0;
         }
+        if start.elapsed() >= timeout {
+            return n;
+        }
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            notify.notified(),
+        )
+        .await;
     }
+}
+
+fn resolve_data_dir() -> std::path::PathBuf {
     if let Ok(dir) = std::env::var("WEAVE_DATA") {
         return std::path::PathBuf::from(dir);
     }
@@ -725,11 +833,11 @@ fn resolve_data_dir(args: &[String]) -> std::path::PathBuf {
 // ── Daemon ────────────────────────────────────────────────────────────────
 
 fn pid_path() -> std::path::PathBuf {
-    resolve_data_dir(&[]).join("weave.pid")
+    resolve_data_dir().join("weave.pid")
 }
 
 fn log_file_path() -> std::path::PathBuf {
-    resolve_data_dir(&[]).join("weave.log")
+    resolve_data_dir().join("weave.log")
 }
 
 fn verify_pid_binary(pid: u32, expected_exe: &std::path::Path) -> bool {
@@ -749,18 +857,25 @@ fn is_daemon_running() -> bool {
         Ok(s) => s.trim().to_string(),
         Err(_) => return false,
     };
-    let pid: i32 = match pid_str.parse() {
+    let pid: u32 = match pid_str.parse() {
         Ok(p) => p,
         Err(_) => {
             let _ = std::fs::remove_file(&path);
             return false;
         }
     };
-    let alive = unsafe { libc::kill(pid, 0) == 0 };
+    let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
     if !alive {
         let _ = std::fs::remove_file(&path);
+        return false;
     }
-    alive
+    // PID 存活但二进制不匹配（PID 复用）→ 视为 stale pidfile
+    let exe = std::env::current_exe().unwrap_or_default();
+    if !verify_pid_binary(pid, &exe) {
+        let _ = std::fs::remove_file(&path);
+        return false;
+    }
+    true
 }
 
 pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote: bool) {
@@ -772,6 +887,15 @@ pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote
     }
     enforce_bind_safety(bind, allow_remote);
 
+    let data_dir = resolve_data_dir();
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!(
+            "error: 无法创建数据目录 {}: {e}（检查权限或 WEAVE_DATA 设置）",
+            data_dir.display()
+        );
+        std::process::exit(1);
+    }
+
     let log_path = log_file_path();
     let log_file = match std::fs::OpenOptions::new()
         .create(true)
@@ -780,12 +904,21 @@ pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote
     {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("warning: cannot open log file {}: {e}", log_path.display());
+            eprintln!(
+                "error: 无法打开日志文件 {}: {e}（目录不可创建或权限不足）",
+                log_path.display()
+            );
             std::process::exit(1);
         }
     };
 
-    let exe = std::env::current_exe().expect("current exe path");
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: 无法获取当前可执行文件路径: {e}");
+            std::process::exit(1);
+        }
+    };
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.arg("serve")
         .arg("--bind")
@@ -799,17 +932,39 @@ pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote
     if allow_remote {
         cmd.arg("--allow-remote");
     }
-    let child = cmd.spawn().expect("spawn daemon");
-    let pid = child.id().expect("child PID");
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: 无法启动 daemon 子进程: {e}");
+            std::process::exit(1);
+        }
+    };
+    let pid = match child.id() {
+        Some(p) => p,
+        None => {
+            eprintln!("error: 无法获取 daemon 子进程 PID");
+            std::process::exit(1);
+        }
+    };
+
+    // spawn 成功后立即写 pidfile（健康检查之前），避免竞态窗口内 pidfile 缺失
+    let path = pid_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    if let Err(e) = std::fs::write(&path, pid.to_string()) {
+        eprintln!("error: 无法写入 PID 文件 {}: {e}", path.display());
+        std::process::exit(1);
+    }
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .unwrap_or_default();
-    let check_bind = if bind.starts_with("0.0.0.0") {
-        format!("127.0.0.1{}", &bind[7..])
-    } else if bind.starts_with("[::]") {
-        "[::1]".to_string() + &bind[4..]
+    let check_bind = if let Some(rest) = bind.strip_prefix("0.0.0.0") {
+        format!("127.0.0.1{rest}")
+    } else if let Some(rest) = bind.strip_prefix("[::]") {
+        format!("[::1]{rest}")
     } else {
         bind.to_string()
     };
@@ -831,15 +986,42 @@ pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote
             "daemon failed to start (health check timed out). Check log: {}",
             log_path.display()
         );
-        let _ = std::fs::remove_file(&pid_path());
+        kill_child_process(pid).await;
+        // 仅当 pidfile 内容等于本次 spawn 的 PID 时才删除
+        let ours = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            == Some(pid);
+        if ours {
+            let _ = std::fs::remove_file(&path);
+        }
         return;
     }
 
-    let path = pid_path();
-    std::fs::create_dir_all(path.parent().unwrap()).ok();
-    std::fs::write(&path, pid.to_string()).expect("write PID file");
     println!("daemon started (PID {pid}) on {bind}");
     std::mem::forget(child);
+}
+
+/// SIGTERM → 等 2s（ESRCH 轮询）→ 必要时 SIGKILL。
+async fn kill_child_process(pid: u32) {
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+    let exited = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if unsafe { libc::kill(pid as i32, 0) } != 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .is_ok();
+    if !exited {
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
 }
 
 pub async fn stop() {
@@ -918,14 +1100,28 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_db() -> (Database, PathBuf) {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "weave-server-test-{}",
+            "weave-server-test-{}-{n}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).ok();
         let db = Database::open(dir.join("weave.redb")).expect("open db");
         (db, dir)
+    }
+
+    fn test_state(db: Arc<Database>) -> Arc<AppState> {
+        Arc::new(AppState {
+            db,
+            tracker: TaskTracker::new(),
+            semaphore: Arc::new(tokio::sync::Semaphore::new(usize::MAX >> 3)),
+            log_ring: RingWriter::new(),
+            draining: Arc::new(AtomicBool::new(false)),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            drain_notify: Arc::new(tokio::sync::Notify::new()),
+        })
     }
 
     #[test]
@@ -971,12 +1167,7 @@ mod tests {
     #[tokio::test]
     async fn smoke_pipeline_crud() {
         let (db, _dir) = temp_db();
-        let state = Arc::new(AppState {
-            db: Arc::new(tokio::sync::Mutex::new(db)),
-            tracker: TaskTracker::new(),
-            semaphore: Arc::new(tokio::sync::Semaphore::new(usize::MAX >> 3)),
-            log_ring: RingWriter::new(),
-        });
+        let state = test_state(Arc::new(db));
 
         let app = build_app(state);
 
@@ -1063,6 +1254,147 @@ output: "{greet.output}"
 
         handle.abort();
         let _ = handle.await;
+    }
+
+    #[test]
+    fn result_ttl_secs_reads_pipeline_storage() {
+        let yaml = r#"
+name: ttl_pipe
+storage:
+  result_ttl: "2h"
+steps:
+  - id: s
+    type: noop
+output: "{s.output}"
+"#;
+        let def = weave::dsl::parser::parse(yaml).expect("parse");
+        assert_eq!(result_ttl_secs(&def), 7200);
+
+        // 未配置 storage → 默认 3600
+        let yaml_no_storage = r#"
+name: ttl_default
+steps:
+  - id: s
+    type: noop
+output: "{s.output}"
+"#;
+        let def = weave::dsl::parser::parse(yaml_no_storage).expect("parse");
+        assert_eq!(result_ttl_secs(&def), 3600);
+
+        // 过小的 TTL → 下限 60s
+        let yaml_tiny = r#"
+name: ttl_tiny
+storage:
+  result_ttl: "30s"
+steps:
+  - id: s
+    type: noop
+output: "{s.output}"
+"#;
+        let def = weave::dsl::parser::parse(yaml_tiny).expect("parse");
+        assert_eq!(result_ttl_secs(&def), 60);
+    }
+
+    #[tokio::test]
+    async fn run_task_uses_pipeline_result_ttl() {
+        let (db, _dir) = temp_db();
+        let db = Arc::new(db);
+        let state = test_state(db.clone());
+
+        let app = build_app(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let yaml = r#"
+name: ttl_run
+storage:
+  result_ttl: "2h"
+steps:
+  - id: s
+    type: noop
+output: "{s.output}"
+"#;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/pipelines"))
+            .header("content-type", "text/plain")
+            .body(yaml.to_string())
+            .send()
+            .await
+            .expect("create pipeline");
+        assert_eq!(resp.status(), 200);
+
+        let resp = client
+            .post(format!("http://{addr}/runs"))
+            .json(&serde_json::json!({"pipeline": "ttl_run"}))
+            .send()
+            .await
+            .expect("run pipeline");
+        assert_eq!(resp.status(), 200);
+        let run_body: Value = resp.json().await.unwrap();
+        let task_id = run_body["task_id"].as_str().unwrap();
+        let tid = TaskId(uuid::Uuid::parse_str(task_id).unwrap());
+
+        let meta = db.load_task(&tid).expect("load task").expect("task exists");
+        assert_eq!(meta.result_ttl_secs, 7200);
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn wait_for_drain_returns_zero_when_idle() {
+        let in_flight = AtomicUsize::new(0);
+        let notify = tokio::sync::Notify::new();
+        let remaining = wait_for_drain(
+            &in_flight,
+            &notify,
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn wait_for_drain_waits_for_completion() {
+        let in_flight = Arc::new(AtomicUsize::new(1));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let c_in_flight = in_flight.clone();
+        let c_notify = notify.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if c_in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+                c_notify.notify_waiters();
+            }
+        });
+        let remaining = wait_for_drain(
+            &in_flight,
+            &notify,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn wait_for_drain_times_out_with_remaining() {
+        let in_flight = AtomicUsize::new(2);
+        let notify = tokio::sync::Notify::new();
+        let start = std::time::Instant::now();
+        let remaining = wait_for_drain(
+            &in_flight,
+            &notify,
+            std::time::Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(remaining, 2);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(300));
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
     }
 }
 

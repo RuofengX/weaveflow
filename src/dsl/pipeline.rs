@@ -20,6 +20,7 @@ pub struct PipelineDef {
 
 /// Pipeline 输入槽位声明。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SlotDef {
     pub name: String,
     /// 该槽位的 JSON Schema（如 `{"type": "string", "format": "uri"}`）。

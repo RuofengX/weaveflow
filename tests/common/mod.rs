@@ -2,9 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::Mutex;
 use weave::dsl::parser::parse;
-use weave::dsl::validator::{validate, ValidateOptions};
+use weave::dsl::validator::validate;
 use weave::engine::dag::Dag;
 use weave::engine::runner::Runner;
 use weave::error::WeaveResult;
@@ -21,23 +20,27 @@ pub fn temp_db() -> (Database, tempfile::TempDir) {
 #[allow(dead_code)]
 pub fn run_yaml(yaml: &str, slots: HashMap<String, Value>) -> WeaveResult<Value> {
     let (db, _dir) = temp_db();
-    run_yaml_with_db(yaml, slots, Arc::new(Mutex::new(db)))
+    run_yaml_with_db(yaml, slots, Arc::new(db))
 }
 
 pub fn run_yaml_with_db(
     yaml: &str,
     slots: HashMap<String, Value>,
-    db: Arc<Mutex<Database>>,
+    db: Arc<Database>,
 ) -> WeaveResult<Value> {
     let def = parse(yaml)?;
-    let report = validate(&def, &ValidateOptions::default());
+    let report = validate(&def);
     assert!(report.is_ok(), "validation: {:?}", report.errors);
 
     let tracker = TaskTracker::new();
 
     let dag = Dag::from_pipeline(&def).expect("dag");
     let layers = dag.topological_sort().expect("topo");
-    let all_step_ids = layers.iter().flatten().cloned().collect::<Vec<_>>();
+    let steps_with_timeout = layers
+        .iter()
+        .flatten()
+        .map(|id| (id.clone(), dag.step(id).and_then(|s| s.timeout_sec)))
+        .collect::<Vec<_>>();
     let layer_infos: Vec<LayerInfo> = layers
         .iter()
         .enumerate()
@@ -47,17 +50,14 @@ pub fn run_yaml_with_db(
         })
         .collect();
 
-    let task_id = {
-        let db_guard = db.try_lock().expect("db lock");
-        db_guard
-            .create_task(&def.name, serde_json::json!(slots), 3600)
-            .expect("create task")
-    };
+    let task_id = db
+        .create_task(&def.name, serde_json::json!(slots), 3600)
+        .expect("create task");
     let rt = rt();
     rt.block_on(tracker.create(
         task_id,
         def.name.to_string(),
-        all_step_ids,
+        steps_with_timeout,
         layer_infos,
     ));
 

@@ -58,15 +58,16 @@ impl TaskTracker {
     }
 
     /// 注册新 task，返回 broadcast receiver + 初始快照。
+    /// `steps` 携带每个 step 的真实 timeout_sec 用于进度展示。
     pub async fn create(
         &self,
         task_id: TaskId,
         pipeline_name: String,
-        step_ids: Vec<StepId>,
+        steps: Vec<(StepId, Option<f64>)>,
         layers: Vec<LayerInfo>,
     ) -> (tokio::sync::broadcast::Receiver<Vec<u8>>, TaskSnapshot) {
-        debug!(task_id = %task_id, pipeline = %pipeline_name, steps = step_ids.len(), "tracker create");
-        let progress = Progress::from_step_ids(&step_ids);
+        debug!(task_id = %task_id, pipeline = %pipeline_name, steps = steps.len(), "tracker create");
+        let progress = Progress::from_step_ids(&steps);
         let (tx, rx) = tokio::sync::broadcast::channel(64);
 
         // Set initial state as Running with Undefined progress
@@ -74,14 +75,13 @@ impl TaskTracker {
             task_id,
             pipeline_name: pipeline_name.clone(),
             layers: layers.clone(),
-            progress,
+            progress: progress.clone(),
             status: RunStatus::Running,
             started_at: Some(Utc::now()),
             completed_at: None,
             tx,
         };
 
-        let progress = Progress::from_step_ids(&step_ids);
         let snapshot = TaskSnapshot {
             task_id: task_id.to_string(),
             pipeline_name,
@@ -150,15 +150,6 @@ impl TaskTracker {
         runs.get(task_id).map(|r| self.build_snapshot(r))
     }
 
-    /// 获取 broadcast receiver（用于 WS 订阅）。
-    pub async fn subscribe(
-        &self,
-        task_id: &TaskId,
-    ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
-        let runs = self.runs.lock().unwrap();
-        runs.get(task_id).map(|r| r.tx.subscribe())
-    }
-
     /// 原子化获取快照 + 订阅：同一次锁内构建快照并 subscribe，
     /// 避免先 get 后 subscribe 之间丢失终态广播的竞态。
     pub async fn snapshot_and_subscribe(
@@ -212,7 +203,7 @@ impl TaskTracker {
     fn build_snapshot(&self, run: &RunState) -> TaskSnapshot {
         let total_duration_ms = match (run.started_at, run.completed_at) {
             (Some(start), Some(end)) => {
-                Some((end - start).num_milliseconds() as u64)
+                Some((end - start).num_milliseconds().max(0) as u64)
             }
             _ => None,
         };
@@ -254,7 +245,7 @@ mod tests {
         let tracker = TaskTracker::new();
         let task_id = TaskId::new();
         let (_rx, initial) = tracker
-            .create(task_id, "p".to_string(), vec![step_id("a"), step_id("b")], vec![])
+            .create(task_id, "p".to_string(), vec![(step_id("a"), None), (step_id("b"), None)], vec![])
             .await;
 
         let progress = running_progress(&initial);
@@ -316,7 +307,7 @@ mod tests {
         let tracker = TaskTracker::new();
         let task_id = TaskId::new();
         let (mut rx, _initial) = tracker
-            .create(task_id, "p".to_string(), vec![step_id("a")], vec![])
+            .create(task_id, "p".to_string(), vec![(step_id("a"), None)], vec![])
             .await;
 
         tracker
@@ -349,7 +340,7 @@ mod tests {
         let tracker = TaskTracker::new();
         let task_id = TaskId::new();
         let (_rx, _initial) = tracker
-            .create(task_id, "p".to_string(), vec![step_id("a")], vec![])
+            .create(task_id, "p".to_string(), vec![(step_id("a"), None)], vec![])
             .await;
 
         tracker
@@ -380,7 +371,7 @@ mod tests {
         let tracker = TaskTracker::new();
         let task_id = TaskId::new();
         let (_rx, _initial) = tracker
-            .create(task_id, "p".to_string(), vec![step_id("a")], vec![])
+            .create(task_id, "p".to_string(), vec![(step_id("a"), None)], vec![])
             .await;
 
         let (snapshot, mut rx2) =
@@ -400,7 +391,7 @@ mod tests {
         let tracker = TaskTracker::new();
         let task_id = TaskId::new();
         let (_rx, _initial) = tracker
-            .create(task_id, "p".to_string(), vec![step_id("a")], vec![])
+            .create(task_id, "p".to_string(), vec![(step_id("a"), None)], vec![])
             .await;
         tracker
             .complete(&task_id, serde_json::json!({"ok": true}))
@@ -417,10 +408,10 @@ mod tests {
         let running = TaskId::new();
         let completed = TaskId::new();
         let (_rx, _i1) = tracker
-            .create(running, "p".to_string(), vec![step_id("a")], vec![])
+            .create(running, "p".to_string(), vec![(step_id("a"), None)], vec![])
             .await;
         let (_rx2, _i2) = tracker
-            .create(completed, "p".to_string(), vec![step_id("a")], vec![])
+            .create(completed, "p".to_string(), vec![(step_id("a"), None)], vec![])
             .await;
         tracker
             .complete(&completed, serde_json::json!({"ok": true}))
@@ -437,7 +428,7 @@ mod tests {
         let tracker = TaskTracker::new();
         let task_id = TaskId::new();
         let (_rx, _initial) = tracker
-            .create(task_id, "p".to_string(), vec![step_id("a")], vec![])
+            .create(task_id, "p".to_string(), vec![(step_id("a"), None)], vec![])
             .await;
         tracker
             .complete(&task_id, serde_json::json!({"ok": true}))
@@ -461,7 +452,7 @@ mod tests {
         let tracker = TaskTracker::new();
         let task_id = TaskId::new();
         let (_rx, _initial) = tracker
-            .create(task_id, "p".to_string(), vec![step_id("a")], vec![])
+            .create(task_id, "p".to_string(), vec![(step_id("a"), None)], vec![])
             .await;
 
         {

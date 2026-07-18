@@ -78,7 +78,7 @@ steps:
       code: "{util_code.output.value}"
 output: "{use_util.output}"
 "#;
-    let result = run_yaml(&yaml, HashMap::new()).expect("run");
+    let result = run_yaml(yaml, HashMap::new()).expect("run");
     assert_eq!(result["sum"], json!(3));
 }
 
@@ -185,21 +185,21 @@ steps:
         }
 output: "{r.output}"
 "#;
-    let result = run_yaml(&yaml, HashMap::new()).expect("run");
-    assert!(result["encoded"].as_str().unwrap().len() > 0);
+    let result = run_yaml(yaml, HashMap::new()).expect("run");
+    assert!(!result["encoded"].as_str().unwrap().is_empty());
     assert_eq!(result["restored"], json!("Hello, QuickJS!"));
 }
 
 #[test]
-fn js_infinite_loop_is_interrupted_by_timeout() {
+fn js_infinite_loop_is_interrupted_by_step_timeout() {
+    // JS inputs 不再接受 timeout 字段；超时由 step.timeout_sec 控制。
     let yaml = r#"
 name: js_infinite_loop
 steps:
   - id: hang
     type: js
-    timeout_sec: 30
+    timeout_sec: 2
     inputs:
-      timeout_sec: 2
       code: |
         function run() {
           while (1) {}
@@ -215,7 +215,8 @@ output: "{hang.output}"
     });
     match rx.recv_timeout(std::time::Duration::from_secs(15)) {
         Ok(result) => {
-            assert!(result.is_err(), "expected error from infinite loop timeout");
+            let err = result.expect_err("expected error from infinite loop timeout");
+            assert!(err.to_string().contains("timeout"), "err: {err}");
         }
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             panic!("test hung for 15s: JS interrupt mechanism failed");
@@ -225,14 +226,14 @@ output: "{hang.output}"
 }
 
 #[test]
-fn js_normal_completion_with_timeout() {
+fn js_normal_completion_with_step_timeout() {
     let yaml = r#"
 name: js_normal_timeout
 steps:
   - id: quick
     type: js
+    timeout_sec: 5
     inputs:
-      timeout_sec: 5
       code: |
         function run() {
           return { ok: true };
@@ -241,4 +242,21 @@ output: "{quick.output}"
 "#;
     let result = run_yaml(yaml, HashMap::new()).expect("run");
     assert_eq!(result["ok"], json!(true));
+}
+
+#[test]
+fn js_inputs_timeout_field_rejected() {
+    let yaml = r#"
+name: js_timeout_field
+steps:
+  - id: s
+    type: js
+    inputs:
+      timeout_sec: 2
+      code: |
+        function run() { return {}; }
+output: "{s.output}"
+"#;
+    let err = run_yaml(yaml, HashMap::new()).expect_err("js inputs must reject timeout_sec");
+    assert!(err.to_string().contains("timeout"), "err: {err}");
 }

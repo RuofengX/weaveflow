@@ -12,6 +12,9 @@ fn reqwest_client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .connect_timeout(Duration::from_secs(10))
+            // 禁 redirect：防止 302 跳到 169.254.169.254 绕过 block_private_ips 预检。
+            // redirect 响应作为正常 3xx 响应返回给调用方。
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("build reqwest client")
     })
@@ -38,64 +41,68 @@ pub fn check_body_size(len: usize) -> Result<(), OperatorError> {
     }
 }
 
-fn split_url(url_str: &str) -> Option<(&str, &str, u16)> {
-    let after_scheme = url_str.split("://").nth(1).unwrap_or(url_str);
-    let host_port_path = after_scheme.split('/').next().unwrap_or(after_scheme);
-    let (host_str, port) = if let Some((h, p)) = host_port_path.rsplit_once(':') {
-        let port = p.parse::<u16>().ok()?;
-        (h, port)
-    } else {
-        let scheme = url_str.split("://").next().unwrap_or("http");
-        let default_port = if scheme == "https" { 443 } else { 80 };
-        (host_port_path, default_port)
-    };
-    let host = if host_str.starts_with('[') && host_str.ends_with(']') {
-        &host_str[1..host_str.len() - 1]
-    } else {
-        host_str
-    };
-    if host.is_empty() {
-        return None;
+/// 边读边累计，超限即中断；用于 chunked 等无 Content-Length 的响应，
+/// 避免全量读入后才发现超限。
+pub async fn read_body_limited(mut resp: reqwest::Response) -> Result<Vec<u8>, OperatorError> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| OperatorError::Runtime(format!("read response body: {e}")))?
+    {
+        if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(OperatorError::Runtime(
+                "response body exceeds 64MB limit".into(),
+            ));
+        }
+        buf.extend_from_slice(&chunk);
     }
-    Some((host, host, port))
+    Ok(buf)
+}
+
+fn split_url(url_str: &str) -> Option<(String, u16)> {
+    let url = reqwest::Url::parse(url_str).ok()?;
+    let host = url.host_str()?.trim_matches(['[', ']']).to_string();
+    let port = url.port_or_known_default()?;
+    Some((host, port))
 }
 
 pub async fn block_private_ips(url_str: &str) -> Result<(), OperatorError> {
-    let (host, host_for_dns, port) = split_url(url_str)
-        .ok_or_else(|| OperatorError::Config("URL missing host".into()))?;
+    let (host, port) = split_url(url_str)
+        .ok_or_else(|| OperatorError::Config(format!("URL 无法解析或缺少 host: {url_str}")))?;
 
-    let ip = match host.parse::<IpAddr>() {
-        Ok(ip) => ip,
+    let ips: Vec<IpAddr> = match host.parse::<IpAddr>() {
+        Ok(ip) => vec![ip],
         Err(_) => {
-            let addr_str = format!("{host_for_dns}:{port}");
-            let addrs: Vec<_> = tokio::net::lookup_host(&addr_str)
+            let addr_str = format!("{host}:{port}");
+            tokio::net::lookup_host(&addr_str)
                 .await
                 .map_err(|e| {
-                    OperatorError::Runtime(format!("DNS resolve {host_for_dns}: {e}"))
+                    OperatorError::Runtime(format!("DNS resolve {host}: {e}"))
                 })?
-                .collect();
-            addrs
-                .first()
                 .map(|sa| sa.ip())
-                .ok_or_else(|| {
-                    OperatorError::Runtime(format!("no IP resolved for {host_for_dns}"))
-                })?
+                .collect()
         }
     };
-
-    if is_metadata_ip(ip) {
-        return Err(OperatorError::Runtime(format!(
-            "blocked request to cloud metadata IP {ip}"
-        )));
+    if ips.is_empty() {
+        return Err(OperatorError::Runtime(format!("no IP resolved for {host}")));
     }
 
     let block_private = std::env::var("WEAVE_HTTP_BLOCK_PRIVATE")
         .map(|v| v == "1")
         .unwrap_or(false);
-    if block_private && is_private_ip(ip) {
-        return Err(OperatorError::Runtime(format!(
-            "blocked request to private/internal IP {ip}"
-        )));
+
+    for ip in ips {
+        if is_metadata_ip(ip) {
+            return Err(OperatorError::Runtime(format!(
+                "blocked request to cloud metadata IP {ip}"
+            )));
+        }
+        if block_private && is_private_ip(ip) {
+            return Err(OperatorError::Runtime(format!(
+                "blocked request to private/internal IP {ip}"
+            )));
+        }
     }
 
     Ok(())
@@ -118,3 +125,53 @@ fn is_private_ip(ip: IpAddr) -> bool {
 }
 
 pub const MAX_STDIO_BYTES: usize = 10 * 1024 * 1024;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_ip_detected() {
+        assert!(is_metadata_ip(IpAddr::from([169, 254, 169, 254])));
+        assert!(!is_metadata_ip(IpAddr::from([169, 254, 169, 253])));
+        assert!(!is_metadata_ip(IpAddr::from([8, 8, 8, 8])));
+    }
+
+    #[test]
+    fn private_ip_detection() {
+        assert!(is_private_ip(IpAddr::from([10, 0, 0, 1])));
+        assert!(is_private_ip(IpAddr::from([192, 168, 1, 1])));
+        assert!(is_private_ip(IpAddr::from([127, 0, 0, 1])));
+        assert!(is_private_ip(IpAddr::from([169, 254, 1, 1])));
+        assert!(is_private_ip("::1".parse().unwrap()));
+        assert!(is_private_ip("fc00::1".parse().unwrap()));
+        assert!(!is_private_ip(IpAddr::from([8, 8, 8, 8])));
+    }
+
+    #[test]
+    fn split_url_default_ports() {
+        assert_eq!(split_url("http://example.com/path"), Some(("example.com".into(), 80)));
+        assert_eq!(split_url("https://example.com"), Some(("example.com".into(), 443)));
+        assert_eq!(split_url("http://example.com:8080/x"), Some(("example.com".into(), 8080)));
+    }
+
+    #[test]
+    fn split_url_userinfo_does_not_spoof_host() {
+        assert_eq!(
+            split_url("http://user@169.254.169.254/"),
+            Some(("169.254.169.254".into(), 80))
+        );
+    }
+
+    #[test]
+    fn split_url_bracketed_ipv6() {
+        assert_eq!(split_url("http://[::1]:8080/"), Some(("::1".into(), 8080)));
+        assert_eq!(split_url("http://[::1]/"), Some(("::1".into(), 80)));
+    }
+
+    #[test]
+    fn split_url_invalid_or_hostless() {
+        assert_eq!(split_url("not a url"), None);
+        assert_eq!(split_url("http://"), None);
+    }
+}

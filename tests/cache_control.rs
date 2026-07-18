@@ -7,24 +7,15 @@ use common::{run_yaml_with_db, temp_db};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use weave::engine::cache::compute_cache_key;
 use weave::store::Database;
 
-fn cache_lookup(db: &Arc<Mutex<Database>>, key: &[u8]) -> Option<Value> {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let guard = db.lock().await;
-        guard.check_cache_bytes(key).expect("check cache")
-    })
+fn cache_lookup(db: &Arc<Database>, key: &[u8]) -> Option<Value> {
+    db.check_cache_bytes(key).expect("check cache")
 }
 
-fn cache_seed(db: &Arc<Mutex<Database>>, key: &[u8], value: &Value) {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let guard = db.lock().await;
-        guard.set_cache_bytes(key, value).expect("seed cache");
-    });
+fn cache_seed(db: &Arc<Database>, key: &[u8], value: &Value) {
+    db.set_cache_bytes(key, value).expect("seed cache");
 }
 
 const VAR_YAML_CACHED: &str = r#"
@@ -51,7 +42,7 @@ output: "{s.output}"
 #[test]
 fn cacheable_step_writes_cache() {
     let (db, _dir) = temp_db();
-    let db = Arc::new(Mutex::new(db));
+    let db = Arc::new(db);
     let key = compute_cache_key("var", &json!({"value": 42}));
 
     let result = run_yaml_with_db(VAR_YAML_CACHED, HashMap::new(), db.clone()).expect("run");
@@ -62,7 +53,7 @@ fn cacheable_step_writes_cache() {
 #[test]
 fn cacheable_step_reads_cache() {
     let (db, _dir) = temp_db();
-    let db = Arc::new(Mutex::new(db));
+    let db = Arc::new(db);
     let key = compute_cache_key("var", &json!({"value": 42}));
     cache_seed(&db, &key, &json!("poisoned"));
 
@@ -73,7 +64,7 @@ fn cacheable_step_reads_cache() {
 #[test]
 fn cache_false_step_skips_cache_read_write() {
     let (db, _dir) = temp_db();
-    let db = Arc::new(Mutex::new(db));
+    let db = Arc::new(db);
     let key = compute_cache_key("var", &json!({"value": 42}));
     cache_seed(&db, &key, &json!("poisoned"));
 
@@ -89,7 +80,7 @@ fn cache_false_step_skips_cache_read_write() {
 #[test]
 fn command_operator_is_not_cached() {
     let (db, _dir) = temp_db();
-    let db = Arc::new(Mutex::new(db));
+    let db = Arc::new(db);
     let key = compute_cache_key(
         "command",
         &json!({"command": "echo hi", "shell": null, "stdin": null}),
@@ -118,7 +109,7 @@ output: "{c.output}"
 #[test]
 fn iterate_cache_key_includes_over_array() {
     let (db, _dir) = temp_db();
-    let db = Arc::new(Mutex::new(db));
+    let db = Arc::new(db);
 
     let yaml = r#"
 name: iter_cache

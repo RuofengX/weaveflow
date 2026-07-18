@@ -35,6 +35,9 @@ pub enum WeaveError {
 
     #[error("请求参数错误: {0}")]
     BadRequest(String),
+
+    #[error("服务不可用: {0}")]
+    Unavailable(String),
 }
 
 impl From<rust_yaml::Error> for WeaveError {
@@ -116,6 +119,7 @@ impl IntoResponse for WeaveError {
             WeaveError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             WeaveError::Parse(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             WeaveError::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            WeaveError::Unavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
             WeaveError::Internal(detail) => {
                 tracing::error!(%detail, "internal error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".into())
@@ -179,7 +183,7 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_eq!(
-            WeaveError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io"))
+            WeaveError::Io(std::io::Error::other("io"))
                 .into_response()
                 .status(),
             StatusCode::INTERNAL_SERVER_ERROR

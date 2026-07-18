@@ -17,15 +17,10 @@ impl Operator for JsOperator {
             .get("code")
             .and_then(|v| v.as_str())
             .ok_or_else(|| OperatorError::Config("JS code 字段缺失或不是字符串".into()))?;
-        let timeout_ms = inputs
-            .get("timeout_sec")
-            .and_then(|v| v.as_f64())
-            .filter(|s| s.is_finite() && *s > 0.0)
-            .map(|s| (s * 1000.0) as u64);
 
         debug!("js operator");
         let data = inputs.get("data").unwrap_or(&Value::Null);
-        let result = crate::quickjs::run_js(code, "run", data, timeout_ms).await;
+        let result = crate::quickjs::run_js(code, "run", data).await;
 
         match result {
             Ok(v) => Ok(v),

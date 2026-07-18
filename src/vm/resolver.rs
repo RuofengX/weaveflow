@@ -40,10 +40,22 @@ fn resolve_value_tree(
             } else if map.len() == 1 && map.contains_key("Literal") {
                 let lit = &map["Literal"];
                 resolve_value_tree(scope, lit, as_name, false)
-            } else if is_top
-                && let Some(inputs_val) = map.get("inputs")
-            {
-                resolve_value_tree(scope, inputs_val, as_name, false)
+            } else if is_top {
+                // 顶层 op 信封：有 "inputs" 键取其值；否则（如 noop）移除 "type"
+                // 键后以剩余 map 作为 inputs，iterate 注入的 "data" 得以存活。
+                if let Some(inputs_val) = map.get("inputs") {
+                    resolve_value_tree(scope, inputs_val, as_name, false)
+                } else {
+                    let mut resolved_map = serde_json::Map::new();
+                    for (k, v) in map {
+                        if k == "type" {
+                            continue;
+                        }
+                        resolved_map
+                            .insert(k.clone(), resolve_value_tree(scope, v, as_name, false)?);
+                    }
+                    Ok(Value::Object(resolved_map))
+                }
             } else {
                 let mut resolved_map = serde_json::Map::new();
                 for (k, v) in map {
@@ -117,20 +129,43 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Arc<Value>
                     1
                 };
                 for part in &path.parts[start..] {
-                    let next = match current {
-                        Value::Array(arr) => part
-                            .parse::<usize>()
-                            .ok()
-                            .and_then(|i| arr.get(i)),
-                        Value::Object(map) => map.get(part),
-                        _ => None,
-                    };
-                    current = next.ok_or_else(|| {
-                        WeaveError::Internal(format!(
-                            "ref path {} not found at segment '{part}'",
-                            path.parts.join(".")
-                        ))
-                    })?;
+                    match current {
+                        Value::Array(arr) => {
+                            // 数组索引保持严格：非数字/负数/越界 → 硬错误
+                            let idx = part.parse::<usize>().map_err(|_| {
+                                WeaveError::Internal(format!(
+                                    "ref path {} segment '{part}' is not a valid array index",
+                                    path.parts.join(".")
+                                ))
+                            })?;
+                            current = arr.get(idx).ok_or_else(|| {
+                                WeaveError::Internal(format!(
+                                    "ref path {} array index {idx} out of bounds (len {})",
+                                    path.parts.join("."),
+                                    arr.len()
+                                ))
+                            })?;
+                        }
+                        Value::Object(map) => match map.get(part) {
+                            Some(v) => current = v,
+                            None => {
+                                warn!(
+                                    ref_path = %path.parts.join("."),
+                                    missing_part = %part,
+                                    "ref path field not found, using Null"
+                                );
+                                return Ok(Arc::new(Value::Null));
+                            }
+                        },
+                        _ => {
+                            warn!(
+                                ref_path = %path.parts.join("."),
+                                missing_part = %part,
+                                "ref path segment on non-object, using Null"
+                            );
+                            return Ok(Arc::new(Value::Null));
+                        }
+                    }
                 }
                 Ok(Arc::new(current.clone()))
             }
@@ -169,10 +204,18 @@ mod tests {
     }
 
     #[test]
-    fn missing_object_field_returns_error() {
+    fn array_index_non_numeric_returns_error() {
+        let scope = scope_with_step(serde_json::json!([1, 2]));
+        let path = VariablePath::parse("{s.output.name}").unwrap();
+        let err = resolve_ref(&scope, &path).expect_err("non-numeric index must error");
+        assert!(err.to_string().contains("name"), "err: {err}");
+    }
+
+    #[test]
+    fn missing_object_field_returns_null() {
         let scope = scope_with_step(serde_json::json!({ "a": 1 }));
         let path = VariablePath::parse("{s.output.missing}").unwrap();
-        let err = resolve_ref(&scope, &path).expect_err("missing field must error");
-        assert!(err.to_string().contains("missing"), "err: {err}");
+        let value = resolve_ref(&scope, &path).expect("missing field resolves to Null");
+        assert_eq!(*value, Value::Null);
     }
 }

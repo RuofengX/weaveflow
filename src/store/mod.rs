@@ -9,16 +9,43 @@ use redb::{Database as RedbDb, ReadableTable};
 use std::path::Path;
 use tracing::debug;
 
-use crate::dsl::PipelineDef;
+use crate::dsl::{PipelineDef, StepId};
 use crate::error::{WeaveError, WeaveResult};
-use crate::store::database::{CACHE, OBJECT, PIPELINE, SNAPSHOT, TASK};
+use crate::store::database::{
+    CACHE, OBJECT, PIPELINE, SNAPSHOT, SNAPSHOT_HEADER, TASK, V0_PIPELINE, V0_TASK, V1_PIPELINE,
+    V1_TASK,
+};
 use crate::tracker::snapshot::{Snapshot, SnapshotKey};
 use crate::tracker::{PipelineId, TaskId, TaskMeta};
 
 /// weave 数据层入口。封装 redb。
 #[derive(Debug)]
 pub struct Database {
-    pub(crate) db: redb::Database,
+    pub(crate) db: std::sync::RwLock<redb::Database>,
+}
+
+/// open 失败的分类：schema 版本不匹配（触发自动迁移）或其他错误。
+enum OpenFailure {
+    SchemaMismatch,
+    Other(WeaveError),
+}
+
+fn init_table<K, V>(
+    txn: &redb::WriteTransaction,
+    def: redb::TableDefinition<K, V>,
+    op: &'static str,
+) -> Result<(), OpenFailure>
+where
+    K: redb::Key + 'static,
+    V: redb::Value + 'static,
+{
+    txn.open_table(def).map(|_| ()).map_err(|e| match e {
+        redb::TableError::TableTypeMismatch { .. } => OpenFailure::SchemaMismatch,
+        other => OpenFailure::Other(WeaveError::Database {
+            operation: op,
+            source: Box::new(other.into()),
+        }),
+    })
 }
 
 // ── 构造 ───────────────────────────────────────────────────────────────────
@@ -26,40 +53,190 @@ pub struct Database {
 impl Database {
     pub fn open(db_path: impl AsRef<Path>) -> WeaveResult<Self> {
         let path = db_path.as_ref();
-        let db = RedbDb::create(path).map_err(|e| WeaveError::Database {
+        match Self::open_current(path) {
+            Ok(db) => {
+                debug!(path = %path.display(), "database opened");
+                Ok(db)
+            }
+            Err(OpenFailure::SchemaMismatch) => Self::migrate_v0(path),
+            Err(OpenFailure::Other(e)) => Err(e),
+        }
+    }
+
+    fn open_current(path: &Path) -> Result<Self, OpenFailure> {
+        let db = RedbDb::create(path).map_err(|e| OpenFailure::Other(WeaveError::Database {
             operation: "create",
             source: Box::new(e.into()),
-        })?;
-        let txn = db.begin_write().map_err(|e| WeaveError::Database {
+        }))?;
+        let txn = db.begin_write().map_err(|e| OpenFailure::Other(WeaveError::Database {
             operation: "init_tables begin_write",
             source: Box::new(e.into()),
-        })?;
-        let _ = txn.open_table(PIPELINE).map_err(|e| WeaveError::Database {
-            operation: "init_tables pipeline",
-            source: Box::new(e.into()),
-        })?;
-        let _ = txn.open_table(TASK).map_err(|e| WeaveError::Database {
-            operation: "init_tables task",
-            source: Box::new(e.into()),
-        })?;
-        let _ = txn.open_table(SNAPSHOT).map_err(|e| WeaveError::Database {
-            operation: "init_tables snapshot",
-            source: Box::new(e.into()),
-        })?;
-        let _ = txn.open_table(OBJECT).map_err(|e| WeaveError::Database {
-            operation: "init_tables object",
-            source: Box::new(e.into()),
-        })?;
-        let _ = txn.open_table(CACHE).map_err(|e| WeaveError::Database {
-            operation: "init_tables cache",
-            source: Box::new(e.into()),
-        })?;
-        txn.commit().map_err(|e| WeaveError::Database {
+        }))?;
+        init_table(&txn, PIPELINE, "init_tables pipeline")?;
+        init_table(&txn, TASK, "init_tables task")?;
+        init_table(&txn, SNAPSHOT, "init_tables snapshot")?;
+        init_table(&txn, OBJECT, "init_tables object")?;
+        init_table(&txn, CACHE, "init_tables cache")?;
+        txn.commit().map_err(|e| OpenFailure::Other(WeaveError::Database {
             operation: "init_tables commit",
             source: Box::new(e.into()),
+        }))?;
+        Ok(Database {
+            db: std::sync::RwLock::new(db),
+        })
+    }
+
+    /// v0 → 当前 schema 自动迁移：旧文件改名备份，PIPELINE/TASK 逐条拷贝，
+    /// SNAPSHOT/OBJECT/CACHE 丢弃（缓存可重算、历史快照可弃）。
+    fn migrate_v0(path: &Path) -> WeaveResult<Self> {
+        let mut bak_name = path
+            .file_name()
+            .map(std::ffi::OsString::from)
+            .unwrap_or_default();
+        bak_name.push(".v0.bak");
+        let bak = path.with_file_name(bak_name);
+
+        let _ = std::fs::remove_file(&bak);
+        std::fs::rename(path, &bak).map_err(|e| {
+            WeaveError::Internal(format!(
+                "旧版本数据库 schema 不兼容，且备份 {} -> {} 失败: {e}",
+                path.display(),
+                bak.display()
+            ))
         })?;
-        debug!(path = %path.display(), "database opened");
-        Ok(Database { db })
+
+        match Self::migrate_v0_inner(&bak, path) {
+            Ok(db) => {
+                tracing::warn!(
+                    backup = %bak.display(),
+                    "旧版本 (v0) 数据库已自动迁移：PIPELINE/TASK 已保留，SNAPSHOT/OBJECT/CACHE 已丢弃"
+                );
+                Ok(db)
+            }
+            Err(e) => Err(WeaveError::Internal(format!(
+                "旧版本数据库已备份到 {}，请手动处理后重试（自动迁移失败: {e}）",
+                bak.display()
+            ))),
+        }
+    }
+
+    fn migrate_v0_inner(bak: &Path, path: &Path) -> WeaveResult<Self> {
+        let old = RedbDb::open(bak).map_err(|e| WeaveError::Database {
+            operation: "migrate open_v0",
+            source: Box::new(e.into()),
+        })?;
+        let read = old.begin_read().map_err(|e| WeaveError::Database {
+            operation: "migrate v0 begin_read",
+            source: Box::new(e.into()),
+        })?;
+
+        // 依次尝试 v0 / v1 类型名读取旧表（v1 与 v0 同为 serde_json 行格式）
+        macro_rules! read_rows {
+            ($def:expr, $op:literal) => {
+                match read.open_table($def) {
+                    Ok(table) => {
+                        let mut rows = Vec::new();
+                        for r in table.iter().map_err(|e| WeaveError::Database {
+                            operation: concat!($op, " iter"),
+                            source: Box::new(e.into()),
+                        })? {
+                            let (k, v) = r.map_err(|e| WeaveError::Database {
+                                operation: concat!($op, " row"),
+                                source: Box::new(e.into()),
+                            })?;
+                            rows.push((k.value(), v.value().0));
+                        }
+                        Some(rows)
+                    }
+                    Err(redb::TableError::TableTypeMismatch { .. })
+                    | Err(redb::TableError::TableDoesNotExist(_)) => None,
+                    Err(e) => {
+                        return Err(WeaveError::Database {
+                            operation: $op,
+                            source: Box::new(e.into()),
+                        })
+                    }
+                }
+            };
+        }
+
+        let pipeline_rows = match read_rows!(V0_PIPELINE, "migrate v0 pipeline") {
+            Some(rows) => rows,
+            None => read_rows!(V1_PIPELINE, "migrate v1 pipeline").unwrap_or_default(),
+        };
+        let task_rows = match read_rows!(V0_TASK, "migrate v0 task") {
+            Some(rows) => rows,
+            None => read_rows!(V1_TASK, "migrate v1 task").unwrap_or_default(),
+        };
+        drop(read);
+        drop(old);
+
+        let mut pipelines: Vec<(PipelineId, PipelineDef)> = Vec::new();
+        for (pid, mut raw) in pipeline_rows {
+            // snapshot_ttl 字段已移除，剥离以免 deny_unknown_fields 报错
+            if let Some(storage) = raw.get_mut("storage").and_then(|s| s.as_object_mut()) {
+                storage.remove("snapshot_ttl");
+            }
+            let def: PipelineDef = serde_json::from_value(raw).map_err(|e| {
+                WeaveError::Internal(format!("v0 pipeline 反序列化失败: {e}"))
+            })?;
+            pipelines.push((pid, def));
+        }
+        let mut tasks: Vec<(TaskId, TaskMeta)> = Vec::new();
+        for (tid, raw) in task_rows {
+            // v0 TaskMeta 可能没有 status 字段（serde default 兜底）
+            let meta: TaskMeta = serde_json::from_value(raw).map_err(|e| {
+                WeaveError::Internal(format!("v0 task 反序列化失败: {e}"))
+            })?;
+            tasks.push((tid, meta));
+        }
+
+        let db = Self::open_current(path).map_err(|e| match e {
+            OpenFailure::SchemaMismatch => {
+                WeaveError::Internal("迁移后 schema 仍不匹配".to_string())
+            }
+            OpenFailure::Other(e) => e,
+        })?;
+        let g = db.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveError::Database {
+            operation: "migrate begin_write",
+            source: Box::new(e.into()),
+        })?;
+        {
+            let mut table = txn.open_table(PIPELINE).map_err(|e| WeaveError::Database {
+                operation: "migrate open pipeline",
+                source: Box::new(e.into()),
+            })?;
+            for (pid, def) in &pipelines {
+                table.insert(*pid, def).map_err(|e| WeaveError::Database {
+                    operation: "migrate insert pipeline",
+                    source: Box::new(e.into()),
+                })?;
+            }
+        }
+        {
+            let mut table = txn.open_table(TASK).map_err(|e| WeaveError::Database {
+                operation: "migrate open task",
+                source: Box::new(e.into()),
+            })?;
+            for (tid, meta) in &tasks {
+                table.insert(*tid, meta).map_err(|e| WeaveError::Database {
+                    operation: "migrate insert task",
+                    source: Box::new(e.into()),
+                })?;
+            }
+        }
+        txn.commit().map_err(|e| WeaveError::Database {
+            operation: "migrate commit",
+            source: Box::new(e.into()),
+        })?;
+        drop(g);
+        debug!(
+            pipelines = pipelines.len(),
+            tasks = tasks.len(),
+            "v0 database migrated"
+        );
+        Ok(db)
     }
 
     // ── Pipeline ────────────────────────────────────────────────────────
@@ -67,7 +244,8 @@ impl Database {
     pub fn save_pipeline_upsert(&self, def: &PipelineDef) -> WeaveResult<PipelineId> {
         debug!(name = %def.name, steps = def.steps.len(), "save_pipeline_upsert");
         if let Some((pid, _)) = self.find_pipeline_by_name(&def.name)? {
-            let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
+            let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+            let txn = g.begin_write().map_err(|e| WeaveError::Database {
                 operation: "save_pipeline_upsert begin_write",
                 source: Box::new(e.into()),
             })?;
@@ -87,7 +265,8 @@ impl Database {
             Ok(pid)
         } else {
             let pid = PipelineId::new();
-            let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
+            let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+            let txn = g.begin_write().map_err(|e| WeaveError::Database {
                 operation: "save_pipeline begin_write",
                 source: Box::new(e.into()),
             })?;
@@ -109,7 +288,8 @@ impl Database {
     }
 
     pub fn load_pipeline(&self, pid: &PipelineId) -> WeaveResult<Option<PipelineDef>> {
-        let txn = self.db.begin_read().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveError::Database {
             operation: "load_pipeline begin_read",
             source: Box::new(e.into()),
         })?;
@@ -129,7 +309,8 @@ impl Database {
     }
 
     pub fn list_pipelines(&self) -> WeaveResult<Vec<(PipelineId, PipelineDef)>> {
-        let txn = self.db.begin_read().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveError::Database {
             operation: "list_pipelines begin_read",
             source: Box::new(e.into()),
         })?;
@@ -152,7 +333,8 @@ impl Database {
     }
 
     pub fn delete_pipeline(&self, pid: &PipelineId) -> WeaveResult<bool> {
-        let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveError::Database {
             operation: "delete_pipeline begin_write",
             source: Box::new(e.into()),
         })?;
@@ -186,7 +368,8 @@ impl Database {
 
     /// 更新 TaskMeta（由 executor 内部调用）。
     pub fn save_task(&self, meta: &TaskMeta) -> WeaveResult<()> {
-        let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveError::Database {
             operation: "save_task begin_write",
             source: Box::new(e.into()),
         })?;
@@ -223,7 +406,8 @@ impl Database {
             inputs,
             status: crate::tracker::meta::TASK_STATUS_RUNNING.to_string(),
         };
-        let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveError::Database {
             operation: "create_task begin_write",
             source: Box::new(e.into()),
         })?;
@@ -244,7 +428,8 @@ impl Database {
     }
 
     pub fn load_task(&self, task_id: &TaskId) -> WeaveResult<Option<TaskMeta>> {
-        let txn = self.db.begin_read().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveError::Database {
             operation: "load_task begin_read",
             source: Box::new(e.into()),
         })?;
@@ -265,7 +450,8 @@ impl Database {
 
     /// 更新 task 的 status 字段（其他字段保持不变）。
     pub fn set_task_status(&self, task_id: &TaskId, status: &str) -> WeaveResult<()> {
-        let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveError::Database {
             operation: "set_task_status begin_write",
             source: Box::new(e.into()),
         })?;
@@ -297,7 +483,8 @@ impl Database {
 
     /// 启动时恢复：把残留的 running 状态 task 标记为 interrupted。返回标记数量。
     pub fn mark_interrupted_tasks(&self) -> WeaveResult<u64> {
-        let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveError::Database {
             operation: "mark_interrupted begin_write",
             source: Box::new(e.into()),
         })?;
@@ -345,7 +532,8 @@ impl Database {
     }
 
     pub fn list_tasks(&self) -> WeaveResult<Vec<TaskMeta>> {
-        let txn = self.db.begin_read().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveError::Database {
             operation: "list_tasks begin_read",
             source: Box::new(e.into()),
         })?;
@@ -382,7 +570,8 @@ impl Database {
 
     fn save_snapshot_with_durability(&self, task_id: &TaskId, mut snap: Snapshot, durability: redb::Durability) -> WeaveResult<u64> {
         // 自动递增 seq + 写入（单次写事务）
-        let mut write_txn = self.db.begin_write().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let mut write_txn = g.begin_write().map_err(|e| WeaveError::Database {
             operation: "save_snapshot begin_write",
             source: Box::new(e.into()),
         })?;
@@ -430,7 +619,8 @@ impl Database {
     }
 
     pub fn load_snapshots(&self, task_id: &TaskId) -> WeaveResult<Vec<(u64, Snapshot)>> {
-        let txn = self.db.begin_read().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveError::Database {
             operation: "load_snapshots begin_read",
             source: Box::new(e.into()),
         })?;
@@ -460,7 +650,8 @@ impl Database {
         task_id: &TaskId,
         seq: u64,
     ) -> WeaveResult<Option<Snapshot>> {
-        let txn = self.db.begin_read().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveError::Database {
             operation: "load_snapshot_by_seq begin_read",
             source: Box::new(e.into()),
         })?;
@@ -476,6 +667,60 @@ impl Database {
         Ok(result.map(|g| g.value()))
     }
 
+    /// 只遍历 key 统计 snapshot 数量，不反序列化 value。
+    pub fn count_snapshots(&self, task_id: &TaskId) -> WeaveResult<u64> {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveError::Database {
+            operation: "count_snapshots begin_read",
+            source: Box::new(e.into()),
+        })?;
+        let table = txn.open_table(SNAPSHOT).map_err(|e| WeaveError::Database {
+            operation: "count_snapshots open_table",
+            source: Box::new(e.into()),
+        })?;
+        let start = SnapshotKey { task_id: task_id.0, seq: 0 };
+        let end   = SnapshotKey { task_id: task_id.0, seq: u64::MAX };
+        let mut n = 0u64;
+        for result in table.range(start..=end).map_err(|e| WeaveError::Database {
+            operation: "count_snapshots range",
+            source: Box::new(e.into()),
+        })? {
+            result.map_err(|e| WeaveError::Database {
+                operation: "count_snapshots read_row",
+                source: Box::new(e.into()),
+            })?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// 列出 task 的全部 snapshot key（经 header-only 视图读取，跳过 output 字节拷贝）。
+    pub fn list_snapshot_keys(&self, task_id: &TaskId) -> WeaveResult<Vec<(u64, StepId)>> {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveError::Database {
+            operation: "list_snapshot_keys begin_read",
+            source: Box::new(e.into()),
+        })?;
+        let table = txn.open_table(SNAPSHOT_HEADER).map_err(|e| WeaveError::Database {
+            operation: "list_snapshot_keys open_table",
+            source: Box::new(e.into()),
+        })?;
+        let start = SnapshotKey { task_id: task_id.0, seq: 0 };
+        let end   = SnapshotKey { task_id: task_id.0, seq: u64::MAX };
+        let mut items = Vec::new();
+        for result in table.range(start..=end).map_err(|e| WeaveError::Database {
+            operation: "list_snapshot_keys range",
+            source: Box::new(e.into()),
+        })? {
+            let (k, v) = result.map_err(|e| WeaveError::Database {
+                operation: "list_snapshot_keys read_row",
+                source: Box::new(e.into()),
+            })?;
+            items.push((k.value().seq, v.value().step_id));
+        }
+        Ok(items)
+    }
+
     // ── Object ──────────────────────────────────────────────────────────
 
     pub fn store_object(&self, value: &serde_json::Value) -> WeaveResult<ObjectDigest> {
@@ -483,7 +728,8 @@ impl Database {
             .map_err(|e| WeaveError::Internal(format!("serialize: {e}")))?;
         let digest = ObjectDigest::compute(&json);
         let obj_value = ObjectValue::new(value.clone());
-        let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveError::Database {
             operation: "store_object begin_write",
             source: Box::new(e.into()),
         })?;
@@ -492,25 +738,10 @@ impl Database {
                 operation: "store_object open_table",
                 source: Box::new(e.into()),
             })?;
-            let existing = table.get(&digest).map_err(|e| WeaveError::Database {
-                operation: "store_object get",
+            table.insert(digest, obj_value).map_err(|e| WeaveError::Database {
+                operation: "store_object insert",
                 source: Box::new(e.into()),
-            })?.map(|g| g.value());
-            match existing {
-                Some(mut obj) => {
-                    obj.ref_count += 1;
-                    table.insert(digest, obj).map_err(|e| WeaveError::Database {
-                        operation: "store_object update",
-                        source: Box::new(e.into()),
-                    })?;
-                }
-                None => {
-                    table.insert(digest, obj_value).map_err(|e| WeaveError::Database {
-                        operation: "store_object insert",
-                        source: Box::new(e.into()),
-                    })?;
-                }
-            }
+            })?;
         }
         txn.commit().map_err(|e| WeaveError::Database {
             operation: "store_object commit",
@@ -522,7 +753,8 @@ impl Database {
     pub fn check_cache_bytes(&self, key: &[u8]) -> WeaveResult<Option<serde_json::Value>> {
         let digest = ObjectDigest::compute(key);
         let ck = CacheKey(digest);
-        let txn = self.db.begin_read().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveError::Database {
             operation: "check_cache_bytes begin_read",
             source: Box::new(e.into()),
         })?;
@@ -552,7 +784,8 @@ impl Database {
         let output_digest = self.store_object(output)?;
         debug!(digest = %output_digest, "cache set");
         let ck = CacheKey(ObjectDigest::compute(key));
-        let txn = self.db.begin_write().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveError::Database {
             operation: "set_cache_bytes begin_write",
             source: Box::new(e.into()),
         })?;
@@ -574,7 +807,8 @@ impl Database {
     }
 
     pub fn load_object(&self, digest: &ObjectDigest) -> WeaveResult<Option<serde_json::Value>> {
-        let txn = self.db.begin_read().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveError::Database {
             operation: "load_object begin_read",
             source: Box::new(e.into()),
         })?;
@@ -601,7 +835,8 @@ impl Database {
     /// 扫描阶段（只读事务）：选出待删 task 及其判定时刻的 snapshot max_seq、
     /// 以及未被引用的 OBJECT / 悬空 CACHE 行。
     pub fn prune_scan(&self, options: &PruneOptions) -> WeaveResult<PrunePlan> {
-        let read_txn = self.db.begin_read().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let read_txn = g.begin_read().map_err(|e| WeaveError::Database {
             operation: "prune_scan begin_read",
             source: Box::new(e.into()),
         })?;
@@ -650,7 +885,7 @@ impl Database {
 
     /// 执行阶段（写事务）：按 plan 删除。snapshot 只删 seq ≤ 判定时 max_seq 的，
     /// 判定后新写入的快照不受影响（读-写间隙竞态防护）。
-    pub fn prune_execute(&mut self, plan: &PrunePlan, dry_run: bool) -> WeaveResult<PruneReport> {
+    pub fn prune_execute(&self, plan: &PrunePlan, dry_run: bool) -> WeaveResult<PruneReport> {
         let mut report = PruneReport {
             objects_removed: plan.dead_objects.len() as u64,
             bytes_freed: plan.freed_bytes,
@@ -668,11 +903,13 @@ impl Database {
             return Ok(report);
         }
 
-        let write_txn = self.db.begin_write().map_err(|e| WeaveError::Database {
-            operation: "prune_execute begin_write",
-            source: Box::new(e.into()),
-        })?;
-        let mut snap_table = write_txn.open_table(SNAPSHOT).map_err(|e| WeaveError::Database {
+        {
+            let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+            let write_txn = g.begin_write().map_err(|e| WeaveError::Database {
+                operation: "prune_execute begin_write",
+                source: Box::new(e.into()),
+            })?;
+            let mut snap_table = write_txn.open_table(SNAPSHOT).map_err(|e| WeaveError::Database {
             operation: "prune_execute open_snap_table",
             source: Box::new(e.into()),
         })?;
@@ -736,7 +973,9 @@ impl Database {
             operation: "prune_execute commit",
             source: Box::new(e.into()),
         })?;
-        self.db.compact().map_err(|e| WeaveError::Database {
+        }
+        let mut wg = self.db.write().unwrap_or_else(|e| e.into_inner());
+        wg.compact().map_err(|e| WeaveError::Database {
             operation: "prune_execute compact",
             source: Box::new(e.into()),
         })?;
@@ -744,13 +983,14 @@ impl Database {
         Ok(report)
     }
 
-    pub fn prune(&mut self, options: &PruneOptions) -> WeaveResult<PruneReport> {
+    pub fn prune(&self, options: &PruneOptions) -> WeaveResult<PruneReport> {
         let plan = self.prune_scan(options)?;
         self.prune_execute(&plan, options.dry_run)
     }
 
     fn collect_object_garbage(&self) -> WeaveResult<(Vec<ObjectDigest>, u64, Vec<CacheKey>)> {
-        let txn = self.db.begin_read().map_err(|e| WeaveError::Database {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveError::Database {
             operation: "gc begin_read",
             source: Box::new(e.into()),
         })?;
@@ -876,10 +1116,12 @@ mod tests {
 
     #[test]
     fn fresh_db_reads_return_empty_not_error() {
-        let (mut db, _dir) = temp_db();
+        let (db, _dir) = temp_db();
         let tid = TaskId::new();
         assert!(db.load_task(&tid).unwrap().is_none());
         assert!(db.load_snapshots(&tid).unwrap().is_empty());
+        assert_eq!(db.count_snapshots(&tid).unwrap(), 0);
+        assert!(db.list_snapshot_keys(&tid).unwrap().is_empty());
         assert!(db
             .load_object(&ObjectDigest::compute(b"missing"))
             .unwrap()
@@ -894,7 +1136,7 @@ mod tests {
 
     #[test]
     fn prune_skips_tasks_in_skip_set() {
-        let (mut db, _dir) = temp_db();
+        let (db, _dir) = temp_db();
         let running = db.create_task("p", serde_json::json!({}), 0).unwrap();
         let finished = db.create_task("p", serde_json::json!({}), 0).unwrap();
         save_one_snapshot(&db, &running);
@@ -915,7 +1157,7 @@ mod tests {
 
     #[test]
     fn prune_gc_removes_unreferenced_objects() {
-        let (mut db, _dir) = temp_db();
+        let (db, _dir) = temp_db();
         db.set_cache_bytes(b"key-live", &serde_json::json!({"v": 1}))
             .unwrap();
         let dead = db.store_object(&serde_json::json!({"v": 2})).unwrap();
@@ -930,11 +1172,12 @@ mod tests {
 
     #[test]
     fn prune_gc_removes_dangling_cache_entries() {
-        let (mut db, _dir) = temp_db();
+        let (db, _dir) = temp_db();
         let orphan_digest = ObjectDigest::compute(b"phantom-object-never-stored");
         {
             let ck = CacheKey(ObjectDigest::compute(b"dangling-cache-entry"));
-            let txn = db.db.begin_write().unwrap();
+            let g = db.db.read().unwrap_or_else(|e| e.into_inner());
+            let txn = g.begin_write().unwrap();
             {
                 let mut table = txn.open_table(CACHE).unwrap();
                 table.insert(ck, orphan_digest).unwrap();
@@ -952,7 +1195,7 @@ mod tests {
 
     #[test]
     fn prune_gc_clears_all_objects_when_cache_empty() {
-        let (mut db, _dir) = temp_db();
+        let (db, _dir) = temp_db();
         let d1 = db.store_object(&serde_json::json!({"v": 1})).unwrap();
         let d2 = db.store_object(&serde_json::json!({"v": 2})).unwrap();
 
@@ -965,7 +1208,7 @@ mod tests {
 
     #[test]
     fn prune_dry_run_reports_gc_without_deleting() {
-        let (mut db, _dir) = temp_db();
+        let (db, _dir) = temp_db();
         let dead = db.store_object(&serde_json::json!({"v": 1})).unwrap();
 
         let report = db
@@ -977,5 +1220,138 @@ mod tests {
 
         assert_eq!(report.objects_removed, 1);
         assert!(db.load_object(&dead).unwrap().is_some());
+    }
+
+    #[test]
+    fn mark_interrupted_tasks_marks_running_as_failed_interrupted() {
+        let (db, _dir) = temp_db();
+        let running = db.create_task("p", serde_json::json!({}), 3600).unwrap();
+        let finished = db.create_task("p", serde_json::json!({}), 3600).unwrap();
+        db.set_task_status(&finished, crate::tracker::meta::TASK_STATUS_COMPLETED)
+            .unwrap();
+
+        let n = db.mark_interrupted_tasks().unwrap();
+
+        assert_eq!(n, 1);
+        assert_eq!(
+            db.load_task(&running).unwrap().unwrap().status,
+            crate::tracker::meta::TASK_STATUS_INTERRUPTED
+        );
+        assert_eq!(
+            db.load_task(&finished).unwrap().unwrap().status,
+            crate::tracker::meta::TASK_STATUS_COMPLETED
+        );
+    }
+
+    #[test]
+    fn count_and_list_snapshot_keys() {
+        let (db, _dir) = temp_db();
+        let tid = TaskId::new();
+        save_one_snapshot(&db, &tid);
+        save_one_snapshot(&db, &tid);
+
+        assert_eq!(db.count_snapshots(&tid).unwrap(), 2);
+        let keys = db.list_snapshot_keys(&tid).unwrap();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].0, 1);
+        assert_eq!(keys[1].0, 2);
+        assert_eq!(keys[0].1, StepId("s".to_string()));
+    }
+
+    #[test]
+    fn prune_execute_preserves_snapshots_written_after_scan() {
+        let (db, _dir) = temp_db();
+        let task = db.create_task("p", serde_json::json!({}), 0).unwrap();
+        save_one_snapshot(&db, &task);
+        let plan = db
+            .prune_scan(&PruneOptions {
+                force: true,
+                ..Default::default()
+            })
+            .unwrap();
+        // scan 之后写入的新 snapshot（seq 2）不在判定 max_seq（seq 1）范围内
+        save_one_snapshot(&db, &task);
+
+        let report = db.prune_execute(&plan, false).unwrap();
+
+        assert_eq!(report.snapshots_removed, 1);
+        assert!(db.load_task(&task).unwrap().is_none());
+        let remaining = db.load_snapshots(&task).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0, 2);
+    }
+
+    #[test]
+    fn v0_database_auto_migrates_on_open() {
+        use crate::store::database::{V0PipelineDef, V0TaskMeta};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("weave.redb");
+        let bak = dir.path().join("weave.redb.v0.bak");
+
+        let yaml = r#"
+name: legacy_pipe
+storage:
+  result_ttl: "2h"
+steps:
+  - id: s
+    type: noop
+output: "{s.output}"
+"#;
+        let def = crate::dsl::parser::parse(yaml).expect("parse");
+        let mut pipeline_json = serde_json::to_value(&def).expect("pipeline json");
+        // 塞回已移除的 snapshot_ttl 字段，模拟 v0 时代的行
+        pipeline_json["storage"]["snapshot_ttl"] = serde_json::json!("7d");
+
+        let task_id = TaskId::new();
+        let meta = TaskMeta {
+            task_id,
+            pipeline_name: "legacy_pipe".to_string(),
+            created_at: chrono::Utc::now(),
+            result_ttl_secs: 3600,
+            inputs: serde_json::json!({}),
+            status: crate::tracker::meta::TASK_STATUS_RUNNING.to_string(),
+        };
+        let mut task_json = serde_json::to_value(&meta).expect("task json");
+        // v0 TaskMeta 可能没有 status 字段（serde default 应兜底为 "unknown"）
+        task_json.as_object_mut().unwrap().remove("status");
+
+        let pipeline_id = PipelineId::new();
+
+        // 用 v0 类型名手工造库：1 条 pipeline + 1 条 task
+        {
+            let raw = RedbDb::create(&path).expect("create v0 db");
+            let txn = raw.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(V0_PIPELINE).unwrap();
+                t.insert(pipeline_id, V0PipelineDef(pipeline_json)).unwrap();
+            }
+            {
+                let mut t = txn.open_table(V0_TASK).unwrap();
+                t.insert(task_id, V0TaskMeta(task_json)).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let db = Database::open(&path).expect("open should auto-migrate");
+
+        assert!(bak.exists(), "备份文件 {bak:?} 应存在");
+        let pipelines = db.list_pipelines().unwrap();
+        assert_eq!(pipelines.len(), 1);
+        assert_eq!(&*pipelines[0].1.name, "legacy_pipe");
+        assert_eq!(
+            pipelines[0]
+                .1
+                .storage
+                .as_ref()
+                .and_then(|s| s.result_ttl)
+                .map(|t| t.0.num_seconds()),
+            Some(7200)
+        );
+        let tasks = db.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, task_id);
+        assert_eq!(tasks[0].status, "unknown");
+        assert_eq!(tasks[0].result_ttl_secs, 3600);
     }
 }

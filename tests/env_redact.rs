@@ -5,9 +5,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::Mutex;
 use weave::dsl::parser::parse;
-use weave::dsl::validator::{ValidateOptions, validate};
+use weave::dsl::validator::validate;
 use weave::engine::dag::Dag;
 use weave::engine::runner::Runner;
 use weave::tracker::{LayerInfo, TaskTracker};
@@ -27,15 +26,19 @@ steps:
 output: "{leak.output.value}"
 "#;
     let def = parse(yaml).expect("parse");
-    let report = validate(&def, &ValidateOptions::default());
+    let report = validate(&def);
     assert!(report.is_ok(), "validation: {:?}", report.errors);
 
     let (db, _dir) = common::temp_db();
-    let db = Arc::new(Mutex::new(db));
+    let db = Arc::new(db);
     let tracker = TaskTracker::new();
     let dag = Dag::from_pipeline(&def).expect("dag");
     let layers = dag.topological_sort().expect("topo");
-    let all_step_ids = layers.iter().flatten().cloned().collect::<Vec<_>>();
+    let steps_with_timeout = layers
+        .iter()
+        .flatten()
+        .map(|id| (id.clone(), dag.step(id).and_then(|s| s.timeout_sec)))
+        .collect::<Vec<_>>();
     let layer_infos: Vec<LayerInfo> = layers
         .iter()
         .enumerate()
@@ -44,17 +47,14 @@ output: "{leak.output.value}"
             step_ids: step_ids.clone(),
         })
         .collect();
-    let task_id = {
-        let guard = db.try_lock().expect("db lock");
-        guard
-            .create_task(&def.name, serde_json::json!({}), 3600)
-            .expect("create task")
-    };
+    let task_id = db
+        .create_task(&def.name, serde_json::json!({}), 3600)
+        .expect("create task");
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(tracker.create(
         task_id,
         def.name.to_string(),
-        all_step_ids,
+        steps_with_timeout,
         layer_infos,
     ));
 
@@ -65,11 +65,7 @@ output: "{leak.output.value}"
     let output: Value = serde_json::from_slice(&result).expect("output json");
     assert_eq!(output["api_key"], "sk-live-secret-12345");
 
-    let snaps = db
-        .try_lock()
-        .expect("db lock")
-        .load_snapshots(&task_id)
-        .expect("load snapshots");
+    let snaps = db.load_snapshots(&task_id).expect("load snapshots");
     assert_eq!(snaps.len(), 1);
     let persisted: Value = serde_json::from_slice(&snaps[0].1.output).expect("snapshot json");
     assert_eq!(persisted["value"]["api_key"], "***");

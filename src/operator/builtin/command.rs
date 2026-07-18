@@ -25,7 +25,6 @@ impl Operator for CommandOperator {
     ) -> Result<Value, OperatorError> {
         let cmd = inputs
             .get("command")
-            .or_else(|| inputs.get("cmd"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| OperatorError::Config("command 算子需要 command 字段".into()))?;
         debug!(cmd = %cmd, "command execution");
@@ -52,55 +51,41 @@ impl Operator for CommandOperator {
             .env("LANG", inherit_env("LANG"))
             .env("LC_ALL", inherit_env("LC_ALL"))
             .env("TZ", inherit_env("TZ"))
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| OperatorError::Runtime(format!("spawn {shell}: {e}")))?;
 
         let mut stdin = child.stdin.take();
-        let mut stdout = child.stdout.take().unwrap();
-        let mut stderr = child.stderr.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
 
-        if let Some(input) = stdin_data {
-            if let Some(mut s) = stdin.take() {
+        if let Some(input) = stdin_data
+            && let Some(mut s) = stdin.take() {
                 tokio::spawn(async move {
                     let _ = s.write_all(input.as_bytes()).await;
                 });
             }
-        }
         drop(stdin);
 
-        let max_bytes = http_client::MAX_STDIO_BYTES as u64;
-        let stdout_fut = async {
-            let mut buf = Vec::new();
-            let taken = (&mut stdout).take(max_bytes);
-            tokio::pin!(taken);
-            taken.read_to_end(&mut buf).await?;
-            Ok::<_, std::io::Error>(buf)
-        };
-        let stderr_fut = async {
-            let mut buf = Vec::new();
-            let taken = (&mut stderr).take(max_bytes);
-            tokio::pin!(taken);
-            taken.read_to_end(&mut buf).await?;
-            Ok::<_, std::io::Error>(buf)
-        };
+        let max_bytes = http_client::MAX_STDIO_BYTES;
+        let stdout_task = tokio::spawn(read_capped(stdout, max_bytes));
+        let stderr_task = tokio::spawn(read_capped(stderr, max_bytes));
 
-        let (stdout_result, stderr_result, output_result) = tokio::join!(
-            stdout_fut,
-            stderr_fut,
-            child.wait(),
-        );
-
-        let stdout_buf = stdout_result.map_err(|e| {
-            OperatorError::Runtime(format!("read stdout: {e}"))
-        })?;
-        let stderr_buf = stderr_result.map_err(|e| {
-            OperatorError::Runtime(format!("read stderr: {e}"))
-        })?;
-        let output = output_result
+        let output = child
+            .wait()
+            .await
             .map_err(|e| OperatorError::Runtime(format!("wait {cmd}: {e}")))?;
 
-        let stdout_truncated = stdout_buf.len() >= http_client::MAX_STDIO_BYTES;
-        let stderr_truncated = stderr_buf.len() >= http_client::MAX_STDIO_BYTES;
+        let (stdout_buf, stdout_truncated) = stdout_task
+            .await
+            .map_err(|e| OperatorError::Runtime(format!("join stdout reader: {e}")))?
+            .map_err(|e| OperatorError::Runtime(format!("read stdout: {e}")))?;
+        let (stderr_buf, stderr_truncated) = stderr_task
+            .await
+            .map_err(|e| OperatorError::Runtime(format!("join stderr reader: {e}")))?
+            .map_err(|e| OperatorError::Runtime(format!("read stderr: {e}")))?;
+
+        let truncated = stdout_truncated || stderr_truncated;
 
         let mut stdout = String::from_utf8_lossy(&stdout_buf).into_owned();
         let mut stderr = String::from_utf8_lossy(&stderr_buf).into_owned();
@@ -116,6 +101,68 @@ impl Operator for CommandOperator {
             "stderr": stderr,
             "exit_code": output.code().unwrap_or(-1),
             "success": output.success(),
+            "truncated": truncated,
         }))
+    }
+}
+
+/// 读满上限后继续 drain 丢弃，保证子进程不会阻塞在管道 write 上。
+/// 返回保留的前 max 字节与是否截断（总量 > max 才算截断）。
+async fn read_capped<R>(mut reader: R, max: usize) -> std::io::Result<(Vec<u8>, bool)>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = Vec::new();
+    let mut total = 0usize;
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+        if buf.len() < max {
+            let keep = (max - buf.len()).min(n);
+            buf.extend_from_slice(&chunk[..keep]);
+        }
+    }
+    Ok((buf, total > max))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn oversized_output_truncates_and_completes() {
+        let op = CommandOperator;
+        let out = op
+            .run(json!({ "command": "head -c 11000000 /dev/zero" }))
+            .await
+            .expect("run");
+        assert_eq!(out["truncated"], json!(true));
+        assert_eq!(out["success"], json!(true));
+        let stdout = out["stdout"].as_str().expect("stdout string");
+        assert!(stdout.contains("truncated at 10MB"));
+        assert!(stdout.len() <= http_client::MAX_STDIO_BYTES + 64);
+    }
+
+    #[tokio::test]
+    async fn exactly_at_limit_is_not_truncated() {
+        let op = CommandOperator;
+        let out = op
+            .run(json!({ "command": "head -c 10485760 /dev/zero" }))
+            .await
+            .expect("run");
+        assert_eq!(out["truncated"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn small_output_not_truncated() {
+        let op = CommandOperator;
+        let out = op.run(json!({ "command": "echo hi" })).await.expect("run");
+        assert_eq!(out["truncated"], json!(false));
+        assert_eq!(out["stdout"], json!("hi\n"));
     }
 }

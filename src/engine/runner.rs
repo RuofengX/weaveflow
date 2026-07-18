@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use crate::dsl::{PipelineDef, RefValue, StepId};
@@ -16,12 +15,12 @@ use crate::vm::{Scope, redact_env_values, resolve_ref};
 
 pub struct Runner {
     pub pipeline: PipelineDef,
-    pub db: Arc<Mutex<Database>>,
+    pub db: Arc<Database>,
     pub tracker: TaskTracker,
 }
 
 impl Runner {
-    pub fn new(pipeline: PipelineDef, db: Arc<Mutex<Database>>, tracker: TaskTracker) -> Self {
+    pub fn new(pipeline: PipelineDef, db: Arc<Database>, tracker: TaskTracker) -> Self {
         Runner {
             pipeline,
             db,
@@ -44,10 +43,12 @@ impl Runner {
         .await;
         if let Err(ref e) = result {
             self.tracker.fail(&task_id, e.to_string()).await;
-            let _ = self.db.lock().await.set_task_status(
+            if let Err(db_err) = self.db.set_task_status(
                 &task_id,
                 crate::tracker::meta::TASK_STATUS_FAILED,
-            );
+            ) {
+                warn!(task_id = %task_id, error = %db_err, "set_task_status(failed) failed");
+            }
         }
         result
     }
@@ -55,7 +56,7 @@ impl Runner {
 
 pub async fn run_inner(
     pipeline: &PipelineDef,
-    db: Arc<Mutex<Database>>,
+    db: Arc<Database>,
     tracker: &TaskTracker,
     task_id: TaskId,
     slots: HashMap<String, Value>,
@@ -139,9 +140,7 @@ pub async fn run_inner(
     }
     .or_else(|| layers.last().and_then(|l| l.last()).cloned());
 
-    let mut current_layer_idx = 0;
-
-    for layer in layers.iter() {
+    for (layer_idx, layer) in layers.iter().enumerate() {
         let mut futures = Vec::new();
         debug!(layer_steps = ?layer, "executing parallel layer");
         for step_id in layer {
@@ -171,13 +170,13 @@ pub async fn run_inner(
                     .await;
 
                 let out = execute_step(db_clone, &mut sc, &sd, &tid, &tracker_clone).await;
-                (sd.id.clone(), started_at, out.map(|(v, a, c)| (v, a, c)))
+                (sd.id.clone(), started_at, out)
             });
         }
 
         // 这里等待层中所有步骤完成后再处理错误，提高可观测性
-        let results: Vec<(StepId, DateTime<Utc>, WeaveResult<(Value, u32, bool)>)> =
-            futures::future::join_all(futures).await;
+        type StepOutcome = (StepId, DateTime<Utc>, Result<(Value, u32, bool), (WeaveError, u32)>);
+        let results: Vec<StepOutcome> = futures::future::join_all(futures).await;
 
         let mut layer_failed = false;
         let mut first_error = String::new();
@@ -186,20 +185,19 @@ pub async fn run_inner(
             match result {
                 Ok((output, attempts_used, cache_hit)) => {
                     let completed_at = Utc::now();
-                    let duration_ms = (completed_at - started_at).num_milliseconds() as u64;
+                    let duration_ms = (completed_at - started_at)
+                        .num_milliseconds()
+                        .max(0) as u64;
                     debug!(step = %step_id, duration_ms, "parallel step completed");
                     scope.set_output(&step_id, output.clone());
-                    {
-                        let db_lock = db.lock().await;
-                        save_step_snapshot(
-                            &db_lock,
-                            &task_id,
-                            &step_id,
-                            &output,
-                            Some(&step_id) == last_step_id.as_ref(),
-                            &scope,
-                        );
-                    }
+                    save_step_snapshot(
+                        &db,
+                        &task_id,
+                        &step_id,
+                        &output,
+                        Some(&step_id) == last_step_id.as_ref(),
+                        &scope,
+                    );
                     tracker
                         .update_step(
                             &task_id,
@@ -214,17 +212,13 @@ pub async fn run_inner(
                         )
                         .await;
                 }
-                Err(e) => {
+                Err((e, attempts)) => {
                     error!(step = %step_id, error = %e, "parallel step failed");
                     if !layer_failed {
                         first_error = format!("step {step_id} failed: {e}");
                         layer_failed = true;
                     }
                     let now = Utc::now();
-                    let retry = dag.step(&step_id)
-                        .and_then(|s| s.retry.as_ref())
-                        .map(|r| r.max_attempts.max(1))
-                        .unwrap_or(1);
                     tracker
                         .update_step(
                             &task_id,
@@ -233,7 +227,7 @@ pub async fn run_inner(
                                 started_at: Some(started_at),
                                 completed_at: now,
                                 error: e.to_string(),
-                                attempts: retry,
+                                attempts,
                             },
                         )
                         .await;
@@ -242,7 +236,7 @@ pub async fn run_inner(
         }
 
         if layer_failed {
-            for remaining_layer in layers.iter().skip(current_layer_idx + 1) {
+            for remaining_layer in layers.iter().skip(layer_idx + 1) {
                 for step_id in remaining_layer {
                     tracker
                         .update_step(&task_id, step_id, StepState::Skipped)
@@ -251,7 +245,6 @@ pub async fn run_inner(
             }
             return Err(WeaveError::Internal(first_error));
         }
-        current_layer_idx += 1;
     }
 
     let final_output;
@@ -277,10 +270,12 @@ pub async fn run_inner(
 
     info!(task_id = %task_id, pipeline = %pipeline.name, "pipeline run completed");
     tracker.complete(&task_id, output_val).await;
-    let _ = db.lock().await.set_task_status(
+    if let Err(db_err) = db.set_task_status(
         &task_id,
         crate::tracker::meta::TASK_STATUS_COMPLETED,
-    );
+    ) {
+        warn!(task_id = %task_id, error = %db_err, "set_task_status(completed) failed");
+    }
 
     Ok(final_output)
 }
@@ -294,12 +289,19 @@ fn save_step_snapshot(
     scope: &Scope,
 ) {
     let secrets = scope.env_values();
-    let bytes = if secrets.is_empty() {
-        serde_json::to_vec(output).unwrap_or_default()
+    let serialized = if secrets.is_empty() {
+        serde_json::to_vec(output)
     } else {
         let mut redacted = output.clone();
         redact_env_values(&mut redacted, &secrets);
-        serde_json::to_vec(&redacted).unwrap_or_default()
+        serde_json::to_vec(&redacted)
+    };
+    let bytes = match serialized {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(task_id = %task_id, step = %step_id, error = %e, "snapshot serialize failed; skipping save");
+            return;
+        }
     };
     let snap = Snapshot {
         seq: 0,

@@ -31,11 +31,17 @@ impl Scope {
         if value.len() < MIN_REDACT_LEN {
             return;
         }
-        self.env_values.lock().unwrap().insert(value.to_string());
+        self.env_values
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(value.to_string());
     }
 
     pub fn env_values(&self) -> HashSet<String> {
-        self.env_values.lock().unwrap().clone()
+        self.env_values
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn get_output(&self, step_id: &StepId) -> Option<Arc<Value>> {

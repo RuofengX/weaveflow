@@ -61,13 +61,12 @@ pub struct HttpInputs {
 
 /// JS 算子的 code 字段在 inputs.code 中。
 /// 使用标准 `{step.output}` RefValue 语法引用上游输出的 JS 代码。
+/// 超时由 step 层 `timeout_sec` 统一控制，inputs 不再接受 timeout 字段。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsInputs {
     pub code: RefValue,
     #[serde(default)]
     pub data: Option<RefValue>,
-    #[serde(default, alias = "timeout")]
-    pub timeout_sec: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

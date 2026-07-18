@@ -58,19 +58,15 @@ impl<'de> Deserialize<'de> for ObjectDigest {
     }
 }
 
-/// Object 表的 Value 类型（带引用计数）。
+/// Object 表的 Value 类型。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectValue {
-    pub ref_count: u64,
     pub data: Value,
 }
 
 impl ObjectValue {
     pub fn new(data: Value) -> Self {
-        ObjectValue {
-            ref_count: 1,
-            data,
-        }
+        ObjectValue { data }
     }
 }
 
@@ -82,7 +78,6 @@ mod tests {
     #[test]
     fn object_value_new() {
         let ov = ObjectValue::new(json!({"a": 1}));
-        assert_eq!(ov.ref_count, 1);
         assert_eq!(ov.data, json!({"a": 1}));
     }
 }

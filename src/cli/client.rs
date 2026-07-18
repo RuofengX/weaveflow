@@ -1,5 +1,6 @@
 use futures::StreamExt;
 use serde_json::Value;
+use std::io::IsTerminal;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tokio_tungstenite::connect_async;
@@ -29,13 +30,13 @@ fn encode_segment(s: &str) -> String {
     r
 }
 
-fn parse_daemon_addr(daemon: &str) -> (&str, &str) {
+pub(crate) fn parse_daemon_addr(daemon: &str) -> (&str, &str) {
     if let Some(rest) = daemon.strip_prefix("https://") {
-        ("https://", rest)
+        ("https://", rest.trim_end_matches('/'))
     } else if let Some(rest) = daemon.strip_prefix("http://") {
-        ("http://", rest)
+        ("http://", rest.trim_end_matches('/'))
     } else {
-        ("http://", daemon)
+        ("http://", daemon.trim_end_matches('/'))
     }
 }
 
@@ -60,7 +61,7 @@ async fn parse_response(resp: reqwest::Response, url: &str) -> Result<Value, Str
     let status = resp.status().as_u16();
     let body = resp.text().await.map_err(|e| daemon_error(url, e))?;
     check_http_status(status, &body)?;
-    serde_json::from_str(&body).map_err(|e| daemon_error(url, e))
+    serde_json::from_str(&body).map_err(|e| format!("响应格式错误 ({url}): {e}"))
 }
 
 async fn get(daemon: &str, path: &str) -> Result<Value, String> {
@@ -203,14 +204,28 @@ pub async fn system_prune(daemon: &str, force: bool, dry_run: bool) -> Result<()
         "force": force,
         "dry_run": dry_run,
     });
-    let result = post(daemon, "/prune", body).await?;
+    // prune 可能全表扫描 + compact，单独放宽超时到 300s
+    let url = api_url(daemon, "/prune");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("构建 HTTP client 失败: {e}"))?;
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| daemon_error(&url, e))?;
+    let result = parse_response(resp, &url).await?;
     let tasks_removed = result["tasks_removed"].as_u64().unwrap_or(0);
+    let snapshots_removed = result["snapshots_removed"].as_u64().unwrap_or(0);
     let objects_removed = result["objects_removed"].as_u64().unwrap_or(0);
     let bytes_freed = result["bytes_freed"].as_u64().unwrap_or(0);
     if dry_run {
-        println!("Would remove: {tasks_removed} tasks, {objects_removed} objects ({bytes_freed} bytes)");
+        println!("Would remove: {tasks_removed} tasks, {snapshots_removed} snapshots, {objects_removed} objects ({bytes_freed} bytes)");
     } else {
-        println!("Removed: {tasks_removed} tasks, {objects_removed} objects ({bytes_freed} bytes)");
+        println!("Removed: {tasks_removed} tasks, {snapshots_removed} snapshots, {objects_removed} objects ({bytes_freed} bytes)");
     }
     Ok(())
 }
@@ -257,9 +272,13 @@ pub async fn run_pipeline_watch(
     let (_http_scheme, host) = parse_daemon_addr(daemon);
     let ws_scheme = if _http_scheme == "https://" { "wss://" } else { "ws://" };
     let ws_url = format!("{ws_scheme}{host}/runs/{task_id}/ws");
-    let (ws_stream, _) = connect_async(&ws_url)
-        .await
-        .map_err(|e| format!("WebSocket 连接失败 ({ws_url}): {e}"))?;
+    let (ws_stream, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        connect_async(&ws_url),
+    )
+    .await
+    .map_err(|_| format!("WebSocket 连接超时 ({ws_url})"))?
+    .map_err(|e| format!("WebSocket 连接失败 ({ws_url}): {e}"))?;
 
     let (_, mut read) = ws_stream.split();
 
@@ -292,7 +311,8 @@ pub async fn run_pipeline_watch(
         }
     });
 
-    // 3. Render
+    // 3. Render（stdout 非 TTY 时自动回落 text 模式）
+    let text_mode = text_mode || !std::io::stdout().is_terminal();
     if text_mode {
         crate::cli::watch::run_text(&mut rx).await?;
     } else {
@@ -305,6 +325,37 @@ pub async fn run_pipeline_watch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_segment_ascii_passthrough() {
+        assert_eq!(encode_segment("abc-DEF_123.txt~"), "abc-DEF_123.txt~");
+    }
+
+    #[test]
+    fn encode_segment_chinese() {
+        // "中文" 的 UTF-8: E4 B8 AD E6 96 87
+        assert_eq!(encode_segment("中文"), "%E4%B8%AD%E6%96%87");
+    }
+
+    #[test]
+    fn encode_segment_space() {
+        assert_eq!(encode_segment("a b"), "a%20b");
+    }
+
+    #[test]
+    fn encode_segment_slash() {
+        assert_eq!(encode_segment("a/b"), "a%2Fb");
+    }
+
+    #[test]
+    fn encode_segment_reserved_chars() {
+        assert_eq!(encode_segment("?&=#%:+@"), "%3F%26%3D%23%25%3A%2B%40");
+    }
+
+    #[test]
+    fn encode_segment_mixed() {
+        assert_eq!(encode_segment("管道 v1/测试"), "%E7%AE%A1%E9%81%93%20v1%2F%E6%B5%8B%E8%AF%95");
+    }
 
     #[test]
     fn check_http_status_accepts_2xx() {

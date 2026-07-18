@@ -15,6 +15,7 @@ use super::variable::{parse_string_to_refvalue, RefValue, VariablePath};
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawPipelineDef {
     pub name: String,
     #[serde(default)]
@@ -95,8 +96,6 @@ pub struct RawJsInputs {
     pub code: Value,
     #[serde(default)]
     pub data: Option<Value>,
-    #[serde(default, alias = "timeout")]
-    pub timeout_sec: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -253,7 +252,6 @@ impl From<RawStepOp> for StepOp {
             RawStepOp::Js(r) => StepOp::Js(step_op::JsInputs {
                 code: yaml_to_refvalue(&r.code),
                 data: r.data.as_ref().map(yaml_to_refvalue),
-                timeout_sec: r.timeout_sec,
             }),
             RawStepOp::Filter(r) => StepOp::Filter(step_op::FilterInputs {
                 data: r.data.as_ref().map(yaml_to_refvalue),
@@ -399,15 +397,23 @@ impl From<rust_yaml::Error> for ParseError {
     }
 }
 
-impl From<serde_json::Error> for ParseError {
-    fn from(e: serde_json::Error) -> Self {
-        ParseError::Yaml(e.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_pipeline_field_rejected() {
+        let yaml = r#"
+name: t
+slotz: []
+steps:
+  - id: s
+    type: noop
+output: "{s.output}"
+"#;
+        let r: Result<RawPipelineDef, _> = rust_yaml::from_str(yaml);
+        assert!(r.is_err(), "typo field `slotz` should be rejected");
+    }
 
     #[test]
     fn unknown_inputs_field_rejected() {

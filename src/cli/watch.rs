@@ -1,6 +1,7 @@
 use chrono::Utc;
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::sync::Arc;
 
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -17,11 +18,13 @@ pub fn run_tui(
     task_id: &str,
     pipeline_name: &str,
 ) -> io::Result<()> {
-    let prev_hook = std::panic::take_hook();
+    let prev_hook: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send> =
+        Arc::from(std::panic::take_hook());
+    let hook_prev = prev_hook.clone();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
-        prev_hook(info);
+        hook_prev(info);
     }));
 
     enable_raw_mode()?;
@@ -47,6 +50,10 @@ pub fn run_tui(
         DisableMouseCapture
     )?;
     terminal.show_cursor()?;
+
+    // 恢复进入 TUI 前的 panic hook（take_hook 先摘掉本层 hook 链）
+    let _ = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| prev_hook(info)));
 
     match res {
         Ok(()) => {
@@ -92,9 +99,7 @@ pub fn run_tui(
 pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), String> {
     let mut completed_layers: HashSet<usize> = HashSet::new();
     let mut finished = false;
-    loop {
-        match rx.recv().await {
-            Some(data) => {
+    while let Some(data) = rx.recv().await {
                 let status = data
                     .get("status")
                     .and_then(|s| s.as_object())
@@ -176,9 +181,6 @@ pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), Str
                     finished = true;
                     break;
                 }
-            }
-            None => break,
-        }
     }
     if !finished {
         return Err("connection to daemon lost before task completion".to_string());
@@ -242,7 +244,7 @@ fn print_text_layer(data: &Value, completed: &mut HashSet<usize>) {
             })
             .collect();
 
-        let parallel = if step_ids.len() > 1 { " {}" } else { "" };
+        let parallel = if step_ids.len() > 1 { " (parallel)" } else { "" };
         println!(
             "[weave] Layer {}{}: {}",
             idx + 1,
@@ -358,13 +360,12 @@ fn run_app(
 
         if event::poll(std::time::Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press {
-                    if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+                && key.kind == KeyEventKind::Press
+                    && (matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)))
                     {
                         return Ok(());
                     }
-                }
 
         std::thread::sleep(std::time::Duration::from_millis(50));
     }

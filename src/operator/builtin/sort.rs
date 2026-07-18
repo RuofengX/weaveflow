@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use serde_json::Value;
 use tracing::debug;
 
-use crate::operator::builtin::resolve_nested;
+use crate::operator::builtin::{compare_json_numbers, resolve_nested};
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
 pub struct SortOperator;
@@ -21,8 +21,20 @@ impl Operator for SortOperator {
         let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("").to_string();
         debug!(field, "sort operator");
         let order = inputs.get("order").and_then(|v| v.as_str()).unwrap_or("asc").to_string();
+        if !matches!(order.as_str(), "asc" | "desc") {
+            return Err(OperatorError::Config(format!(
+                "sort 不支持 order: {order}（可选: asc/desc）"
+            )));
+        }
         let data = if let Value::Object(mut m) = inputs {
-            m.remove("data").unwrap_or(Value::Null)
+            match m.remove("data") {
+                Some(v) if !v.is_null() => v,
+                _ => {
+                    return Err(OperatorError::Config(
+                        "sort 算子 inputs.data 缺失或为 null".into(),
+                    ));
+                }
+            }
         } else {
             inputs
         };
@@ -58,8 +70,8 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
     match (a, b) {
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
-        (Value::Number(x), Value::Number(y)) => {
-            x.as_f64().partial_cmp(&y.as_f64()).unwrap_or(Ordering::Equal)
+        (Value::Number(_), Value::Number(_)) => {
+            compare_json_numbers(a, b).unwrap_or(Ordering::Equal)
         }
         (Value::String(x), Value::String(y)) => x.cmp(y),
         (Value::Array(_), Value::Array(_)) | (Value::Object(_), Value::Object(_)) => {
@@ -87,19 +99,18 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn sort(data: Value) -> Value {
+    async fn sort(data: Value) -> Value {
         let op = SortOperator;
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(op.run(json!({ "data": data }))).expect("run")
+        op.run(json!({ "data": data })).await.expect("run")
     }
 
-    #[test]
-    fn mixed_type_sort_is_total_and_deterministic() {
+    #[tokio::test]
+    async fn mixed_type_sort_is_total_and_deterministic() {
         let data = json!([
             "s", 3, null, true, [2], { "k": 1 }, false, -1, "a", [], {}, 2.5
         ]);
-        let first = sort(data.clone());
-        let second = sort(data);
+        let first = sort(data.clone()).await;
+        let second = sort(data).await;
         assert_eq!(first, second);
         let arr = first.as_array().expect("array");
         assert_eq!(arr.len(), 12);
@@ -109,13 +120,41 @@ mod tests {
         );
     }
 
-    #[test]
-    fn same_type_ordering_preserved() {
+    #[tokio::test]
+    async fn same_type_ordering_preserved() {
         let data = json!([3, 1, 2]);
-        assert_eq!(sort(data), json!([1, 2, 3]));
+        assert_eq!(sort(data).await, json!([1, 2, 3]));
         let data = json!(["b", "a"]);
-        assert_eq!(sort(data), json!(["a", "b"]));
+        assert_eq!(sort(data).await, json!(["a", "b"]));
         let data = json!([true, false, true]);
-        assert_eq!(sort(data), json!([false, true, true]));
+        assert_eq!(sort(data).await, json!([false, true, true]));
+    }
+
+    #[tokio::test]
+    async fn big_integer_sort_is_exact() {
+        let data = json!([9007199254740993_i64, 9007199254740992_i64, 9007199254740994_i64]);
+        assert_eq!(
+            sort(data).await,
+            json!([9007199254740992_i64, 9007199254740993_i64, 9007199254740994_i64])
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_order_returns_config_error() {
+        let op = SortOperator;
+        let err = op
+            .run(json!({ "data": [1, 2], "order": "ascending" }))
+            .await
+            .expect_err("must fail");
+        assert!(matches!(err, OperatorError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn missing_data_returns_config_error() {
+        let op = SortOperator;
+        let err = op.run(json!({ "field": "x" })).await.expect_err("must fail");
+        assert!(matches!(err, OperatorError::Config(_)));
+        let err = op.run(json!({ "data": null })).await.expect_err("must fail");
+        assert!(matches!(err, OperatorError::Config(_)));
     }
 }

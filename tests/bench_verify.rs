@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
-use tokio::sync::Mutex;
 use weave::dsl::parser::parse;
 use weave::engine::dag::Dag;
 use weave::engine::runner::Runner;
@@ -37,12 +36,16 @@ output: "{f.output}"
     let def = parse(yaml).unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let db = Database::open(tmp.path().join("w.redb")).unwrap();
-    let db = Arc::new(Mutex::new(db));
+    let db = Arc::new(db);
     let tracker = TaskTracker::new();
 
     let dag = Dag::from_pipeline(&def).unwrap();
     let layers = dag.topological_sort().unwrap();
-    let all_step_ids = layers.iter().flatten().cloned().collect::<Vec<_>>();
+    let steps_with_timeout = layers
+        .iter()
+        .flatten()
+        .map(|id| (id.clone(), dag.step(id).and_then(|s| s.timeout_sec)))
+        .collect::<Vec<_>>();
     let layer_infos: Vec<LayerInfo> = layers
         .iter()
         .enumerate()
@@ -55,17 +58,14 @@ output: "{f.output}"
     let mut slots = HashMap::new();
     slots.insert("orders".to_string(), json!(orders));
 
-    let task_id = {
-        let db_guard = db.try_lock().unwrap();
-        db_guard
-            .create_task(&def.name, serde_json::json!(slots), 3600)
-            .unwrap()
-    };
+    let task_id = db
+        .create_task(&def.name, serde_json::json!(slots), 3600)
+        .unwrap();
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(tracker.create(
         task_id,
         def.name.to_string(),
-        all_step_ids,
+        steps_with_timeout,
         layer_infos,
     ));
 

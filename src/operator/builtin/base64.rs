@@ -19,7 +19,14 @@ impl Operator for Base64Operator {
     ) -> Result<Value, OperatorError> {
         let mode = inputs.get("mode").and_then(|v| v.as_str()).unwrap_or("encode");
         debug!(mode, "base64 operator");
-        let data = inputs.get("data").unwrap_or(&Value::Null);
+        let data = match inputs.get("data") {
+            Some(v) if !v.is_null() => v,
+            _ => {
+                return Err(OperatorError::Config(
+                    "base64 算子 inputs.data 缺失或为 null".into(),
+                ));
+            }
+        };
         let input = match data {
             Value::String(s) => s.clone(),
             other => other.to_string(),
@@ -68,5 +75,21 @@ mod tests {
         let inputs = json!({ "data": "aGVsbG8=", "mode": "decode" });
         let out = op.run(inputs).await.expect("run");
         assert_eq!(out, json!("hello"));
+    }
+
+    #[tokio::test]
+    async fn missing_data_returns_config_error() {
+        let op = Base64Operator;
+        let err = op.run(json!({ "mode": "encode" })).await.expect_err("must fail");
+        assert!(matches!(err, OperatorError::Config(_)));
+        let err = op.run(json!({ "data": null, "mode": "encode" })).await.expect_err("must fail");
+        assert!(matches!(err, OperatorError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn unknown_mode_returns_config_error() {
+        let op = Base64Operator;
+        let err = op.run(json!({ "data": "x", "mode": "rot13" })).await.expect_err("must fail");
+        assert!(matches!(err, OperatorError::Config(_)));
     }
 }

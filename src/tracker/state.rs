@@ -54,8 +54,6 @@ pub enum StepState {
 pub struct IterateProgress {
     pub total: u64,
     pub done: u64,
-    pub errors: u64,
-    pub skip: u64,
 }
 
 /// 步骤级执行进度容器。
@@ -65,9 +63,12 @@ pub struct Progress {
 }
 
 impl Progress {
-    pub fn from_step_ids(ids: &[StepId]) -> Self {
+    pub fn from_step_ids(steps: &[(StepId, Option<f64>)]) -> Self {
         Progress {
-            steps: ids.iter().map(|id| StepProgress::new(id, None)).collect(),
+            steps: steps
+                .iter()
+                .map(|(id, timeout_sec)| StepProgress::new(id, *timeout_sec))
+                .collect(),
         }
     }
 
@@ -83,7 +84,6 @@ impl Progress {
 /// Task 整体状态——Running 变体携带步骤级进度。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TaskStatus {
-    Pending,
     Running(Progress),
     Completed(serde_json::Value),
     Failed(String),

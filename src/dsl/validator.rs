@@ -1,8 +1,14 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::dsl::{PipelineDef, RefValue, StepDef, StepId, StepOp, VariablePath};
 use serde_json::Value;
 use tracing::debug;
+
+const FILTER_OPERATORS: [&str; 8] = ["eq", "ne", "gt", "gte", "lt", "lte", "in", "contains"];
+const SORT_ORDERS: [&str; 2] = ["asc", "desc"];
+const MAX_ITERATE_WORKERS: u32 = 1024;
 
 // ---------------------------------------------------------------------------
 // 校验报告
@@ -32,22 +38,11 @@ pub struct ValidationWarning {
     pub message: String,
 }
 
-#[derive(Debug, Default)]
-pub struct ValidateOptions {
-    pub allow_warnings: Vec<String>,
-}
-
-impl ValidateOptions {
-    pub fn is_warning_allowed(&self, code: &str) -> bool {
-        self.allow_warnings.iter().any(|w| w == code)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // 主校验入口
 // ---------------------------------------------------------------------------
 
-pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationReport {
+pub fn validate(def: &PipelineDef) -> ValidationReport {
     let mut report = ValidationReport::default();
 
     // ---- 0. 基本结构 ----
@@ -61,6 +56,14 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
             code: "invalid_name_charset".into(),
             message: format!(
                 "Pipeline 名称含非法字符（仅允许 [A-Za-z0-9_.-]）: {}",
+                def.name
+            ),
+        });
+    } else if def.name.chars().all(|c| c == '.') {
+        report.errors.push(ValidationError {
+            code: "invalid_pipeline_name".into(),
+            message: format!(
+                "Pipeline 名称不能全为 '.'（URL 归一化后不可达）: {}",
                 def.name
             ),
         });
@@ -132,21 +135,59 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
             check_ref_in_json(&op_val, &all_step_ids, &step.id, &mut report);
         }
         check_iterate_config(step.iterate.as_ref(), &step.id, &all_step_ids, &mut report);
-        if let Some(ref retry) = step.retry {
-            if retry.max_attempts == 0 {
+        if let Some(ref retry) = step.retry
+            && retry.max_attempts == 0 {
                 report.errors.push(ValidationError {
                     code: "invalid_retry_config".into(),
                     message: format!("步骤 {} 的 retry.max_attempts 不能为 0", step.id),
                 });
             }
-        }
         if let Some(t) = step.timeout_sec {
             if !t.is_finite() || t <= 0.0 {
                 report.errors.push(ValidationError {
                     code: "invalid_timeout".into(),
                     message: format!("步骤 {} 的 timeout_sec 必须为正数", step.id),
                 });
+            } else if t > 365.0 * 86400.0 {
+                report.errors.push(ValidationError {
+                    code: "invalid_timeout".into(),
+                    message: format!(
+                        "步骤 {} 的 timeout_sec 超过上限（最大 365 天 = {} 秒）",
+                        step.id,
+                        365 * 86400
+                    ),
+                });
             }
+        }
+
+        // 算子枚举白名单
+        match &step.op {
+            StepOp::Filter(inputs) => {
+                if !FILTER_OPERATORS.contains(&inputs.operator.as_str()) {
+                    report.errors.push(ValidationError {
+                        code: "invalid_operator_config".into(),
+                        message: format!(
+                            "步骤 {} 的 filter.operator 非法: {}（可选: {}）",
+                            step.id,
+                            inputs.operator,
+                            FILTER_OPERATORS.join("/")
+                        ),
+                    });
+                }
+            }
+            StepOp::Sort(inputs)
+                if !SORT_ORDERS.contains(&inputs.order.as_str()) => {
+                    report.errors.push(ValidationError {
+                        code: "invalid_operator_config".into(),
+                        message: format!(
+                            "步骤 {} 的 sort.order 非法: {}（可选: {}）",
+                            step.id,
+                            inputs.order,
+                            SORT_ORDERS.join("/")
+                        ),
+                    });
+                }
+            _ => {}
         }
     }
 
@@ -157,6 +198,14 @@ pub fn validate(def: &PipelineDef, _options: &ValidateOptions) -> ValidationRepo
             report.errors.push(ValidationError {
                 code: "empty_slot_name".into(),
                 message: "slot 名称不能为空".into(),
+            });
+        } else if !is_valid_slot_name(&slot.name) {
+            report.errors.push(ValidationError {
+                code: "invalid_name_charset".into(),
+                message: format!(
+                    "slot 名称含非法字符（仅允许 [A-Za-z0-9_-]）: {}",
+                    slot.name
+                ),
             });
         }
         if !slot.name.is_empty() && !seen_slots.insert(&slot.name) {
@@ -357,6 +406,13 @@ fn is_valid_step_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+fn is_valid_slot_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 fn has_dependency_cycle(def: &PipelineDef, upstream_deps: &HashMap<StepId, Vec<StepId>>) -> bool {
     let mut unique_steps: Vec<&StepDef> = Vec::new();
     let mut seen: HashSet<&StepId> = HashSet::new();
@@ -448,28 +504,43 @@ fn refs_in_path(path: &VariablePath) -> Vec<(String, String)> {
     vec![(prefix, rest)]
 }
 
+/// 与 dag.rs 的提取规则一致：仅单键 `{"Ref": ...}` 且值可解析为 VariablePath
+/// 才识别为内联 ref 标签；多键对象或无法解析的值按普通对象继续递归。
+fn parse_ref_tag(map: &serde_json::Map<String, Value>) -> Option<VariablePath> {
+    if map.len() != 1 || !map.contains_key("Ref") {
+        return None;
+    }
+    let path = serde_json::from_value::<VariablePath>(map.get("Ref")?.clone()).ok()?;
+    if path.parts.is_empty() {
+        return None;
+    }
+    Some(path)
+}
+
+/// 与 parser/resolver 的约定一致：只有整串是单个 `{...}` 才算引用；
+/// 内嵌 `{...}` 或 `{a.output} {b.output}` 这类整串多 ref 均为字面量。
+fn whole_string_ref(s: &str) -> Option<(String, String)> {
+    let path = VariablePath::parse(s)?;
+    let prefix = path.parts[0].clone();
+    let rest = path.parts[1..].join(".");
+    Some((prefix, rest))
+}
+
 fn refs_in_json(val: &Value) -> Vec<(String, String)> {
     match val {
-        Value::Object(map) if map.contains_key("Ref") => {
-            if let Some(ref_val) = map.get("Ref")
-                && let Ok(path) = serde_json::from_value::<VariablePath>(ref_val.clone())
-                && !path.parts.is_empty()
-            {
+        Value::Object(map) => {
+            if let Some(path) = parse_ref_tag(map) {
                 let prefix = path.parts[0].clone();
                 let rest = path.parts[1..].join(".");
-                vec![(prefix, rest)]
-            } else {
-                vec![]
+                return vec![(prefix, rest)];
             }
-        }
-        Value::Object(map) => {
             let mut all = Vec::new();
             for v in map.values() {
                 all.extend(refs_in_json(v));
             }
             all
         }
-        Value::String(s) => extract_refs(s),
+        Value::String(s) => whole_string_ref(s).into_iter().collect(),
         Value::Array(arr) => {
             let mut all = Vec::new();
             for v in arr {
@@ -481,31 +552,26 @@ fn refs_in_json(val: &Value) -> Vec<(String, String)> {
     }
 }
 
-fn extract_refs(s: &str) -> Vec<(String, String)> {
-    let mut refs = Vec::new();
-    let mut chars = s.char_indices().peekable();
-    while let Some((_, ch)) = chars.next() {
-        if ch == '{' {
-            let mut content = String::new();
-            for (_, c) in chars.by_ref() {
-                if c == '}' {
-                    break;
-                }
-                content.push(c);
-            }
-            if let Some(dot) = content.find('.') {
-                let prefix = content[..dot].trim();
-                if prefix.is_empty() || !prefix.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                    continue;
-                }
-                let rest = content[dot + 1..].to_string();
-                if !rest.is_empty() {
-                    refs.push((prefix.to_string(), rest));
-                }
-            }
-        }
+fn check_step_ref_prefix(
+    prefix: &str,
+    all_ids: &HashSet<StepId>,
+    step_id: &StepId,
+    report: &mut ValidationReport,
+) {
+    if prefix == step_id.0 {
+        report.errors.push(ValidationError {
+            code: "self_reference".into(),
+            message: format!("步骤 {} 的 inputs 引用了自身", step_id),
+        });
+    } else if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix) {
+        report.errors.push(ValidationError {
+            code: "variable_ref_not_found".into(),
+            message: format!(
+                "步骤 {} 中引用了不存在的步骤: {}",
+                step_id, prefix
+            ),
+        });
     }
-    refs
 }
 
 fn check_ref_in_json(
@@ -515,50 +581,18 @@ fn check_ref_in_json(
     report: &mut ValidationReport,
 ) {
     match val {
-        Value::Object(map) if map.contains_key("Ref") => {
-            if let Some(ref_val) = map.get("Ref")
-                && let Ok(path) = serde_json::from_value::<VariablePath>(ref_val.clone())
-                && let Some(prefix) = path.parts.first()
-            {
-                if prefix == &step_id.0 {
-                    report.errors.push(ValidationError {
-                        code: "self_reference".into(),
-                        message: format!("步骤 {} 的 inputs 引用了自身", step_id),
-                    });
-                } else if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
-                    report.errors.push(ValidationError {
-                        code: "variable_ref_not_found".into(),
-                        message: format!(
-                            "步骤 {} 中引用了不存在的步骤: {}",
-                            step_id, prefix
-                        ),
-                    });
-                }
-            }
-        }
         Value::Object(map) => {
-            for v in map.values() {
-                check_ref_in_json(v, all_ids, step_id, report);
+            if let Some(path) = parse_ref_tag(map) {
+                check_step_ref_prefix(&path.parts[0], all_ids, step_id, report);
+            } else {
+                for v in map.values() {
+                    check_ref_in_json(v, all_ids, step_id, report);
+                }
             }
         }
         Value::String(s) => {
-            if s.starts_with('{') && s.ends_with('}') {
-                for (prefix, _path) in extract_refs(s) {
-                    if prefix == step_id.0 {
-                        report.errors.push(ValidationError {
-                            code: "self_reference".into(),
-                            message: format!("步骤 {} 的 inputs 引用了自身", step_id),
-                        });
-                    } else if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
-                        report.errors.push(ValidationError {
-                            code: "variable_ref_not_found".into(),
-                            message: format!(
-                                "步骤 {} 中引用了不存在的步骤: {}",
-                                step_id, prefix
-                            ),
-                        });
-                    }
-                }
+            if let Some((prefix, _)) = whole_string_ref(s) {
+                check_step_ref_prefix(&prefix, all_ids, step_id, report);
             }
         }
         Value::Array(arr) => {
@@ -586,17 +620,14 @@ fn check_output_ref(
             }
         }
         RefValue::Literal(lit) => {
-            if let Value::String(s) = lit {
-                if s.starts_with('{') && s.ends_with('}') {
-                    for (prefix, _path) in extract_refs(s) {
-                        if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
-                            report.errors.push(ValidationError {
-                                code: "output_ref_not_found".into(),
-                                message: format!("output 引用了不存在的步骤: {}", prefix),
-                            });
-                        }
-                    }
-                }
+            if let Value::String(s) = lit
+                && let Some((prefix, _)) = whole_string_ref(s)
+                && prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str())
+            {
+                report.errors.push(ValidationError {
+                    code: "output_ref_not_found".into(),
+                    message: format!("output 引用了不存在的步骤: {}", prefix),
+                });
             }
         }
     }
@@ -613,8 +644,19 @@ fn check_iterate_config(
             report.errors.push(ValidationError {
                 code: "invalid_iterate_config".into(),
                 message: format!(
-                    "步骤 {} 的 iterate.max_workers 不能为 0（省缺可移除该字段）",
+                    "步骤 {} 的 iterate.max_workers 不能为 0（缺省可移除该字段）",
                     step_id
+                ),
+            });
+        }
+        if let Some(w) = cfg.max_workers
+            && w > MAX_ITERATE_WORKERS
+        {
+            report.errors.push(ValidationError {
+                code: "invalid_iterate_config".into(),
+                message: format!(
+                    "步骤 {} 的 iterate.max_workers 超过上限 {}: {}",
+                    step_id, MAX_ITERATE_WORKERS, w
                 ),
             });
         }
@@ -624,7 +666,7 @@ fn check_iterate_config(
             report.errors.push(ValidationError {
                 code: "invalid_iterate_config".into(),
                 message: format!(
-                    "步骤 {} 的 iterate.batch.size 不能为 0（省缺可移除 batch 字段）",
+                    "步骤 {} 的 iterate.batch.size 不能为 0（缺省可移除 batch 字段）",
                     step_id
                 ),
             });
@@ -648,15 +690,13 @@ fn check_iterate_config(
     }
 }
 
+/// 只拒绝语法错误。eval 会真实执行代码，因此加 64MB 内存上限 + 2 秒
+/// 看门狗中断；运行时异常（ReferenceError 等）与中断一律视为语法无误放行。
 fn check_js_syntax(id: &StepId, code: &RefValue, report: &mut ValidationReport) {
     let source = match code {
         RefValue::Literal(serde_json::Value::String(s)) => s.as_str(),
-        RefValue::Ref(_) => return,
         _ => return,
     };
-    let script = format!(
-        "{source}\ntry {{ var __check__ = function(){{}}; }} catch(__e__) {{}}\n"
-    );
     let rt = match rquickjs::Runtime::new() {
         Ok(r) => r,
         Err(_) => {
@@ -667,6 +707,12 @@ fn check_js_syntax(id: &StepId, code: &RefValue, report: &mut ValidationReport) 
             return;
         }
     };
+    rt.set_memory_limit(64 * 1024 * 1024);
+    let interrupted = Arc::new(AtomicBool::new(false));
+    {
+        let flag = interrupted.clone();
+        rt.set_interrupt_handler(Some(Box::new(move || flag.load(Ordering::SeqCst))));
+    }
     let ctx = match rquickjs::Context::full(&rt) {
         Ok(c) => c,
         Err(_) => {
@@ -677,14 +723,45 @@ fn check_js_syntax(id: &StepId, code: &RefValue, report: &mut ValidationReport) 
             return;
         }
     };
-    ctx.with(|ctx| {
-        if let Err(e) = ctx.eval::<rquickjs::Value, _>(script.as_str()) {
-            report.errors.push(ValidationError {
-                code: "js_syntax_error".into(),
-                message: format!("步骤/规则 {} 的 JS 代码语法错误: {}", id, e),
-            });
+    let done = Arc::new(AtomicBool::new(false));
+    let watchdog = {
+        let interrupted = interrupted.clone();
+        let done = done.clone();
+        std::thread::spawn(move || {
+            for _ in 0..40 {
+                if done.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            interrupted.store(true, Ordering::SeqCst);
+        })
+    };
+    let syntax_err: Option<String> = ctx.with(|ctx| {
+        match ctx.eval::<rquickjs::Value, _>(source) {
+            Ok(_) => None,
+            Err(rquickjs::Error::Exception) => {
+                let ex = ctx.catch();
+                if let Some(obj) = ex.as_object() {
+                    let name = obj.get::<_, String>("name").unwrap_or_default();
+                    if name == "SyntaxError" {
+                        let message = obj.get::<_, String>("message").unwrap_or_default();
+                        return Some(format!("{name}: {message}"));
+                    }
+                }
+                None
+            }
+            Err(_) => None,
         }
     });
+    done.store(true, Ordering::SeqCst);
+    let _ = watchdog.join();
+    if let Some(msg) = syntax_err {
+        report.errors.push(ValidationError {
+            code: "js_syntax_error".into(),
+            message: format!("步骤/规则 {} 的 JS 代码语法错误: {}", id, msg),
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -751,7 +828,7 @@ mod tests {
 
     #[test]
     fn valid_pipeline_passes() {
-        let report = validate(&valid_def(), &ValidateOptions::default());
+        let report = validate(&valid_def());
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
     }
 
@@ -759,7 +836,7 @@ mod tests {
     fn empty_pipeline_name() {
         let mut def = valid_def();
         def.name = "".into();
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "empty_pipeline_name"));
     }
 
@@ -767,7 +844,7 @@ mod tests {
     fn no_steps() {
         let mut def = valid_def();
         def.steps.clear();
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "no_steps"));
     }
 
@@ -775,7 +852,7 @@ mod tests {
     fn empty_step_id() {
         let mut def = valid_def();
         def.steps[0].id = "".into();
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "empty_step_id"));
     }
 
@@ -783,7 +860,7 @@ mod tests {
     fn reserved_step_id_slots() {
         let mut def = valid_def();
         def.steps[0].id = "slots".into();
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "reserved_step_id"));
     }
 
@@ -791,7 +868,7 @@ mod tests {
     fn duplicate_step_id() {
         let mut def = valid_def();
         def.steps.push(def.steps[0].clone());
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "duplicate_step_id"));
     }
 
@@ -802,7 +879,7 @@ mod tests {
             name: "url".into(),
             schema: json!({"type": "number"}),
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "duplicate_slot_name"));
     }
 
@@ -810,7 +887,7 @@ mod tests {
     fn empty_slot_name() {
         let mut def = valid_def();
         def.slots[0].name = "".into();
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "empty_slot_name"));
     }
 
@@ -818,7 +895,7 @@ mod tests {
     fn after_self_ref() {
         let mut def = valid_def();
         def.steps[0].after = Some(vec!["fetch".into()]);
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "after_self_ref"));
     }
 
@@ -826,7 +903,7 @@ mod tests {
     fn after_duplicate_entry() {
         let mut def = valid_def();
         def.steps.push(step_noop("step_b", vec!["fetch", "fetch"]));
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "duplicate_after_entry"));
     }
 
@@ -834,7 +911,7 @@ mod tests {
     fn after_ref_not_found() {
         let mut def = valid_def();
         def.steps[0].after = Some(vec!["nonexistent".into()]);
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "after_ref_not_found"));
     }
 
@@ -842,7 +919,7 @@ mod tests {
     fn after_ref_found() {
         let mut def = valid_def();
         def.steps.push(step_noop("step_b", vec!["fetch"]));
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
     }
 
@@ -855,7 +932,7 @@ mod tests {
             headers: None,
             body: None,
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
     }
 
@@ -863,7 +940,7 @@ mod tests {
     fn output_ref_not_found() {
         let mut def = valid_def();
         def.output = var_ref("{nonexistent.output}");
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "output_ref_not_found"));
     }
 
@@ -884,7 +961,7 @@ mod tests {
             }),
             body: None,
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
     }
 
@@ -898,7 +975,7 @@ mod tests {
             headers: None,
             body: None,
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.is_ok());
     }
 
@@ -911,7 +988,7 @@ mod tests {
             max_workers: Some(0),
             batch: None,
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "invalid_iterate_config"));
     }
 
@@ -924,7 +1001,7 @@ mod tests {
             max_workers: None,
             batch: Some(BatchConfig { size: 0 }),
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "invalid_iterate_config"));
     }
 
@@ -937,7 +1014,7 @@ mod tests {
             max_workers: None,
             batch: Some(BatchConfig { size: 8 }),
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
     }
 
@@ -950,7 +1027,7 @@ mod tests {
             max_workers: Some(4),
             batch: None,
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
     }
 
@@ -958,7 +1035,7 @@ mod tests {
     fn json_schema_valid() {
         let mut def = valid_def();
         def.slots[0].schema = json!({"type": "string", "minLength": 1});
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.is_ok());
     }
 
@@ -969,7 +1046,7 @@ mod tests {
         def.steps[0].op = StepOp::Var(VarInputs {
             value: Some(literal(json!({ "Authorization": "{nonexistent.output}" }))),
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
     }
 
@@ -979,7 +1056,7 @@ mod tests {
         def.steps.push(def.steps[0].clone());
         def.steps[0].after = Some(vec!["ghost".into()]);
         def.output = var_ref("{ghost.output}");
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.len() >= 2);
     }
 
@@ -991,7 +1068,7 @@ mod tests {
             backoff: BackoffStrategy::default(),
             delay_ms: 1000,
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "invalid_retry_config"));
     }
 
@@ -1003,7 +1080,7 @@ mod tests {
             backoff: BackoffStrategy::default(),
             delay_ms: 1000,
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
     }
 
@@ -1013,7 +1090,7 @@ mod tests {
         def.steps[0].op = StepOp::Var(VarInputs {
             value: Some(literal(json!("prefix {nonexistent.output} suffix"))),
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.is_ok(), "embedded ref should not be flagged: {:?}", report.errors);
     }
 
@@ -1023,7 +1100,7 @@ mod tests {
         def.steps[0].op = StepOp::Var(VarInputs {
             value: Some(literal(json!("{nonexistent.output}"))),
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
     }
 
@@ -1031,7 +1108,7 @@ mod tests {
     fn embedded_ref_in_output_literal_not_flagged() {
         let mut def = valid_def();
         def.output = literal(json!("prefix {ghost.output} suffix"));
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.is_ok(), "embedded ref in output should not be flagged: {:?}", report.errors);
     }
 
@@ -1054,7 +1131,7 @@ mod tests {
         let mut def = valid_def();
         def.steps = vec![step_noop("a", vec!["b"]), step_noop("b", vec!["a"])];
         def.output = var_ref("{a.output}");
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "cycle_detected"));
     }
 
@@ -1063,7 +1140,7 @@ mod tests {
         let mut def = valid_def();
         def.steps = vec![step_var_ref("a", "{b.output}"), step_var_ref("b", "{a.output}")];
         def.output = var_ref("{a.output}");
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "cycle_detected"));
     }
 
@@ -1072,7 +1149,7 @@ mod tests {
         let mut def = valid_def();
         def.steps.push(step_var_ref("b", "{fetch.output}"));
         def.output = var_ref("{b.output}");
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(!report.errors.iter().any(|e| e.code == "cycle_detected"));
     }
 
@@ -1085,7 +1162,7 @@ mod tests {
             headers: None,
             body: None,
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "slot_not_found"));
     }
 
@@ -1098,7 +1175,7 @@ mod tests {
             max_workers: None,
             batch: None,
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "slot_not_found"));
     }
 
@@ -1111,7 +1188,7 @@ mod tests {
             headers: None,
             body: None,
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "self_reference"));
     }
 
@@ -1124,7 +1201,7 @@ mod tests {
             max_workers: None,
             batch: None,
         });
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "self_reference"));
     }
 
@@ -1132,7 +1209,7 @@ mod tests {
     fn invalid_pipeline_name_charset() {
         let mut def = valid_def();
         def.name = "bad/name?x".into();
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "invalid_name_charset"));
     }
 
@@ -1140,7 +1217,7 @@ mod tests {
     fn pipeline_name_with_dot_dash_underscore_accepted() {
         let mut def = valid_def();
         def.name = "my-pipe_v1.2".into();
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
     }
 
@@ -1149,7 +1226,192 @@ mod tests {
         let mut def = valid_def();
         def.steps[0].id = "bad.id".into();
         def.output = var_ref("{bad.output}");
-        let report = validate(&def, &ValidateOptions::default());
+        let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "invalid_name_charset"));
+    }
+
+    #[test]
+    fn slot_name_invalid_charset() {
+        let mut def = valid_def();
+        def.slots[0].name = "my.slot".into();
+        let report = validate(&def);
+        assert!(report.errors.iter().any(|e| e.code == "invalid_name_charset"));
+    }
+
+    #[test]
+    fn pipeline_name_all_dots_rejected() {
+        let mut def = valid_def();
+        def.name = "..".into();
+        let report = validate(&def);
+        assert!(report.errors.iter().any(|e| e.code == "invalid_pipeline_name"));
+    }
+
+    #[test]
+    fn iterate_max_workers_over_limit_rejected() {
+        let mut def = valid_def();
+        def.steps[0].iterate = Some(IterateConfig {
+            over: VariablePath::parse("{slots.url}").unwrap(),
+            as_name: "item".into(),
+            max_workers: Some(2048),
+            batch: None,
+        });
+        let report = validate(&def);
+        assert!(report.errors.iter().any(|e| e.code == "invalid_iterate_config"));
+    }
+
+    #[test]
+    fn filter_unknown_operator_rejected() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Filter(FilterInputs {
+            data: None,
+            operator: "like".into(),
+            field: None,
+            value: None,
+        });
+        let report = validate(&def);
+        assert!(report.errors.iter().any(|e| e.code == "invalid_operator_config"));
+    }
+
+    #[test]
+    fn filter_valid_operator_accepted() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Filter(FilterInputs {
+            data: None,
+            operator: "contains".into(),
+            field: None,
+            value: None,
+        });
+        let report = validate(&def);
+        assert!(!report.errors.iter().any(|e| e.code == "invalid_operator_config"));
+    }
+
+    #[test]
+    fn sort_unknown_order_rejected() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Sort(SortInputs {
+            data: None,
+            field: None,
+            order: "ascending".into(),
+        });
+        let report = validate(&def);
+        assert!(report.errors.iter().any(|e| e.code == "invalid_operator_config"));
+    }
+
+    #[test]
+    fn multi_key_object_with_ref_key_not_treated_as_ref() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Var(VarInputs {
+            value: Some(literal(json!({
+                "Ref": { "parts": ["ghost", "output"] },
+                "other": "plain"
+            }))),
+        });
+        let report = validate(&def);
+        assert!(
+            report.is_ok(),
+            "multi-key object containing a Ref key must not be treated as a ref tag: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn unparsable_ref_value_falls_through_to_sibling_check() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Var(VarInputs {
+            value: Some(literal(json!({
+                "Ref": 123,
+                "sibling": "{ghost.output}"
+            }))),
+        });
+        let report = validate(&def);
+        assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
+    }
+
+    #[test]
+    fn embedded_slot_ref_in_command_string_not_flagged() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Command(CommandInputs {
+            command: literal(json!(
+                "curl -H 'Authorization: Bearer {slots.token}' https://api.example.com"
+            )),
+            shell: None,
+            stdin: None,
+        });
+        let report = validate(&def);
+        assert!(
+            report.is_ok(),
+            "embedded {{slots.token}} in command string must stay literal: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn embedded_slot_ref_in_js_code_not_flagged() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Js(JsInputs {
+            code: literal(json!("function run(data) { return data + '{slots.token}'; }")),
+            data: None,
+        });
+        let report = validate(&def);
+        assert!(
+            report.is_ok(),
+            "embedded {{slots.token}} in js code must stay literal: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn multi_ref_whole_string_treated_as_literal() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Var(VarInputs {
+            value: Some(literal(json!("{a.output} {b.output}"))),
+        });
+        let report = validate(&def);
+        assert!(
+            report.is_ok(),
+            "whole string with multiple refs must be literal: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn js_runtime_error_passes_syntax_check() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Js(JsInputs {
+            code: literal(json!("nonexistent_function_call();")),
+            data: None,
+        });
+        let report = validate(&def);
+        assert!(
+            report.is_ok(),
+            "ReferenceError is a runtime error, not a syntax error: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn js_syntax_error_rejected() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Js(JsInputs {
+            code: literal(json!("function run( {")),
+            data: None,
+        });
+        let report = validate(&def);
+        assert!(report.errors.iter().any(|e| e.code == "js_syntax_error"));
+    }
+
+    #[test]
+    fn js_infinite_loop_check_terminates() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Js(JsInputs {
+            code: literal(json!("while(1){}")),
+            data: None,
+        });
+        let start = std::time::Instant::now();
+        let _ = validate(&def);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "syntax check on while(1){{}} must terminate via watchdog interrupt"
+        );
     }
 }

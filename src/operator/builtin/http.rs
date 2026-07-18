@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::http_client;
 use crate::operator::{Operator, OperatorError, OperatorSpec};
@@ -33,7 +33,12 @@ impl Operator for HttpOperator {
 
         http_client::block_private_ips(url).await?;
 
-        let mut req_builder = match method.to_uppercase().as_str() {
+        let method_upper = method.to_uppercase();
+        if matches!(method_upper.as_str(), "GET" | "DELETE") && !body_bytes.is_empty() {
+            warn!(method = %method_upper, "http 算子 GET/DELETE 请求的 body 被忽略");
+        }
+
+        let mut req_builder = match method_upper.as_str() {
             "GET" => client.get(url),
             "POST" => client.post(url).body(body_bytes),
             "PUT" => client.put(url).body(body_bytes),
@@ -43,8 +48,9 @@ impl Operator for HttpOperator {
 
         if let Some(headers) = inputs.get("headers").and_then(|v| v.as_object()) {
             for (k, v) in headers {
-                if let Some(val) = v.as_str() {
-                    req_builder = req_builder.header(k.as_str(), val);
+                match v.as_str() {
+                    Some(val) => req_builder = req_builder.header(k.as_str(), val),
+                    None => warn!(header = %k, "http 算子 header 值非字符串，已跳过"),
                 }
             }
         }
@@ -57,10 +63,8 @@ impl Operator for HttpOperator {
         })?;
 
         let status = resp.status().as_u16();
-        let body = resp.text().await
-            .map_err(|e| OperatorError::Runtime(format!("HTTP read body: {e}")))?;
-
-        http_client::check_body_size(body.len())?;
+        let body_bytes = http_client::read_body_limited(resp).await?;
+        let body = String::from_utf8_lossy(&body_bytes).into_owned();
 
         Ok(serde_json::json!({
             "status": status,

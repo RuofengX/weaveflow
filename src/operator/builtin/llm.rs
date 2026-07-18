@@ -10,7 +10,7 @@ pub struct LlmOperator;
 fn extract_images(inputs: &Value) -> (Vec<&str>, bool) {
     let mut found = false;
 
-    let images: Vec<&str> = match inputs.get("images_b64").or_else(|| inputs.get("image_base64")) {
+    let images: Vec<&str> = match inputs.get("images_b64") {
         Some(Value::String(s)) => { found = true; vec![s.as_str()] }
         Some(Value::Array(arr)) => {
             let imgs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
@@ -132,12 +132,8 @@ impl Operator for LlmOperator {
         })?;
 
         let status = resp.status();
-        let body_text = resp
-            .text()
-            .await
-            .map_err(|e| OperatorError::Runtime(format!("llm read response: {e}")))?;
-
-        http_client::check_body_size(body_text.len())?;
+        let body_bytes = http_client::read_body_limited(resp).await?;
+        let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
 
         if !status.is_success() {
             let preview = safe_truncate(&body_text, 500);

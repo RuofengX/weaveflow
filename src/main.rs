@@ -63,7 +63,7 @@ enum Commands {
         #[arg(short = 'i', value_parser = parse_key_val)]
         input: Vec<(String, String)>,
         /// Watch progress with TUI
-        #[arg(long)]
+        #[arg(long, conflicts_with = "text_output")]
         watch: bool,
         /// Plain text output (for CI/CD, agents)
         #[arg(long)]
@@ -190,40 +190,43 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
     Ok((k.to_string(), v.to_string()))
 }
 
-async fn daemon_log(addr: &str, live: bool) {
+async fn daemon_log(addr: &str, live: bool) -> Result<(), String> {
+    use std::io::Write;
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
-        .unwrap_or_default();
-    let mut offset = 0usize;
-    let host = addr
-        .strip_prefix("https://")
-        .or_else(|| addr.strip_prefix("http://"))
-        .unwrap_or(addr);
+        .map_err(|e| format!("构建 HTTP client 失败: {e}"))?;
+    let mut offset = 0u64;
+    let (scheme, host) = cli::client::parse_daemon_addr(addr);
 
     loop {
-        let url = format!("http://{host}/system/logs?offset={offset}");
+        let url = format!("{scheme}{host}/system/logs?offset={offset}");
         match client.get(&url).send().await {
             Ok(resp) => {
                 let new_offset_hdr = resp
                     .headers()
                     .get("X-Log-Offset")
                     .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<usize>().ok());
-                if let Ok(body) = resp.text().await {
-                    let new_offset = new_offset_hdr.unwrap_or(offset + body.len());
-                    if !body.is_empty() {
-                        print!("{body}");
+                    .and_then(|s| s.parse::<u64>().ok());
+                match resp.text().await {
+                    Ok(body) => {
+                        if !body.is_empty() {
+                            print!("{body}");
+                            let _ = std::io::stdout().flush();
+                        }
+                        if let Some(n) = new_offset_hdr {
+                            offset = n;
+                        }
                     }
-                    offset = new_offset;
+                    Err(e) => return Err(format!("daemon log: 读取响应失败: {e}")),
                 }
                 if !live {
-                    return;
+                    return Ok(());
                 }
             }
             Err(e) => {
-                eprintln!("daemon log: {e}");
-                return;
+                return Err(format!("daemon log: 连接失败: {e}"));
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -242,7 +245,7 @@ fn check_pipeline(file: &str) -> Result<(), String> {
         .map_err(|e| format!("读取文件 {file}: {e}"))?;
     let def = weave::dsl::parser::parse(&yaml)
         .map_err(|e| format!("YAML 解析失败: {e}"))?;
-    let report = weave::dsl::validator::validate(&def, &Default::default());
+    let report = weave::dsl::validator::validate(&def);
 
     if !report.errors.is_empty() {
         eprintln!("错误 ({} 项):", report.errors.len());
@@ -298,7 +301,7 @@ async fn main() {
             server::daemon::restart(&bind, max_concurrent_tasks, allow_remote).await;
         }
         Commands::Daemon(DaemonCmd::Log { live }) => {
-            daemon_log(daemon, live).await;
+            exit_on_err(daemon_log(daemon, live).await);
         }
         Commands::Pipeline(PipelineCmd::Apply { file, data }) => {
             exit_on_err(cli::client::pipeline_apply(daemon, file.as_deref(), data.as_deref()).await);

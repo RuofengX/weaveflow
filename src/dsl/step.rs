@@ -68,6 +68,7 @@ pub struct IterateConfig {
 
 /// 迭代批量配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BatchConfig {
     pub size: u32,
 }
