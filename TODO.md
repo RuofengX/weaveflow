@@ -80,6 +80,10 @@
 
 修复统计数据：**已修复 63 / 72（87.5%）**。P0 全部修复，P1 全部修复，P2 全部修复，P3 部分修复。
 
+> **2026-07-18 更新**：在 63/72 之上完成"复审修复 + 全仓二次审计修复"（三批改动，详见文末
+> 「2026-07-18 复审 + 二次审计修复记录」）。本轮新修复 **40+ 项**（含 1 项复审回归），
+> C6 鉴权与 L4/L5/L6/L10/L12/L13/L14 维持开放。本轮修复由模型 **kimi-for-coding/k3** 执行。
+
 | 优先级 | 提交 | 修复项数 | 状态 |
 |--------|------|----------|------|
 | P0 | `9824a90` + `e6214da` | C1-C8, H1(timeout), M8(env creds) | ✅ 8/8 |
@@ -218,9 +222,121 @@
 
 最终测试总数：**120 unit + 27 integration + 11 bin**，全部绿色。
 
+> 2026-07-18 复审 + 二次审计后：**169 lib tests + 28 个集成测试二进制 + 24 bin tests**（见下文测试增量）。
+
+---
+
+# 2026-07-18 复审 + 二次审计修复记录
+
+对 63/72 修复后代码的一轮**复审**（发现 1 项回归 + 若干实现瑕疵）与一轮**全仓二次审计**，
+共三批改动（复审批、validator/算子批、store/daemon/cli 批），全部已修复。本轮由模型 **kimi-for-coding/k3** 执行。
+
+## 复审问题修复（批次一）
+
+| 位置 | 问题 | 修法 | 状态 |
+|------|------|------|------|
+| `engine/iterate.rs:15` | **iterate 默认并发塌缩回归**：未设 `max_workers` 时退化为 1 | 新增 `effective_max_workers()`：显式值 `.max(1)`；缺省 = `available_parallelism()`（fallback 4） | ✅ |
+| `dsl/step_op.rs` + `dsl/raw.rs` | JS 算子 inputs 自带 `timeout` 字段，与 step 层 `timeout_sec` 双配置 | `JsInputs`/`RawJsInputs` 删除 timeout 字段；YAML 写 `timeout` 触发 deny_unknown_fields 报错 | ✅ |
+| `quickjs/runtime.rs` | step 层 timeout 只 drop future，`spawn_blocking` 线程内 `while(1){}` 仍占槽 | `InterruptGuard` drop-guard：`run_js` future 被 drop 时置位 `AtomicBool`，QuickJS `set_interrupt_handler` 协作中断，真取消 | ✅ |
+| `engine/step.rs:159` + `dsl/validator.rs:145` | step timeout 语义不完备 | `Duration::try_from_secs_f64`（NaN/Inf/溢出 → Config 错误）；validator 上限 365 天；超时 `warn!` 并映射 `OperatorError::Timeout`（按 retry 配置重试） | ✅ |
+| `engine/step.rs` | 失败路径 attempts 固定为 1，与事实不符 | retry 循环错误携带真实已尝试次数 `(err, attempt+1)` | ✅ |
+| `engine/step.rs:53` | 缓存命中 attempts 语义 | 缓存命中返回 `attempts = 0`、`cached = true` | ✅ |
+| `engine/step.rs:74,149` | 缓存写失败直接让 step 失败 | 降级为 `warn!`，继续执行不缓存 | ✅ |
+| `engine/runner.rs` + `iterate.rs` | iterate 步骤 Completed 状态双写 | `execute_iterate` 不再自行置 Completed，收口到 runner 统一设置（唯一出口） | ✅ |
+| `engine/dag.rs:208` | 字符串值内嵌 `{step.output}` 产生幽灵依赖 | `collect_string_refs` 只认整串 `"{...}"`（`VariablePath::parse`），内嵌永不构成依赖，与 parser/resolver/validator 对齐 | ✅ |
+| `vm/resolver.rs` | 缺字段静默 Null、数组索引语义摇摆 | 对象缺字段/非标量取段 → `warn!` + Null；数组段非数字/越界 → 硬错误（`resolve_nested` 同步支持数组下标） | ✅ |
+| `vm/resolver.rs:43` | noop（无 inputs）输出被 `{"type":"noop"}` 污染 | 顶层 op 信封：无 `inputs` 键时移除 `type` 后以剩余 map 为 inputs；iterate 注入的 `data` 得以存活 | ✅ |
+| `quickjs/runtime.rs:28` | JS 异常/正常值共用一个 JSON 通道易混淆 | `__weave_ok__` 信封：`{__weave_ok__: true, value}` / `{__weave_ok__: false, message, stack}` | ✅ |
+| `tracker/*` | tracker 状态清理 | `TaskStatus::Pending` 变体删除；`IterateProgress.errors/skip` 字段删除；`StepProgress.timeout_sec` 自 step 配置接线；`TaskTracker::subscribe` 公开方法删除（统一 `snapshot_and_subscribe`）；负时长一律 `.max(0)` | ✅ |
+| `vm/scope.rs:34` | env_values Mutex poison 后 panic | `unwrap_or_else(into_inner)` 恢复 | ✅ |
+
+## 二次审计新发现修复（批次二：validator / DSL / 算子）
+
+| 位置 | 问题 | 修法 | 状态 |
+|------|------|------|------|
+| `dsl/validator.rs:695` | `check_js_syntax` 真实 eval 用户代码，无资源限制 | 沙箱化：64MB `set_memory_limit` + 2s watchdog 线程置 interrupt；仅 `SyntaxError` 判为错误，运行时异常/中断放行 | ✅ |
+| `dsl/storage.rs:37` | TTL 单位字符非 ASCII 时 `split_at` 越界 panic | 按 `len_utf8()` 切分，多字节单位返回错误 | ✅ |
+| `dsl/validator.rs:509` + `dag.rs:179` + `resolver.rs:30` | 含 `"Ref"` 键的多键对象被误当 ref 标签 | 三方统一守卫 `map.len() == 1`；多键/不可解析按普通对象递归 | ✅ |
+| `dsl/validator.rs:522` | slot 收集把内嵌 `{slots.x}` 字符串误报为引用 | `whole_string_ref` 整串守卫（内嵌保持字面量） | ✅ |
+| `dsl/raw.rs` 等 | `deny_unknown_fields` 覆盖不全 | 补齐 `RawPipelineDef`/`RetryDef`/`BatchConfig`/`SlotDef`/`StorageDef` 等全部 Raw 结构 | ✅ |
+| `builtin/filter.rs` + `sort.rs` | `operator`/`order` 任意字符串运行时静默 | 枚举白名单（8 个 filter operator、asc/desc）：validator 报 `invalid_operator_config` + 运行时 Config 错误兜底 | ✅ |
+| `builtin/filter/sort/dedup/base64` | 缺 `data` 字段塌缩成 Null 继续跑 | 缺失或为 null → `OperatorError::Config` | ✅ |
+| `builtin/mod.rs:18` | `resolve_nested` 不支持数组下标 | 数字路径段按索引取 Array 元素（与 resolver 语义一致） | ✅ |
+| `builtin/command.rs:54` | 子进程泄漏 + 输出超限挂起 | `kill_on_drop(true)`；stdout/stderr 超 10MB 后继续 drain 丢弃（子进程不阻塞），输出带 `truncated: bool` | ✅ |
+| `builtin/http_client.rs` | SSRF 预检可绕过 | 全 DNS 地址逐一检查（非只查首个）；`redirect::Policy::none()` 禁 302 跳板；`read_body_limited` 流式 64MB 限长；`reqwest::Url` 解析防 userinfo 伪造 host | ✅ |
+| `builtin/file.rs:52` | 白名单解析毛刺 | `WEAVE_FILE_ALLOW_ROOTS` 空段过滤 + 计数 warn；过滤后为空 → 拒绝所有路径；未配置 → `Once` 单次 warn 后放行 | ✅ |
+| `operator/registry.rs` | 死代码（HashMap 注册表未被使用） | 删除文件，`get_builtin` 直接 match | ✅ |
+| `dsl/validator.rs`、`builtin/llm.rs`、`builtin/command.rs`、`error.rs` | 死代码 | 删 `ValidateOptions`、llm `image_base64` 别名、command `cmd` 别名、`From<serde_json::Error>` | ✅ |
+| `dsl/parser.rs:29` | raw 层错误被包装丢失上下文 | `ParseError::Raw(#[from] raw::ParseError)` 变体透传 | ✅ |
+| `dsl/validator.rs:395-414` | slot 名/步骤 id/pipeline 名字符集 | 白名单 `[A-Za-z0-9_.-]`（pipeline 可含 `.`）/`[A-Za-z0-9_-]`（slot、step id） | ✅ |
+| `dsl/validator.rs:62` | pipeline 名全为 `.` 时 URL 归一化后不可达 | 报 `invalid_pipeline_name` | ✅ |
+| `dsl/validator.rs:652` | `iterate.max_workers` 无上限 | ≤ 1024 | ✅ |
+| `builtin/sort.rs` + `filter.rs` | sort/filter 整数比较语义不一致 | 共用 `compare_json_numbers`（i64/u64 精确 cmp，混合回落 f64） | ✅ |
+| `builtin/dedup.rs:59` | 大量缺字段元素刷 warn | warn 聚合为单条 | ✅ |
+| `dsl/validator.rs:647,669` | 文案 | "省缺" → "缺省" | ✅ |
+
+## 二次审计新发现修复（批次三：store / daemon / cli）
+
+| 位置 | 问题 | 修法 | 状态 |
+|------|------|------|------|
+| `server/daemon.rs:704` | 首启数据目录不存在时启动失败 | `create_dir_all` | ✅ |
+| `dsl/storage.rs` + `daemon.rs:329` | `storage.result_ttl` 是死配置 | 接线：`result_ttl_secs()`（缺省 3600s，下限 60s）写入 TaskMeta；`snapshot_ttl` 字段删除（写了报 unknown field） | ✅ |
+| `store/mod.rs:54` | v0 数据库（无 ::vN 后缀 schema）打不开 | 自动迁移：旧文件备份 `.v0.bak`，PIPELINE/TASK 逐条拷贝（剥离 `snapshot_ttl`），SNAPSHOT/OBJECT/CACHE 丢弃 | ✅ |
+| `store/mod.rs:24` | 全局 `Mutex<Database>` 串行化所有 DB 访问 | 移除外层 Mutex；内部 `std::sync::RwLock<redb::Database>`，仅 `compact()` 取写锁 | ✅ |
+| `server/daemon.rs:780` | 无优雅停机 drain | 停机序列：`draining=true` → `/runs` 返回 503 → `wait_for_drain` 最多 30s（`SHUTDOWN_DRAIN_SECS`）→ 超时强制退出 | ✅ |
+| `server/daemon.rs:950` | pidfile 竞态 | spawn 成功后立即写 pidfile；失败分支仅当 pidfile 内容是本次 PID 才删除；健康检查失败杀子进程；`is_daemon_running` 校验 `/proc/<pid>/exe` 二进制身份 | ✅ |
+| `server/logging.rs` | 日志 offset 相对值，trim 后错乱 | 绝对 offset（自启动起总字节数）；`X-Log-Offset` / `X-Log-Truncated` 响应头 | ✅ |
+| `store/database.rs:179` | `count_snapshots`/`list_snapshot_keys` 全量反序列化 | `SnapshotHeader` header-only 视图（同表同类型名），跳过 output 拷贝 | ✅ |
+| `store/database.rs:131` | Snapshot serde_json 序列化 Vec<u8> 4 倍膨胀 | 自定义二进制布局 v2：`seq(8B BE) | step_id_len(4B BE) | step_id | output`，类型名 `weave::Snapshot::v2` | ✅ |
+| `store/object.rs` | `ObjectValue.ref_count` 字段从不维护 | 删除 | ✅ |
+| `cli/client.rs:35` | daemon URL 尾随 `/` 产生双斜杠 | `trim_end_matches('/')` | ✅ |
+| `cli/client.rs:210` | prune 全表扫描 + compact 超默认 30s 超时 | prune 请求单独放宽到 300s | ✅ |
+| `cli/client.rs:276` | WS connect 无超时 | 10s connect 超时 | ✅ |
+| `cli/client.rs:315` | 非 TTY 环境 TUI 无法渲染 | stdout 非 terminal 时自动回落 `--text-output` | ✅ |
+| `main.rs:66` | `--watch` 与 `--text-output` 可同时给 | clap `conflicts_with` 互斥 | ✅ |
+| `main.rs:193` | daemon log 不支持 https/输出不 flush/出错 0 退出 | `parse_daemon_addr` 统一 scheme；`stdout().flush()`；`exit_on_err` 非零退出 | ✅ |
+| `cli/watch.rs:247` | `" (parallel)"` 文案 | 修复拼接 | ✅ |
+| `server/daemon.rs:85` | PruneResponse 缺 snapshots 计数 | 新增 `snapshots_removed` 字段 | ✅ |
+| `server/daemon.rs` | `weave serve` 参数透传脆弱 | 严格解析（白名单重组 argv） | ✅ |
+| `build.rs` | 死代码 | 删除 | ✅ |
+| `cli/client.rs`、`store/mod.rs`、`server/daemon.rs` | 边界缺防护测试 | 新增 `encode_segment`、`mark_interrupted_tasks`、prune max_seq 防护（scan 后新 snapshot 不误删）、`wait_for_drain` 等测试 | ✅ |
+
+## 仍开放问题（本轮确认）
+
+| # | 问题 | 状态说明 |
+|---|------|---------|
+| C6 | bearer token 鉴权未实现 | 仅 `--allow-remote` 入口守卫；daemon 视为 localhost-only |
+| L4 | Value 深拷贝优化 | 维持跳过（需改 Scope 签名，架构改动大） |
+| L5 | 疑似模板静默变字面量 warning | 维持跳过（validator 重构） |
+| L6 | `{foo}` 无转义语法 | 维持跳过（DSL 设计决策） |
+| L10 | broadcast Lagged + parking_lot 迁移 | 维持跳过（与 H7/H8 正交） |
+| L12 | QuickJS 原生函数 expect panic | 维持跳过（依赖 rquickjs 升级） |
+| L13 | resolver 递归无深度限制 | 维持跳过（axum 2MB body limit 兜底） |
+| L14 | llm api_key/headers + URL 脱敏 | 维持跳过（功能缺口） |
+| — | `find_pipeline_by_name` 全表扫描 | **有意保留**：pipeline 数量小，不加索引 |
+| — | JS 无 `timeout_sec` 时死循环仍占 blocking 线程 | **设计决策**：超时只在 step 层，JS 算子不再自带超时 |
+| — | `yes` 类无限输出命令 | 跑到 step 超时为止（10MB 截断只保护内存，不终止进程；`kill_on_drop` 保证 step 超时取消时清理） |
+| — | `check_js_syntax` 仍会短暂执行用户代码 | 已沙箱（64MB 内存 + 2s 中断 + 无 fs/net），属可接受风险 |
+
+## 本轮测试增量
+
+v0 数据库迁移、Snapshot v2 二进制布局 roundtrip、`encode_segment`、`mark_interrupted_tasks`、
+prune max_seq 防护、js 语法沙箱（SyntaxError 拒绝 / ReferenceError 放行 / `while(1){}` watchdog 终止）、
+`effective_max_workers` 三态、command 10MB 截断、http_client split_url/SSRF、file 白名单空段、
+noop 输出信封（`tests/noop_output.rs`）、`wait_for_drain` 三态、pidfile 二进制校验、
+TTL 多字节单位、日志绝对 offset、`snapshot_and_subscribe` 原子性等。
+
+复审 + 二次审计后总数：**169 lib tests + 28 个集成测试二进制（51 个集成测试函数）+ 24 bin tests**，`cargo clippy --all-targets` 0 警告。
+
 ---
 
 ## 引擎层超时取消可行性分析（2026-07-17）
+
+> **已被 2026-07-18 复审批超越**：JS 算子 inputs 的 `timeout` 字段已删除，方案 A 不再适用。
+> 最终实现为"方案 B 的零成本变体"——step 层 `tokio::time::timeout` drop `run_js` future 时，
+> `InterruptGuard` drop-guard 置位 `AtomicBool` 触发 QuickJS `set_interrupt_handler` 协作中断
+> （`quickjs/runtime.rs`）。无需改 Operator trait，也无需向 inputs 注入不可序列化值。
+> 以下分析保留作历史参考。
 
 对 "算子不设超时，由上层控制层对超时算子进行取消" 的可行性研究。
 
