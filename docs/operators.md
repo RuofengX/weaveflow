@@ -11,7 +11,7 @@
 | `headers` | `{string: RefValue}` | — | — | 请求头键值对 |
 | `body` | RefValue | — | — | 请求体（字符串、对象或 `{...}` 引用；GET/DELETE 忽略 body） |
 
-共享 HTTP client 的固定行为：**不跟随 redirect**（3xx 响应原样返回 `status`/`body`，不会跳转）；SSRF 预检对 DNS 解析出的**全部** IP 逐一检查（169.254.169.254 始终拒绝，私网地址需 `WEAVEFLOW_HTTP_BLOCK_PRIVATE=1` 才拒绝）；响应体边读边累计，超过 **64MB** 即中断报错；总超时 60s、连接超时 10s。
+共享 HTTP client 的固定行为：**不跟随 redirect**（3xx 响应原样返回 `status`/`body`，不会跳转）；SSRF 预检对 DNS 解析出的**全部** IP 逐一检查（169.254.169.254 始终拒绝，私网地址需 `WEAVEFLOW_HTTP_BLOCK_PRIVATE=1` 才拒绝）；响应体边读边累计，超过 **64MB** 即中断报错。**client 无隐式总超时**——执行时长只由 step 根级 `timeout_sec` 控制（不配则可能永远等待）；仅保留 10s connect timeout 作为建连快速失败下限。
 
 ```yaml
 - id: fetch_data

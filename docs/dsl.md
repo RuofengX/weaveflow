@@ -129,15 +129,15 @@ iterate 模式注意：`as` 声明的元素变量名**当前不会被绑定**—
 
 ```yaml
   - id: custom_filter
-  type: js
-  inputs:
-    code: |
-      function run(data) {
-        return data.filter(function(o) {
-          return o.status === 'paid';
-        });
-      }
-    data: "{slots.orders}"
+    type: js
+    inputs:
+      code: |
+        function run(data) {
+          return data.filter(function(o) {
+            return o.status === 'paid';
+          });
+        }
+      data: "{slots.orders}"
 ```
 
 - `code` 字段包含 JS 源码

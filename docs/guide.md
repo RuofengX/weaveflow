@@ -1,7 +1,7 @@
-# weaveflow 完整使用文档
+# weaveflow 使用手册
 
 > YAML 声明式 DAG 批处理引擎：daemon + CLI + 内嵌 redb 存储 + QuickJS 沙箱。
-> 本文是面向使用者（含智能体）的完整手册。DSL 字段级细节见 [dsl.md](dsl.md)，算子字段见 [operators.md](operators.md)，架构决策见 [design.md](design.md)。
+> 本文是使用手册主入口。字段级细节：[dsl.md](dsl.md)（DSL）、[operators.md](operators.md)（算子）；编程调用：[api.md](api.md)（HTTP/WS）、[agent.md](agent.md)（Agent 集成）；部署边界：[security.md](security.md)；内部设计：[architecture.md](architecture.md)。
 
 ## 目录
 
@@ -10,8 +10,8 @@
 3. [CLI 完整参考](#cli-完整参考)
 4. [Daemon 生命周期](#daemon-生命周期)
 5. [Pipeline 与变量模型](#pipeline-与变量模型)
-6. [HTTP / WebSocket API](#http--websocket-api)
-7. [面向 Agent 的集成](#面向-agent-的集成)
+6. [HTTP / WebSocket API 速览](#http--websocket-api-速览)
+7. [面向 Agent 的集成速览](#面向-agent-的集成速览)
 8. [存储与数据目录](#存储与数据目录)
 9. [安全注意事项](#安全注意事项)
 10. [故障排查](#故障排查)
@@ -96,7 +96,7 @@ Daemon 侧 env：`WEAVEFLOW_BIND`、`WEAVEFLOW_MAX_CONCURRENT_TASKS`、`WEAVEFLO
 
 - **`pipeline apply`**：同名 pipeline 走 upsert（单个 redb 写事务内扫描+插入，并发 apply 不会双插）。
 - **`run -i`**：slot 注入。`-i k=v` 按字符串；`-i k=@file.json` 读取文件并解析为 JSON。pipeline 声明的 slot 有 JSON Schema 校验。
-- **`run --output json --text-output`**：JSONL 快照流（见 [面向 Agent 的集成](#面向-agent-的集成)）。
+- **`run --output json --text-output`**：JSONL 快照流（见 [面向 Agent 的集成速览](#面向-agent-的集成速览)）。
 - **`task snapshot`**：每个 step 完成时写一条 snapshot（seq 递增），`show` 可回放任意 step 的输出；二进制输出以 `[binary N bytes]` 占位显示。
 - **`system prune`**：清理过期任务/快照/孤儿对象/悬空缓存；响应含 `snapshots_removed`；运行中任务永不被清理。
 - **`check --output json`**：输出结构化校验报告（errors / warnings 列表，含 code），适合 CI 或 agent 预检。
@@ -123,9 +123,9 @@ Daemon 侧 env：`WEAVEFLOW_BIND`、`WEAVEFLOW_MAX_CONCURRENT_TASKS`、`WEAVEFLO
 - **缓存**：`cache_enabled = step.cache ?? 算子默认`；http/command/llm/file 默认不缓存；key = `SHA256(op_type + ":" + inputs_json)`；缓存命中报 `attempts=0, cached=true`。
 - **`{env.KEY}`** 的值会被记录并在持久化快照中脱敏。
 
-## HTTP / WebSocket API
+## HTTP / WebSocket API 速览
 
-Daemon 暴露的接口（无鉴权，见安全章节）：
+> 完整的请求/响应 schema、curl 示例与 TaskSnapshot 结构见 [api.md](api.md)。
 
 | Method | Path | 说明 |
 |--------|------|------|
@@ -139,52 +139,21 @@ Daemon 暴露的接口（无鉴权，见安全章节）：
 | POST | `/prune` | 清理（响应含 `snapshots_removed`） |
 | GET | `/system/operators` · `/system/logs` | 算子清单 / daemon 日志（绝对 offset） |
 
-错误映射：`BadRequest`/`Parse` → 400，`NotFound` → 404，`Unavailable`（draining）→ 503，其余 5xx 返回固定文案（不泄露内部细节）。
+错误：400 参数/解析/校验，404 不存在，503 draining，5xx 固定文案。终态 `TaskSnapshot.status.Completed` 直接携带 pipeline 最终结果。
 
-### TaskSnapshot 结构（WS 推送与 JSONL 流的载荷）
+## 面向 Agent 的集成速览
 
-```json
-{
-  "task_id": "...",
-  "pipeline_name": "etl_demo",
-  "status": { "Running": {...} } ,
-  "layers": [{"index": 0, "step_ids": ["fetch"]}],
-  "steps": [{"step_id": "fetch", "timeout_sec": 60.0, "state": "Pending"}],
-  "started_at": "...", "completed_at": null, "total_duration_ms": null
-}
-```
-
-- `status`：`Running(progress)` / `Completed(output_value)` / `Failed(error_string)`。
-- `steps[].state`：`Pending` / `Skipped` / `Running{started_at,attempts}` / `Iterating{started_at,progress}` / `Completed{...}` / `Failed{...}`。
-- `Completed` 变体直接携带 pipeline 的最终 output——终态快照即为结果。
-
-## 面向 Agent 的集成
-
-推荐模式（全部单行 JSON，易于 jq/程序解析）：
+> 完整模式、排错顺序与写 YAML 的常见坑见 [agent.md](agent.md)。
 
 ```bash
-# 预检（无需 daemon）
-weaveflow check -f p.yml --output json
-
-# 注册 + 运行 + 观测（JSONL：每行一个 TaskSnapshot，最后一行即终态含结果）
-weaveflow pipeline apply -f p.yml --output json
-weaveflow run p -i k=v --text-output --output json | tee run.jsonl
-
-# 终态判断：最后一行 status 为 Completed → 结果是 status.Completed；
-#          Failed → 退出码 1，错误在 status.Failed
-tail -1 run.jsonl | jq '.status'
-
-# 事后回放某个 step 的输出
-weaveflow task snapshot list <task_id> --output json
-weaveflow task snapshot show <task_id> 3 --output json
+weaveflow check -f p.yml --output json                       # 预检（无需 daemon）
+weaveflow pipeline apply -f p.yml --output json              # 注册
+weaveflow run p -i k=v --text-output --output json           # JSONL 快照流
+#   每行一个 TaskSnapshot，最后一行 status.Completed 即结果；Failed → 退出码 1
+weaveflow task snapshot show <task_id> <seq> --output json   # 回放某 step 输出
 ```
 
-要点：
-
-- **非 TTY 自动回退**：管道/重定向下 `run` 自动走 `--text-output`，不会卡在 TUI。
-- **退出码**：任务 Failed → exit 1；其余 CLI 错误也非 0。
-- **无 daemon 场景**：`check` 完全本地；集成测试模式（`tests/common/mod.rs::run_yaml`）证明解析→校验→执行可以 in-process 完成。
-- 直接走 HTTP API 时：POST `/runs` 拿 `task_id` → 连 WS `/runs/:task_id/ws` 收推送（或轮询 GET `/runs/:task_id`）→ `status.Completed` 取结果；需要中间步骤输出时查 `/runs/:task_id/snapshots/:seq`。
+要点：全程 `--output json`（单行紧凑，jq 友好）；非 TTY 自动回退 `--text-output`，不会卡 TUI；`run` 退出码即成败。
 
 ## 存储与数据目录
 
@@ -195,12 +164,11 @@ weaveflow task snapshot show <task_id> 3 --output json
 
 ## 安全注意事项
 
-- **所有端点无鉴权**。`--allow-remote` 只是允许绑定非 loopback 地址，不是鉴权——绑定 `0.0.0.0` 等于未授权 RCE（`command`/`file` 算子）。localhost 下也存在浏览器 CSRF 风险（simple POST 无 preflight 即可建 pipeline 并运行）。**daemon 只应在 localhost 使用。**
-- `command`：`sh -c` + `env_clear` + 最小环境白名单（PATH/HOME/LANG/LC_ALL/TZ），`kill_on_drop`，stdout/stderr 各 10MB 截断。
-- `file`：canonicalize 后按 `WEAVEFLOW_FILE_ALLOW_ROOTS`（冒号分隔）白名单校验；未配置则放行并打一次 warn。
-- HTTP 共享 client：不跟随 redirect；全 DNS 结果 SSRF 检查（169.254.169.254 始终拒绝；`WEAVEFLOW_HTTP_BLOCK_PRIVATE=1` 时私网/0.0.0.0/CGNAT/198.18 也拒绝）；64MB 流式响应上限；无隐式总超时。已知残余：DNS rebinding TOCTOU。
-- `js`：QuickJS 沙箱，无 fs/net，256MB 内存 + 1MB 栈限制；`timeout_sec` 可真中断 `while(1){}`。**不给 js step 配 `timeout_sec`，死循环会永久占用一个 blocking 线程**。
-- `{env.KEY}` 注入的密钥会在持久化快照中脱敏。
+> 完整边界与加固清单见 [security.md](security.md)，这里只列最关键的三条。
+
+- **所有端点无鉴权**：绑定 `0.0.0.0` 等于未授权 RCE（`command`/`file` 算子）；localhost 下也有浏览器 CSRF 风险。**daemon 只应在 localhost 使用。**
+- `command` 等价于 shell、`file` 可读本地文件——能提交任务的人等价于有代码执行权，这是设计前提。
+- 密钥走 `{env.KEY}` 引用（持久化快照会脱敏），不要写死在 YAML 或 slot 值里。
 
 ## 故障排查
 
