@@ -9,6 +9,10 @@ use tracing::debug;
 const FILTER_OPERATORS: [&str; 8] = ["eq", "ne", "gt", "gte", "lt", "lte", "in", "contains"];
 const SORT_ORDERS: [&str; 2] = ["asc", "desc"];
 const MAX_ITERATE_WORKERS: u32 = 1024;
+const MAX_RETRY_ATTEMPTS: u32 = 100;
+const MAX_RETRY_DELAY_MS: u64 = 3_600_000;
+const BASE64_MODES: [&str; 2] = ["encode", "decode"];
+const HTTP_METHODS: [&str; 4] = ["GET", "POST", "PUT", "DELETE"];
 
 // ---------------------------------------------------------------------------
 // 校验报告
@@ -132,16 +136,35 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
         {
             let op_val =
                 serde_json::to_value(&step.op).unwrap_or(Value::Null);
-            check_ref_in_json(&op_val, &all_step_ids, &step.id, &mut report);
+            let as_name = step.iterate.as_ref().map(|c| c.as_name.as_str());
+            check_ref_in_json(&op_val, &all_step_ids, &step.id, as_name, &mut report);
         }
         check_iterate_config(step.iterate.as_ref(), &step.id, &all_step_ids, &mut report);
-        if let Some(ref retry) = step.retry
-            && retry.max_attempts == 0 {
+        if let Some(ref retry) = step.retry {
+            if retry.max_attempts == 0 {
                 report.errors.push(ValidationError {
                     code: "invalid_retry_config".into(),
                     message: format!("步骤 {} 的 retry.max_attempts 不能为 0", step.id),
                 });
+            } else if retry.max_attempts > MAX_RETRY_ATTEMPTS {
+                report.errors.push(ValidationError {
+                    code: "invalid_retry_config".into(),
+                    message: format!(
+                        "步骤 {} 的 retry.max_attempts 超过上限 {}: {}",
+                        step.id, MAX_RETRY_ATTEMPTS, retry.max_attempts
+                    ),
+                });
             }
+            if retry.delay_ms > MAX_RETRY_DELAY_MS {
+                report.errors.push(ValidationError {
+                    code: "invalid_retry_config".into(),
+                    message: format!(
+                        "步骤 {} 的 retry.delay_ms 超过上限 {}: {}",
+                        step.id, MAX_RETRY_DELAY_MS, retry.delay_ms
+                    ),
+                });
+            }
+        }
         if let Some(t) = step.timeout_sec {
             if !t.is_finite() || t <= 0.0 {
                 report.errors.push(ValidationError {
@@ -187,6 +210,54 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
                         ),
                     });
                 }
+            _ => {}
+        }
+
+        // base64 mode / http method / llm temperature 校验
+        match &step.op {
+            StepOp::Base64(inputs) => {
+                if let Some(ref mode) = inputs.mode
+                    && !BASE64_MODES.contains(&mode.as_str())
+                {
+                    report.errors.push(ValidationError {
+                        code: "invalid_operator_config".into(),
+                        message: format!(
+                            "步骤 {} 的 base64.mode 非法: {}（可选: {}）",
+                            step.id,
+                            mode,
+                            BASE64_MODES.join("/")
+                        ),
+                    });
+                }
+            }
+            StepOp::Http(inputs) => {
+                if let Some(ref method) = inputs.method
+                    && !HTTP_METHODS.contains(&method.to_uppercase().as_str())
+                {
+                    report.errors.push(ValidationError {
+                        code: "invalid_operator_config".into(),
+                        message: format!(
+                            "步骤 {} 的 http.method 非法: {}（可选: {}）",
+                            step.id,
+                            method,
+                            HTTP_METHODS.join("/")
+                        ),
+                    });
+                }
+            }
+            StepOp::Llm(inputs) => {
+                if let Some(t) = inputs.temperature
+                    && !t.is_finite()
+                {
+                    report.errors.push(ValidationError {
+                        code: "invalid_operator_config".into(),
+                        message: format!(
+                            "步骤 {} 的 llm.temperature 必须是有限数值: {}",
+                            step.id, t
+                        ),
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -468,14 +539,20 @@ fn collect_slots_used(def: &PipelineDef) -> HashSet<String> {
     for step in &def.steps {
         let op_val = serde_json::to_value(&step.op).unwrap_or(Value::Null);
         for (prefix, rest) in refs_in_json(&op_val) {
-            if prefix == "slots" && !rest.is_empty() {
-                set.insert(rest);
+            if prefix == "slots"
+                && let Some(name) = rest.split('.').next()
+                && !name.is_empty()
+            {
+                set.insert(name.to_string());
             }
         }
     }
     for (prefix, rest) in output_refs(&def.output) {
-        if prefix == "slots" && !rest.is_empty() {
-            set.insert(rest);
+        if prefix == "slots"
+            && let Some(name) = rest.split('.').next()
+            && !name.is_empty()
+        {
+            set.insert(name.to_string());
         }
     }
     set
@@ -517,15 +594,6 @@ fn parse_ref_tag(map: &serde_json::Map<String, Value>) -> Option<VariablePath> {
     Some(path)
 }
 
-/// 与 parser/resolver 的约定一致：只有整串是单个 `{...}` 才算引用；
-/// 内嵌 `{...}` 或 `{a.output} {b.output}` 这类整串多 ref 均为字面量。
-fn whole_string_ref(s: &str) -> Option<(String, String)> {
-    let path = VariablePath::parse(s)?;
-    let prefix = path.parts[0].clone();
-    let rest = path.parts[1..].join(".");
-    Some((prefix, rest))
-}
-
 fn refs_in_json(val: &Value) -> Vec<(String, String)> {
     match val {
         Value::Object(map) => {
@@ -540,7 +608,6 @@ fn refs_in_json(val: &Value) -> Vec<(String, String)> {
             }
             all
         }
-        Value::String(s) => whole_string_ref(s).into_iter().collect(),
         Value::Array(arr) => {
             let mut all = Vec::new();
             for v in arr {
@@ -548,6 +615,7 @@ fn refs_in_json(val: &Value) -> Vec<(String, String)> {
             }
             all
         }
+        // 裸字符串不构成引用（与 resolver/dag 一致）
         _ => vec![],
     }
 }
@@ -556,8 +624,14 @@ fn check_step_ref_prefix(
     prefix: &str,
     all_ids: &HashSet<StepId>,
     step_id: &StepId,
+    as_name: Option<&str>,
     report: &mut ValidationReport,
 ) {
+    // iterate 的 as_name 前缀在运行时透传为字面量（当前元素经 "data" 键注入），
+    // 不参与步骤引用校验。
+    if Some(prefix) == as_name {
+        return;
+    }
     if prefix == step_id.0 {
         report.errors.push(ValidationError {
             code: "self_reference".into(),
@@ -578,28 +652,25 @@ fn check_ref_in_json(
     val: &Value,
     all_ids: &HashSet<StepId>,
     step_id: &StepId,
+    as_name: Option<&str>,
     report: &mut ValidationReport,
 ) {
     match val {
         Value::Object(map) => {
             if let Some(path) = parse_ref_tag(map) {
-                check_step_ref_prefix(&path.parts[0], all_ids, step_id, report);
+                check_step_ref_prefix(&path.parts[0], all_ids, step_id, as_name, report);
             } else {
                 for v in map.values() {
-                    check_ref_in_json(v, all_ids, step_id, report);
+                    check_ref_in_json(v, all_ids, step_id, as_name, report);
                 }
-            }
-        }
-        Value::String(s) => {
-            if let Some((prefix, _)) = whole_string_ref(s) {
-                check_step_ref_prefix(&prefix, all_ids, step_id, report);
             }
         }
         Value::Array(arr) => {
             for v in arr {
-                check_ref_in_json(v, all_ids, step_id, report);
+                check_ref_in_json(v, all_ids, step_id, as_name, report);
             }
         }
+        // 裸字符串只可能来自 String 类型字段，resolver 从不解析它们 —— 不校验。
         _ => {}
     }
 }
@@ -620,14 +691,13 @@ fn check_output_ref(
             }
         }
         RefValue::Literal(lit) => {
-            if let Value::String(s) = lit
-                && let Some((prefix, _)) = whole_string_ref(s)
-                && prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str())
-            {
-                report.errors.push(ValidationError {
-                    code: "output_ref_not_found".into(),
-                    message: format!("output 引用了不存在的步骤: {}", prefix),
-                });
+            for (prefix, _) in refs_in_json(lit) {
+                if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
+                    report.errors.push(ValidationError {
+                        code: "output_ref_not_found".into(),
+                        message: format!("output 引用了不存在的步骤: {}", prefix),
+                    });
+                }
             }
         }
     }
@@ -640,6 +710,42 @@ fn check_iterate_config(
     report: &mut ValidationReport,
 ) {
     if let Some(cfg) = cfg {
+        // as_name 校验：首段等于 as_name 的 ref 在运行时被透传为字面量，
+        // 与保留前缀或步骤 id 冲突会静默劫持对应引用，必须拒绝。
+        if cfg.as_name.is_empty() {
+            report.errors.push(ValidationError {
+                code: "invalid_iterate_config".into(),
+                message: format!("步骤 {} 的 iterate.as 不能为空", step_id),
+            });
+        } else {
+            if !cfg.as_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                report.errors.push(ValidationError {
+                    code: "invalid_iterate_config".into(),
+                    message: format!(
+                        "步骤 {} 的 iterate.as 含非法字符（仅允许 [A-Za-z0-9_]）: {}",
+                        step_id, cfg.as_name
+                    ),
+                });
+            }
+            if cfg.as_name == "slots" || cfg.as_name == "env" {
+                report.errors.push(ValidationError {
+                    code: "invalid_iterate_config".into(),
+                    message: format!(
+                        "步骤 {} 的 iterate.as 不能使用保留前缀: {}",
+                        step_id, cfg.as_name
+                    ),
+                });
+            }
+            if all_step_ids.contains(cfg.as_name.as_str()) {
+                report.errors.push(ValidationError {
+                    code: "invalid_iterate_config".into(),
+                    message: format!(
+                        "步骤 {} 的 iterate.as 与步骤 id 冲突: {}",
+                        step_id, cfg.as_name
+                    ),
+                });
+            }
+        }
         if cfg.max_workers == Some(0) {
             report.errors.push(ValidationError {
                 code: "invalid_iterate_config".into(),
@@ -1006,6 +1112,117 @@ mod tests {
     }
 
     #[test]
+    fn iterate_as_name_reserved_prefix_rejected() {
+        for reserved in ["slots", "env"] {
+            let mut def = valid_def();
+            def.steps[0].iterate = Some(IterateConfig {
+                over: VariablePath::parse("{slots.url}").unwrap(),
+                as_name: reserved.into(),
+                max_workers: None,
+                batch: None,
+            });
+            let report = validate(&def);
+            assert!(
+                report.errors.iter().any(|e| e.code == "invalid_iterate_config"),
+                "as_name '{reserved}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn iterate_as_name_step_id_conflict_rejected() {
+        let mut def = valid_def();
+        def.steps[0].iterate = Some(IterateConfig {
+            over: VariablePath::parse("{slots.url}").unwrap(),
+            as_name: "fetch".into(),
+            max_workers: None,
+            batch: None,
+        });
+        let report = validate(&def);
+        assert!(report.errors.iter().any(|e| e.code == "invalid_iterate_config"));
+    }
+
+    #[test]
+    fn iterate_as_name_ref_passthrough_allowed() {
+        // {item.xxx}（item 为本步骤 iterate.as）在运行时透传为字面量，
+        // validator 不得误报 variable_ref_not_found。
+        let mut def = valid_def();
+        def.steps[0].iterate = Some(IterateConfig {
+            over: VariablePath::parse("{slots.url}").unwrap(),
+            as_name: "item".into(),
+            max_workers: None,
+            batch: None,
+        });
+        def.steps[0].op = StepOp::Var(VarInputs {
+            value: Some(var_ref("{item.name}")),
+        });
+        let report = validate(&def);
+        assert!(
+            !report.errors.iter().any(|e| e.code == "variable_ref_not_found"),
+            "as_name ref must not be flagged: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn retry_bounds_enforced() {
+        let mut def = valid_def();
+        def.steps[0].retry = Some(RetryDef {
+            max_attempts: 101,
+            backoff: BackoffStrategy::default(),
+            delay_ms: 1000,
+        });
+        let report = validate(&def);
+        assert!(report.errors.iter().any(|e| e.code == "invalid_retry_config"));
+
+        let mut def = valid_def();
+        def.steps[0].retry = Some(RetryDef {
+            max_attempts: 3,
+            backoff: BackoffStrategy::default(),
+            delay_ms: u64::MAX,
+        });
+        let report = validate(&def);
+        assert!(report.errors.iter().any(|e| e.code == "invalid_retry_config"));
+    }
+
+    #[test]
+    fn base64_mode_whitelist() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Base64(Base64Inputs {
+            data: Some(literal(json!("x"))),
+            mode: Some("rot13".into()),
+        });
+        let report = validate(&def);
+        assert!(report.errors.iter().any(|e| e.code == "invalid_operator_config"));
+
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Base64(Base64Inputs {
+            data: Some(literal(json!("x"))),
+            mode: Some("decode".into()),
+        });
+        let report = validate(&def);
+        assert!(report.is_ok(), "expected no errors: {:?}", report.errors);
+    }
+
+    #[test]
+    fn llm_temperature_must_be_finite() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Llm(LlmInputs {
+            url: var_ref("{slots.url}"),
+            model: "m".into(),
+            prompt: literal(json!("hi")),
+            system: None,
+            images_b64: None,
+            image_type: None,
+            max_tokens: 100,
+            temperature: Some(f64::NAN),
+            skip_vision_check: None,
+        });
+        let report = validate(&def);
+        assert!(report.errors.iter().any(|e| e.code == "invalid_operator_config"));
+    }
+
+    #[test]
     fn iterate_batch_size_nonzero_accepted() {
         let mut def = valid_def();
         def.steps[0].iterate = Some(IterateConfig {
@@ -1042,9 +1259,11 @@ mod tests {
     #[test]
     fn nested_ref_in_object() {
         let mut def = valid_def();
-        // Use VarOutput with a literal object containing a template string inside
+        // Literal 负载中的内联 ref 标签（raw.rs 会把整串 "{...}" 转成该形式）
         def.steps[0].op = StepOp::Var(VarInputs {
-            value: Some(literal(json!({ "Authorization": "{nonexistent.output}" }))),
+            value: Some(literal(
+                json!({ "Authorization": { "Ref": { "parts": ["nonexistent", "output"] } } }),
+            )),
         });
         let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
@@ -1095,13 +1314,21 @@ mod tests {
     }
 
     #[test]
-    fn whole_string_ref_still_flagged() {
+    fn whole_string_ref_inside_literal_not_flagged() {
+        // RefValue::Literal 负载中的整串 "{...}" 在运行时按字面量透传
+        // （裸字符串只在 String 字段或 Literal 负载中出现，resolver 均不解析），
+        // 因此 validator 也不应报错。真实 YAML 中的整串 "{...}" 会被 raw.rs
+        // 转成 RefValue::Ref，走另一条校验路径。
         let mut def = valid_def();
         def.steps[0].op = StepOp::Var(VarInputs {
             value: Some(literal(json!("{nonexistent.output}"))),
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
+        assert!(
+            !report.errors.iter().any(|e| e.code == "variable_ref_not_found"),
+            "literal string must not be flagged: {:?}",
+            report.errors
+        );
     }
 
     #[test]
@@ -1320,7 +1547,7 @@ mod tests {
         def.steps[0].op = StepOp::Var(VarInputs {
             value: Some(literal(json!({
                 "Ref": 123,
-                "sibling": "{ghost.output}"
+                "sibling": { "Ref": { "parts": ["ghost", "output"] } }
             }))),
         });
         let report = validate(&def);

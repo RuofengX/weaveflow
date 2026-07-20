@@ -177,12 +177,19 @@ fn collect_refs(
     match val {
         serde_json::Value::Object(map) => {
             if map.len() == 1 && map.contains_key("Ref") {
-                if let Some(path_val) = map.get("Ref")
-                    && let Ok(path) = serde_json::from_value::<VariablePath>(path_val.clone())
-                    && let Some(first) = path.parts.first()
-                        && known_steps.contains(first.as_str()) {
+                let path_val = &map["Ref"];
+                match serde_json::from_value::<VariablePath>(path_val.clone()) {
+                    Ok(path) => {
+                        if let Some(first) = path.parts.first()
+                            && known_steps.contains(first.as_str())
+                        {
                             results.push(StepId::from(first.clone()));
                         }
+                    }
+                    // 用户数据恰好是单键 "Ref" 对象但不是合法引用标签：
+                    // 按普通对象继续递归（与 validator/resolver 的回退行为一致）。
+                    Err(_) => collect_refs(path_val, results, known_steps),
+                }
             } else if map.len() == 1 && map.contains_key("Literal") {
                 if let Some(lit) = map.get("Literal") {
                     collect_refs(lit, results, known_steps);
@@ -193,37 +200,21 @@ fn collect_refs(
                 }
             }
         }
-        serde_json::Value::String(_s) => {
-            collect_string_refs(val, results, known_steps);
-        }
         serde_json::Value::Array(arr) => {
             for v in arr {
                 collect_refs(v, results, known_steps);
             }
         }
+        // 裸字符串只可能来自 String 类型字段（method/field/mode 等），
+        // resolver 从不解析它们 —— 不构成依赖，与 resolver 保持一致。
         _ => {}
-    }
-}
-
-fn collect_string_refs(
-    val: &serde_json::Value,
-    results: &mut Vec<StepId>,
-    known_steps: &HashSet<StepId>,
-) {
-    let Some(s) = val.as_str() else { return };
-    // 与 parser/resolver/validator 的约定一致：只有整串 "{...}" 才是 ref，
-    // 内嵌在长字符串中的 {...} 永不插值，不构成依赖。
-    if let Some(var_ref) = VariablePath::parse(s)
-        && let Some(first) = var_ref.parts.first()
-        && known_steps.contains(first.as_str())
-    {
-        results.push(StepId::from(first.clone()));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dsl::step_op::{FilterInputs, VarInputs};
     use crate::dsl::*;
 
     fn make_pipeline(steps: Vec<StepDef>) -> PipelineDef {
@@ -251,6 +242,47 @@ mod tests {
 
     fn sid(s: &str) -> StepId {
         StepId::from(s)
+    }
+
+    #[test]
+    fn string_field_with_brace_pattern_is_not_a_dep() {
+        // String 类型字段（如 filter.field）中的整串 "{...}" 是字面量：
+        // resolver 不解析，DAG 也不得据此建边（否则两个互相 "{x.output}"
+        // 的 String 字段会造成 cycle 假阳性）。
+        let mut s1 = step("a", vec![]);
+        s1.op = StepOp::Filter(FilterInputs {
+            data: None,
+            operator: "eq".into(),
+            field: Some("{b.output}".into()),
+            value: None,
+        });
+        let mut s2 = step("b", vec![]);
+        s2.op = StepOp::Filter(FilterInputs {
+            data: None,
+            operator: "eq".into(),
+            field: Some("{a.output}".into()),
+            value: None,
+        });
+        let p = make_pipeline(vec![s1, s2]);
+        let dag = Dag::from_pipeline(&p).expect("no cycle from literal String fields");
+        assert!(dag.predecessors(&sid("a")).unwrap().is_empty());
+        assert!(dag.predecessors(&sid("b")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unparsable_ref_tag_falls_back_to_recursion() {
+        // 单键 "Ref" 用户数据（值不可解析为 VariablePath）按普通对象递归，
+        // 其中嵌套的合法 ref 标签仍应被发现。
+        let mut s1 = step("a", vec![]);
+        s1.op = StepOp::Var(VarInputs {
+            value: Some(RefValue::Literal(serde_json::json!({
+                "Ref": { "nested": { "Ref": { "parts": ["b", "output"] } } }
+            }))),
+        });
+        let s2 = step("b", vec![]);
+        let p = make_pipeline(vec![s1, s2]);
+        let dag = Dag::from_pipeline(&p).unwrap();
+        assert_eq!(dag.predecessors(&sid("a")).unwrap(), &[sid("b")]);
     }
 
     #[test]

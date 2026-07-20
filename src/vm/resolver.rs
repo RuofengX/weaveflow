@@ -16,7 +16,7 @@ pub fn resolve_inputs(
     let op_value = serde_json::to_value(&step.op)
         .map_err(|e| WeaveError::Internal(format!("step op serialize: {e}")))?;
 
-    resolve_value_tree(scope, &op_value, as_name, true)
+    resolve_value_tree(scope, &op_value, as_name, true, false)
 }
 
 fn resolve_value_tree(
@@ -24,56 +24,77 @@ fn resolve_value_tree(
     val: &Value,
     as_name: Option<&str>,
     is_top: bool,
+    in_literal: bool,
 ) -> WeaveResult<Value> {
     match val {
         Value::Object(map) => {
             if map.len() == 1 && map.contains_key("Ref") {
-                let path: VariablePath = serde_json::from_value(map["Ref"].clone())
-                    .map_err(|e| WeaveError::Internal(format!("ref parse: {e}")))?;
-                if let Some(as_name) = as_name
-                    && path.parts.first().map(|p| p.as_str()) == Some(as_name)
-                {
-                    return Ok(Value::String(format!("{{{}}}", path.parts.join("."))));
+                let parsed = serde_json::from_value::<VariablePath>(map["Ref"].clone());
+                match parsed {
+                    Ok(path) if !path.parts.is_empty() => {
+                        if let Some(as_name) = as_name
+                            && path.parts.first().map(|p| p.as_str()) == Some(as_name)
+                        {
+                            return Ok(Value::String(format!("{{{}}}", path.parts.join("."))));
+                        }
+                        let value = resolve_ref(scope, &path)?;
+                        Ok((*value).clone())
+                    }
+                    // 用户数据恰好是单键 "Ref" 对象但不是合法引用标签：
+                    // 按普通对象递归（与 validator/dag 的回退行为一致）。
+                    _ => resolve_plain_map(scope, map, as_name, in_literal),
                 }
-                let value = resolve_ref(scope, &path)?;
-                Ok((*value).clone())
-            } else if map.len() == 1 && map.contains_key("Literal") {
-                let lit = &map["Literal"];
-                resolve_value_tree(scope, lit, as_name, false)
+            } else if !in_literal && map.len() == 1 && map.contains_key("Literal") {
+                // RefValue::Literal 序列化标签只出现在算子字段位置；
+                // Literal 负载内部的单键 "Literal" 对象一律视为用户数据。
+                resolve_value_tree(scope, &map["Literal"], as_name, false, true)
             } else if is_top {
                 // 顶层 op 信封：有 "inputs" 键取其值；否则（如 noop）移除 "type"
                 // 键后以剩余 map 作为 inputs，iterate 注入的 "data" 得以存活。
                 if let Some(inputs_val) = map.get("inputs") {
-                    resolve_value_tree(scope, inputs_val, as_name, false)
+                    resolve_value_tree(scope, inputs_val, as_name, false, in_literal)
                 } else {
                     let mut resolved_map = serde_json::Map::new();
                     for (k, v) in map {
                         if k == "type" {
                             continue;
                         }
-                        resolved_map
-                            .insert(k.clone(), resolve_value_tree(scope, v, as_name, false)?);
+                        resolved_map.insert(
+                            k.clone(),
+                            resolve_value_tree(scope, v, as_name, false, in_literal)?,
+                        );
                     }
                     Ok(Value::Object(resolved_map))
                 }
             } else {
-                let mut resolved_map = serde_json::Map::new();
-                for (k, v) in map {
-                    resolved_map
-                        .insert(k.clone(), resolve_value_tree(scope, v, as_name, false)?);
-                }
-                Ok(Value::Object(resolved_map))
+                resolve_plain_map(scope, map, as_name, in_literal)
             }
         }
         Value::Array(arr) => {
             let resolved: Vec<Value> = arr
                 .iter()
-                .map(|v| resolve_value_tree(scope, v, as_name, false))
+                .map(|v| resolve_value_tree(scope, v, as_name, false, in_literal))
                 .collect::<Result<_, _>>()?;
             Ok(Value::Array(resolved))
         }
         other => Ok(other.clone()),
     }
+}
+
+fn resolve_plain_map(
+    scope: &Scope,
+    map: &serde_json::Map<String, Value>,
+    as_name: Option<&str>,
+    in_literal: bool,
+) -> WeaveResult<Value> {
+    let mut resolved_map = serde_json::Map::new();
+    for (k, v) in map {
+        resolved_map.insert(
+            k.clone(),
+            resolve_value_tree(scope, v, as_name, false, in_literal)?,
+        );
+    }
+    Ok(Value::Object(resolved_map))
 }
 
 pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Arc<Value>> {
@@ -86,20 +107,46 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Arc<Value>
             let slots_val = scope.slots();
             let mut current = &*slots_val;
             for part in &path.parts[1..] {
-                let next = current.get(part);
-                if next.is_none() {
-                    warn!(
-                        ref_path = %path.parts.join("."),
-                        missing_part = %part,
-                        available = %serde_json::to_string(current).unwrap_or_default(),
-                        "slot ref path not found, using Null"
-                    );
+                match current {
+                    Value::Array(arr) => {
+                        // 与 step output 分支一致：数组索引严格，越界/非数字 → 硬错误
+                        let idx = part.parse::<usize>().map_err(|_| {
+                            WeaveError::Internal(format!(
+                                "slot ref path {} segment '{part}' is not a valid array index",
+                                path.parts.join(".")
+                            ))
+                        })?;
+                        current = arr.get(idx).ok_or_else(|| {
+                            WeaveError::Internal(format!(
+                                "slot ref path {} array index {idx} out of bounds (len {})",
+                                path.parts.join("."),
+                                arr.len()
+                            ))
+                        })?;
+                    }
+                    Value::Object(map) => match map.get(part) {
+                        Some(v) => current = v,
+                        None => {
+                            warn!(
+                                ref_path = %path.parts.join("."),
+                                missing_part = %part,
+                                "slot ref path not found, using Null"
+                            );
+                            return Ok(Arc::new(Value::Null));
+                        }
+                    },
+                    _ => {
+                        warn!(
+                            ref_path = %path.parts.join("."),
+                            missing_part = %part,
+                            "slot ref path segment on non-object, using Null"
+                        );
+                        return Ok(Arc::new(Value::Null));
+                    }
                 }
-                current = next.unwrap_or(&Value::Null);
             }
             debug!(
                 ref_path = %path.parts.join("."),
-                resolved = %serde_json::to_string(current).unwrap_or_default(),
                 "resolved slot ref"
             );
             Ok(Arc::new(current.clone()))
@@ -182,6 +229,56 @@ mod tests {
         let mut scope = Scope::new(HashMap::new());
         scope.set_output(&StepId::from("s"), value);
         scope
+    }
+
+    #[test]
+    fn slots_array_index_resolves() {
+        let mut slots = HashMap::new();
+        slots.insert("items".to_string(), serde_json::json!([{ "name": "x" }]));
+        let scope = Scope::new(slots);
+        let path = VariablePath::parse("{slots.items.0.name}").unwrap();
+        let value = resolve_ref(&scope, &path).unwrap();
+        assert_eq!(*value, Value::String("x".to_string()));
+    }
+
+    #[test]
+    fn slots_array_index_out_of_bounds_is_hard_error() {
+        let mut slots = HashMap::new();
+        slots.insert("items".to_string(), serde_json::json!([1]));
+        let scope = Scope::new(slots);
+        let path = VariablePath::parse("{slots.items.5}").unwrap();
+        assert!(resolve_ref(&scope, &path).is_err());
+    }
+
+    #[test]
+    fn slots_missing_field_returns_null() {
+        let mut slots = HashMap::new();
+        slots.insert("cfg".to_string(), serde_json::json!({ "a": 1 }));
+        let scope = Scope::new(slots);
+        let path = VariablePath::parse("{slots.cfg.missing}").unwrap();
+        let value = resolve_ref(&scope, &path).unwrap();
+        assert_eq!(*value, Value::Null);
+    }
+
+    #[test]
+    fn single_key_ref_user_data_passes_through() {
+        // 用户数据恰好是单键 "Ref" 对象但值不是合法 VariablePath：
+        // 必须按普通数据透传，而不是硬错误。
+        let scope = scope_with_step(serde_json::json!({}));
+        let input = serde_json::json!({ "body": { "Ref": 123 } });
+        let out = resolve_value_tree(&scope, &input, None, false, false).unwrap();
+        assert_eq!(out, serde_json::json!({ "body": { "Ref": 123 } }));
+    }
+
+    #[test]
+    fn nested_literal_key_user_data_not_unwrapped() {
+        // Literal 负载内部的单键 "Literal" 对象是用户数据，不得拆包。
+        let scope = scope_with_step(serde_json::json!({}));
+        let input = serde_json::json!({
+            "Literal": { "payload": { "Literal": 5 } }
+        });
+        let out = resolve_value_tree(&scope, &input, None, false, false).unwrap();
+        assert_eq!(out, serde_json::json!({ "payload": { "Literal": 5 } }));
     }
 
     #[test]
