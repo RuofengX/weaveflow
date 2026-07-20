@@ -205,6 +205,40 @@ pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), Str
     Ok(())
 }
 
+/// Run JSON stream mode (for agents): each TaskSnapshot is printed as one
+/// compact JSON line as it arrives. Task failure → Err (non-zero exit).
+pub async fn run_json_stream(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), String> {
+    let mut finished = false;
+    let mut task_error: Option<String> = None;
+    while let Some(data) = rx.recv().await {
+        let status = data
+            .get("status")
+            .and_then(|s| s.as_object())
+            .and_then(|o| o.keys().next().map(|k| k.as_str()))
+            .unwrap_or("unknown");
+        println!("{}", serde_json::to_string(&data).unwrap_or_default());
+        if status == "Completed" || status == "Failed" {
+            if status == "Failed" {
+                let err = data
+                    .get("status")
+                    .and_then(|s| s.get("Failed"))
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("unknown error");
+                task_error = Some(err.to_string());
+            }
+            finished = true;
+            break;
+        }
+    }
+    if !finished {
+        return Err("connection to daemon lost before task completion".to_string());
+    }
+    if let Some(err) = task_error {
+        return Err(format!("task failed: {err}"));
+    }
+    Ok(())
+}
+
 /// Print layer completion lines. Each layer is printed exactly once when all
 /// its steps reach a terminal state (Completed or Failed).
 fn print_text_layer(data: &Value, completed: &mut HashSet<usize>) {

@@ -1,21 +1,10 @@
 use futures::StreamExt;
 use serde_json::Value;
 use std::io::IsTerminal;
-use std::sync::OnceLock;
-use std::time::Duration;
 use tokio_tungstenite::connect_async;
 use tungstenite::Message;
 
-fn http_client() -> reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(5))
-            .build()
-            .expect("build CLI reqwest client")
-    }).clone()
-}
+use super::config::CliConfig;
 
 fn encode_segment(s: &str) -> String {
     let mut r = String::with_capacity(s.len());
@@ -64,18 +53,21 @@ async fn parse_response(resp: reqwest::Response, url: &str) -> Result<Value, Str
     serde_json::from_str(&body).map_err(|e| format!("响应格式错误 ({url}): {e}"))
 }
 
-async fn get(daemon: &str, path: &str) -> Result<Value, String> {
-    let url = api_url(daemon, path);
-    let resp = http_client().get(&url)
+async fn get(cfg: &CliConfig, path: &str) -> Result<Value, String> {
+    let url = api_url(&cfg.daemon, path);
+    let resp = cfg
+        .http_client()
+        .get(&url)
         .send()
         .await
         .map_err(|e| daemon_error(&url, e))?;
     parse_response(resp, &url).await
 }
 
-async fn post(daemon: &str, path: &str, body: Value) -> Result<Value, String> {
-    let url = api_url(daemon, path);
-    let resp = http_client()
+async fn post(cfg: &CliConfig, path: &str, body: Value) -> Result<Value, String> {
+    let url = api_url(&cfg.daemon, path);
+    let resp = cfg
+        .http_client()
         .post(&url)
         .json(&body)
         .send()
@@ -84,9 +76,10 @@ async fn post(daemon: &str, path: &str, body: Value) -> Result<Value, String> {
     parse_response(resp, &url).await
 }
 
-async fn post_body(daemon: &str, path: &str, body: String) -> Result<Value, String> {
-    let url = api_url(daemon, path);
-    let resp = http_client()
+async fn post_body(cfg: &CliConfig, path: &str, body: String) -> Result<Value, String> {
+    let url = api_url(&cfg.daemon, path);
+    let resp = cfg
+        .http_client()
         .post(&url)
         .header("content-type", "text/plain")
         .body(body)
@@ -96,9 +89,24 @@ async fn post_body(daemon: &str, path: &str, body: String) -> Result<Value, Stri
     parse_response(resp, &url).await
 }
 
+async fn delete(cfg: &CliConfig, path: &str) -> Result<Value, String> {
+    let url = api_url(&cfg.daemon, path);
+    let resp = cfg
+        .http_client()
+        .delete(&url)
+        .send()
+        .await
+        .map_err(|e| daemon_error(&url, e))?;
+    parse_response(resp, &url).await
+}
+
 // ── Pipeline ──────────────────────────────────────────────────────────────
 
-pub async fn pipeline_apply(daemon: &str, file: Option<&str>, data: Option<&str>) -> Result<(), String> {
+pub async fn pipeline_apply(
+    cfg: &CliConfig,
+    file: Option<&str>,
+    data: Option<&str>,
+) -> Result<(), String> {
     let yaml = if let Some(d) = data {
         d.to_string()
     } else if let Some(f) = file {
@@ -111,52 +119,57 @@ pub async fn pipeline_apply(daemon: &str, file: Option<&str>, data: Option<&str>
             .map_err(|e| format!("读取 stdin: {e}"))?;
         buf
     };
-    let result = post_body(daemon, "/pipelines", yaml).await?;
-    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+    let result = post_body(cfg, "/pipelines", yaml).await?;
+    cfg.print_json(&result);
     Ok(())
 }
 
-pub async fn pipeline_ls(daemon: &str) -> Result<(), String> {
-    let result = get(daemon, "/pipelines").await?;
-    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+pub async fn pipeline_ls(cfg: &CliConfig) -> Result<(), String> {
+    let result = get(cfg, "/pipelines").await?;
+    cfg.print_json(&result);
     Ok(())
 }
 
-pub async fn pipeline_inspect(daemon: &str, name: &str) -> Result<(), String> {
-    let result = get(daemon, &format!("/pipelines/{}", encode_segment(name))).await?;
-    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+pub async fn pipeline_inspect(cfg: &CliConfig, name: &str) -> Result<(), String> {
+    let result = get(cfg, &format!("/pipelines/{}", encode_segment(name))).await?;
+    cfg.print_json(&result);
     Ok(())
 }
 
-pub async fn pipeline_delete(daemon: &str, name: &str) -> Result<(), String> {
-    let result = delete(daemon, &format!("/pipelines/{}", encode_segment(name))).await?;
-    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+pub async fn pipeline_delete(cfg: &CliConfig, name: &str) -> Result<(), String> {
+    let result = delete(cfg, &format!("/pipelines/{}", encode_segment(name))).await?;
+    cfg.print_json(&result);
     Ok(())
 }
 
 // ── Run ──────────────────────────────────────────────────────────────────
 
-pub async fn run_pipeline(daemon: &str, name: &str, inputs: &[(String, String)]) -> Result<(), String> {
+fn build_run_body(name: &str, inputs: &[(String, String)]) -> Result<Value, String> {
     let mut inputs_map = serde_json::Map::new();
     for (k, v) in inputs {
         let val = resolve_input_value(v)?;
         inputs_map.insert(k.clone(), val);
     }
-    let body = serde_json::json!({
+    Ok(serde_json::json!({
         "pipeline": name,
         "inputs": inputs_map,
-    });
-    let result = post(daemon, "/runs", body).await?;
-    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+    }))
+}
+
+pub async fn run_pipeline(
+    cfg: &CliConfig,
+    name: &str,
+    inputs: &[(String, String)],
+) -> Result<(), String> {
+    let result = post(cfg, "/runs", build_run_body(name, inputs)?).await?;
+    cfg.print_json(&result);
     Ok(())
 }
 
 fn resolve_input_value(v: &str) -> Result<Value, String> {
     if let Some(path) = v.strip_prefix('@') {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("读取 {path}: {e}"))?;
-        serde_json::from_str(&content)
-            .map_err(|e| format!("解析 JSON 文件 {path} 失败: {e}"))
+        let content = std::fs::read_to_string(path).map_err(|e| format!("读取 {path}: {e}"))?;
+        serde_json::from_str(&content).map_err(|e| format!("解析 JSON 文件 {path} 失败: {e}"))
     } else {
         Ok(serde_json::from_str(v).unwrap_or(Value::String(v.to_string())))
     }
@@ -164,28 +177,32 @@ fn resolve_input_value(v: &str) -> Result<Value, String> {
 
 // ── Task ─────────────────────────────────────────────────────────────────
 
-pub async fn task_ls(daemon: &str) -> Result<(), String> {
-    let result = get(daemon, "/tasks").await?;
-    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+pub async fn task_ls(cfg: &CliConfig) -> Result<(), String> {
+    let result = get(cfg, "/tasks").await?;
+    cfg.print_json(&result);
     Ok(())
 }
 
-pub async fn snapshot_list(daemon: &str, task_id: &str) -> Result<(), String> {
-    let result = get(daemon, &format!("/runs/{task_id}/snapshots")).await?;
-    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+pub async fn snapshot_list(cfg: &CliConfig, task_id: &str) -> Result<(), String> {
+    let result = get(cfg, &format!("/runs/{task_id}/snapshots")).await?;
+    cfg.print_json(&result);
     Ok(())
 }
 
-pub async fn snapshot_show(daemon: &str, task_id: &str, seq: u64) -> Result<(), String> {
-    let result = get(daemon, &format!("/runs/{task_id}/snapshots/{seq}")).await?;
-    println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+pub async fn snapshot_show(cfg: &CliConfig, task_id: &str, seq: u64) -> Result<(), String> {
+    let result = get(cfg, &format!("/runs/{task_id}/snapshots/{seq}")).await?;
+    cfg.print_json(&result);
     Ok(())
 }
 
 // ── System ────────────────────────────────────────────────────────────────
 
-pub async fn system_operators(daemon: &str) -> Result<(), String> {
-    let result = get(daemon, "/system/operators").await?;
+pub async fn system_operators(cfg: &CliConfig) -> Result<(), String> {
+    let result = get(cfg, "/system/operators").await?;
+    if cfg.is_json() {
+        cfg.print_json(&result);
+        return Ok(());
+    }
     let list = result.as_array().ok_or("invalid response")?;
     for op in list {
         let name = op.get("type_name").and_then(|v| v.as_str()).unwrap_or("?");
@@ -199,66 +216,106 @@ pub async fn system_operators(daemon: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn system_prune(daemon: &str, force: bool, dry_run: bool) -> Result<(), String> {
+pub async fn system_prune(cfg: &CliConfig, force: bool, dry_run: bool) -> Result<(), String> {
     let body = serde_json::json!({
         "force": force,
         "dry_run": dry_run,
     });
-    // prune 可能全表扫描 + compact，单独放宽超时到 300s
-    let url = api_url(daemon, "/prune");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("构建 HTTP client 失败: {e}"))?;
-    let resp = client
+    // prune 可能全表扫描 + compact，使用独立的放宽超时（--prune-timeout）
+    let url = api_url(&cfg.daemon, "/prune");
+    let resp = cfg
+        .prune_client()?
         .post(&url)
         .json(&body)
         .send()
         .await
         .map_err(|e| daemon_error(&url, e))?;
     let result = parse_response(resp, &url).await?;
+    if cfg.is_json() {
+        cfg.print_json(&result);
+        return Ok(());
+    }
     let tasks_removed = result["tasks_removed"].as_u64().unwrap_or(0);
     let snapshots_removed = result["snapshots_removed"].as_u64().unwrap_or(0);
     let objects_removed = result["objects_removed"].as_u64().unwrap_or(0);
     let bytes_freed = result["bytes_freed"].as_u64().unwrap_or(0);
     if dry_run {
-        println!("Would remove: {tasks_removed} tasks, {snapshots_removed} snapshots, {objects_removed} objects ({bytes_freed} bytes)");
+        println!(
+            "Would remove: {tasks_removed} tasks, {snapshots_removed} snapshots, {objects_removed} objects ({bytes_freed} bytes)"
+        );
     } else {
-        println!("Removed: {tasks_removed} tasks, {snapshots_removed} snapshots, {objects_removed} objects ({bytes_freed} bytes)");
+        println!(
+            "Removed: {tasks_removed} tasks, {snapshots_removed} snapshots, {objects_removed} objects ({bytes_freed} bytes)"
+        );
     }
     Ok(())
 }
 
-async fn delete(daemon: &str, path: &str) -> Result<Value, String> {
-    let url = api_url(daemon, path);
-    let resp = http_client()
-        .delete(&url)
-        .send()
-        .await
-        .map_err(|e| daemon_error(&url, e))?;
-    parse_response(resp, &url).await
+// ── Daemon log ────────────────────────────────────────────────────────────
+
+pub async fn daemon_log(cfg: &CliConfig, live: bool) -> Result<(), String> {
+    use std::io::Write;
+
+    let client = reqwest::Client::builder()
+        .timeout(cfg.log_timeout)
+        .connect_timeout(cfg.connect_timeout)
+        .build()
+        .map_err(|e| format!("构建 HTTP client 失败: {e}"))?;
+    let mut offset = 0u64;
+    let (scheme, host) = parse_daemon_addr(&cfg.daemon);
+
+    loop {
+        let url = format!("{scheme}{host}/system/logs?offset={offset}");
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                let new_offset_hdr = resp
+                    .headers()
+                    .get("X-Log-Offset")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+                let truncated = resp
+                    .headers()
+                    .get("X-Log-Truncated")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s == "true" || s == "1")
+                    .unwrap_or(false);
+                if truncated {
+                    eprintln!("[weaveflow] 日志缓冲已绕回，offset 之前的日志有缺口");
+                }
+                match resp.text().await {
+                    Ok(body) => {
+                        if !body.is_empty() {
+                            print!("{body}");
+                            let _ = std::io::stdout().flush();
+                        }
+                        if let Some(n) = new_offset_hdr {
+                            offset = n;
+                        }
+                    }
+                    Err(e) => return Err(format!("daemon log: 读取响应失败: {e}")),
+                }
+                if !live {
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                return Err(format!("daemon log: 连接失败: {e}"));
+            }
+        }
+        tokio::time::sleep(cfg.log_poll).await;
+    }
 }
 
 // ── Watch (WS + TUI) ──────────────────────────────────────────────────────
 
 pub async fn run_pipeline_watch(
-    daemon: &str,
+    cfg: &CliConfig,
     name: &str,
     inputs: &[(String, String)],
     text_mode: bool,
 ) -> Result<(), String> {
     // 1. POST /runs → get task_id + pipeline_name
-    let mut inputs_map = serde_json::Map::new();
-    for (k, v) in inputs {
-        let val = resolve_input_value(v)?;
-        inputs_map.insert(k.clone(), val);
-    }
-    let body = serde_json::json!({
-        "pipeline": name,
-        "inputs": inputs_map,
-    });
-    let run_resp = post(daemon, "/runs", body).await?;
+    let run_resp = post(cfg, "/runs", build_run_body(name, inputs)?).await?;
     let task_id = run_resp["task_id"]
         .as_str()
         .ok_or_else(|| "响应中缺少 task_id".to_string())?
@@ -269,16 +326,17 @@ pub async fn run_pipeline_watch(
         .to_string();
 
     // 2. Connect WS
-    let (_http_scheme, host) = parse_daemon_addr(daemon);
-    let ws_scheme = if _http_scheme == "https://" { "wss://" } else { "ws://" };
+    let (http_scheme, host) = parse_daemon_addr(&cfg.daemon);
+    let ws_scheme = if http_scheme == "https://" {
+        "wss://"
+    } else {
+        "ws://"
+    };
     let ws_url = format!("{ws_scheme}{host}/runs/{task_id}/ws");
-    let (ws_stream, _) = tokio::time::timeout(
-        Duration::from_secs(10),
-        connect_async(&ws_url),
-    )
-    .await
-    .map_err(|_| format!("WebSocket 连接超时 ({ws_url})"))?
-    .map_err(|e| format!("WebSocket 连接失败 ({ws_url}): {e}"))?;
+    let (ws_stream, _) = tokio::time::timeout(cfg.ws_timeout, connect_async(&ws_url))
+        .await
+        .map_err(|_| format!("WebSocket 连接超时 ({ws_url})"))?
+        .map_err(|e| format!("WebSocket 连接失败 ({ws_url}): {e}"))?;
 
     let (_, mut read) = ws_stream.split();
 
@@ -311,7 +369,12 @@ pub async fn run_pipeline_watch(
         }
     });
 
-    // 3. Render（stdout 非 TTY 时自动回落 text 模式）
+    // 3. Render：--output json 时逐条推送原始 TaskSnapshot JSON 行（面向 Agent）；
+    //    否则 stdout 非 TTY 时自动回落 text 模式。
+    if cfg.is_json() {
+        crate::cli::watch::run_json_stream(&mut rx).await?;
+        return Ok(());
+    }
     let text_mode = text_mode || !std::io::stdout().is_terminal();
     if text_mode {
         crate::cli::watch::run_text(&mut rx).await?;
@@ -320,12 +383,10 @@ pub async fn run_pipeline_watch(
         // 否则单核 tokio runtime 下 WS reader 永远得不到调度。
         let tid = task_id.clone();
         let pname = pipeline_name.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::cli::watch::run_tui(&mut rx, &tid, &pname)
-        })
-        .await
-        .map_err(|e| format!("TUI 任务 panic: {e}"))?
-        .map_err(|e| format!("TUI 渲染失败: {e}"))?;
+        tokio::task::spawn_blocking(move || crate::cli::watch::run_tui(&mut rx, &tid, &pname))
+            .await
+            .map_err(|e| format!("TUI 任务 panic: {e}"))?
+            .map_err(|e| format!("TUI 渲染失败: {e}"))?;
     }
     Ok(())
 }
@@ -362,7 +423,10 @@ mod tests {
 
     #[test]
     fn encode_segment_mixed() {
-        assert_eq!(encode_segment("管道 v1/测试"), "%E7%AE%A1%E9%81%93%20v1%2F%E6%B5%8B%E8%AF%95");
+        assert_eq!(
+            encode_segment("管道 v1/测试"),
+            "%E7%AE%A1%E9%81%93%20v1%2F%E6%B5%8B%E8%AF%95"
+        );
     }
 
     #[test]

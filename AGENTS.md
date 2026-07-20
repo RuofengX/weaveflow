@@ -71,8 +71,9 @@ src/
 │   ├── daemon.rs         Axum HTTP server + daemon lifecycle (pidfile) + graceful drain shutdown
 │   └── logging.rs        ring-buffer log store, absolute offsets (X-Log-Offset / X-Log-Truncated)
 └── cli/                 # CLI client side (binary-only)
-    ├── client.rs         HTTP/WS client for CLI→daemon (encode_segment, per-endpoint timeouts)
-    └── watch.rs          ratatui TUI + --text-output progress rendering (non-TTY auto-fallback)
+    ├── config.rs         统一运行配置层 (CliConfig/OutputFormat/parse_duration) — CLI 参数 + WEAVEFLOW_* env 在此汇合
+    ├── client.rs         HTTP/WS client for CLI→daemon (encode_segment, cfg-driven timeouts, daemon_log)
+    └── watch.rs          ratatui TUI + --text-output progress rendering (non-TTY auto-fallback) + JSONL stream
 ```
 
 ## Key design decisions
@@ -91,20 +92,23 @@ src/
 | Variables | `{slots.name}` / `{env.KEY}` / `{step_id.output}` / `{step_id.output.field}` / `{step_id.output.0.field}` (array indices supported, strict) |
 | Concurrency | DAG layer `join_all` + iterate chunk `join_all` (default workers = `available_parallelism`) + rayon inside operators |
 | Daemon concurrency | `--max-concurrent-tasks` flag or `WEAVEFLOW_MAX_CONCURRENT_TASKS` env (default unlimited), semaphore in daemon.rs; permit acquired inside the background task |
-| Shutdown | Graceful drain: on signal, `/runs` → 503 and in-flight tasks drain up to 30s (`SHUTDOWN_DRAIN_SECS`) |
+| Shutdown | Graceful drain: on signal, `/runs` → 503 and in-flight tasks drain up to `--shutdown-drain` (default 30s); `daemon stop --timeout` (default 35s) then SIGKILL |
+| CLI config | Precedence CLI flag > `WEAVEFLOW_*` env > default, merged by clap `env` feature into `cli::config::CliConfig`; daemon side gets `ServeConfig` (no double-parse) |
 
 ## Commands
 
 ```
-weaveflow daemon start [--bind 127.0.0.1:9928] [--max-concurrent-tasks N] [--allow-remote]
-weaveflow daemon stop|restart|log [-f]   # stop 等待优雅排空（最长 SHUTDOWN_DRAIN_SECS+5s）再 SIGKILL
+weaveflow daemon start [--bind 127.0.0.1:9928] [--max-concurrent-tasks N] [--allow-remote] [--shutdown-drain 30s]
+weaveflow daemon stop [--timeout 35s]      # SIGTERM 后最长等 --timeout（应 ≥ --shutdown-drain）再 SIGKILL
+weaveflow daemon restart [...start opts] [--stop-timeout 35s]
+weaveflow daemon log [-f]
 weaveflow serve --bind ...         # hidden; foreground equivalent of daemon start
 weaveflow pipeline apply -f <file.yml> | -d '<yaml string>'   # -f and -d are FLAGS, not positional
 weaveflow pipeline ls              # alias: list
 weaveflow pipeline inspect <name>
 weaveflow pipeline delete <name>
 weaveflow run <name> [-i k=v] [-i k=@file.json] [--watch|--text-output]  # mutually exclusive; task Failed → exit 1
-weaveflow check -f <file.yml>      # local validation, no daemon needed
+weaveflow check -f <file.yml>      # local validation, no daemon needed; --output json → structured report
 weaveflow task ls
 weaveflow task snapshot list <task_id>
 weaveflow task snapshot show <task_id> <seq>
@@ -112,7 +116,18 @@ weaveflow system prune [--force] [--dry-run]   # output includes snapshots_remov
 weaveflow system operators
 ```
 
-Global flag: `--daemon <host:port>` (default `127.0.0.1:9928`; `http://`/`https://` prefixes accepted, trailing `/` trimmed).
+Global flags (all env-overridable; precedence: CLI flag > env > default; durations accept `500ms/30s/5m/1h`):
+
+| Flag | Env | Default |
+|------|-----|---------|
+| `--daemon <host:port>` (`http(s)://` ok, trailing `/` trimmed) | `WEAVEFLOW_DAEMON` | `127.0.0.1:9928` |
+| `--output text\|json` (json = compact single-line, agent/jq-friendly; `run --text-output --output json` = JSONL snapshot stream) | `WEAVEFLOW_OUTPUT` | `text` |
+| `--http-timeout` / `--connect-timeout` | `WEAVEFLOW_HTTP_TIMEOUT` / `WEAVEFLOW_CONNECT_TIMEOUT` | `30s` / `5s` |
+| `--ws-timeout` (run --watch) | `WEAVEFLOW_WS_TIMEOUT` | `10s` |
+| `--prune-timeout` | `WEAVEFLOW_PRUNE_TIMEOUT` | `300s` |
+| `--log-timeout` / `--log-poll` (daemon log) | `WEAVEFLOW_LOG_TIMEOUT` / `WEAVEFLOW_LOG_POLL` | `2s` / `500ms` |
+
+Daemon-side env: `WEAVEFLOW_BIND`, `WEAVEFLOW_MAX_CONCURRENT_TASKS`, `WEAVEFLOW_SHUTDOWN_DRAIN`, `WEAVEFLOW_STOP_TIMEOUT` (stop/restart).
 Data dir: `WEAVEFLOW_DATA` env var only (default `~/.weaveflow`). There is **no working `--data-dir` flag**.
 `weaveflow run` on a non-TTY stdout automatically falls back to `--text-output`.
 

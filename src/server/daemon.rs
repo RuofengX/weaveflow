@@ -25,8 +25,17 @@ use super::logging::RingWriter;
 type DbRef = Arc<Database>;
 type TrackerRef = TaskTracker;
 
-/// 优雅停机时等待后台任务排空的最长时间。
-const SHUTDOWN_DRAIN_SECS: u64 = 30;
+/// serve / daemon start / daemon restart 的统一运行配置。
+/// 由 CLI 层（clap 参数 + WEAVEFLOW_* 环境变量）构造，优先级 CLI > env > default。
+/// （shutdown_drain 默认值 30s 由 CLI 层的 default_value 提供。）
+#[derive(Clone, Debug)]
+pub struct ServeConfig {
+    pub bind: String,
+    pub max_concurrent_tasks: Option<usize>,
+    pub allow_remote: bool,
+    /// 收到停机信号后等待在途任务排空的最长时间。
+    pub shutdown_drain: std::time::Duration,
+}
 
 // ── State ────────────────────────────────────────────────────────────────
 
@@ -671,44 +680,14 @@ fn enforce_bind_safety(bind: &str, allow_remote: bool) {
     );
 }
 
-pub async fn serve(args: Vec<String>) {
+pub async fn serve(cfg: ServeConfig) {
     let log_ring = super::logging::init_logging();
 
-    let bind = match args.iter().position(|a| a == "--bind") {
-        Some(i) => match args.get(i + 1) {
-            Some(v) => v.clone(),
-            None => {
-                eprintln!("error: --bind 缺少参数值");
-                std::process::exit(1);
-            }
-        },
-        None => "127.0.0.1:9928".to_string(),
-    };
+    let bind = cfg.bind;
+    enforce_bind_safety(&bind, cfg.allow_remote);
 
-    let allow_remote = args.iter().any(|a| a == "--allow-remote");
-    enforce_bind_safety(&bind, allow_remote);
-
-    let max_concurrent = match args.iter().position(|a| a == "--max-concurrent-tasks") {
-        Some(i) => match args.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
-            Some(n) => Some(n),
-            None => {
-                eprintln!("error: --max-concurrent-tasks 需要一个非负整数参数值");
-                std::process::exit(1);
-            }
-        },
-        None => match std::env::var("WEAVEFLOW_MAX_CONCURRENT_TASKS") {
-            Ok(s) => match s.parse::<usize>() {
-                Ok(n) => Some(n),
-                Err(_) => {
-                    eprintln!("error: WEAVEFLOW_MAX_CONCURRENT_TASKS 非法值: {s:?}（需要非负整数）");
-                    std::process::exit(1);
-                }
-            },
-            Err(_) => None,
-        },
-    };
-
-    let semaphore_permits = max_concurrent.unwrap_or(usize::MAX >> 3).max(1);
+    let semaphore_permits = cfg.max_concurrent_tasks.unwrap_or(usize::MAX >> 3).max(1);
+    let shutdown_drain = cfg.shutdown_drain;
 
     let data_dir = resolve_data_dir();
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
@@ -786,12 +765,12 @@ pub async fn serve(args: Vec<String>) {
             _ = sigterm => {}
         }
 
-        // 停止接受新任务，排空运行中的后台任务（最多 SHUTDOWN_DRAIN_SECS 秒）
+        // 停止接受新任务，排空运行中的后台任务（最多 shutdown_drain）
         shutdown_state.draining.store(true, Ordering::SeqCst);
         let remaining = wait_for_drain(
             &shutdown_state.in_flight,
             &shutdown_state.drain_notify,
-            std::time::Duration::from_secs(SHUTDOWN_DRAIN_SECS),
+            shutdown_drain,
         )
         .await;
         if remaining > 0 {
@@ -891,14 +870,15 @@ fn is_daemon_running() -> bool {
     true
 }
 
-pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote: bool) {
+pub async fn start(cfg: &ServeConfig) {
+    let bind = cfg.bind.as_str();
     if is_daemon_running() {
         eprintln!(
             "daemon is already running. Use `weaveflow daemon restart` to restart."
         );
         return;
     }
-    enforce_bind_safety(bind, allow_remote);
+    enforce_bind_safety(bind, cfg.allow_remote);
 
     let data_dir = resolve_data_dir();
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
@@ -936,13 +916,15 @@ pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote
     cmd.arg("serve")
         .arg("--bind")
         .arg(bind)
+        .arg("--shutdown-drain")
+        .arg(format!("{}ms", cfg.shutdown_drain.as_millis()))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(log_file));
-    if let Some(n) = max_concurrent_tasks {
+    if let Some(n) = cfg.max_concurrent_tasks {
         cmd.arg("--max-concurrent-tasks").arg(n.to_string());
     }
-    if allow_remote {
+    if cfg.allow_remote {
         cmd.arg("--allow-remote");
     }
     let mut child = match cmd.spawn() {
@@ -1050,7 +1032,10 @@ async fn kill_child_process(pid: u32) {
     }
 }
 
-pub async fn stop() {
+/// `timeout`：SIGTERM 后等待进程退出的最长时间，超时则 SIGKILL。
+/// 必须 ≥ serve 端 drain 上限（--shutdown-drain），否则长任务
+/// 会被 SIGKILL 强杀于执行中途，优雅停机形同虚设。
+pub async fn stop(timeout: std::time::Duration) {
     let path = pid_path();
     let pid_str = match std::fs::read_to_string(&path) {
         Ok(s) => s.trim().to_string(),
@@ -1087,9 +1072,7 @@ pub async fn stop() {
     }
 
     let exited = tokio::time::timeout(
-        // 必须 ≥ serve 端 drain 上限（SHUTDOWN_DRAIN_SECS），否则长任务
-        // 会被 SIGKILL 强杀于执行中途，优雅停机形同虚设。
-        std::time::Duration::from_secs(SHUTDOWN_DRAIN_SECS + 5),
+        timeout,
         async {
             loop {
                 if unsafe { libc::kill(pid as i32, 0) } != 0 {
@@ -1114,11 +1097,11 @@ pub async fn stop() {
     println!("daemon stopped (PID {pid})");
 }
 
-pub async fn restart(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote: bool) {
+pub async fn restart(cfg: &ServeConfig, stop_timeout: std::time::Duration) {
     if is_daemon_running() {
-        stop().await;
+        stop(stop_timeout).await;
     }
-    start(bind, max_concurrent_tasks, allow_remote).await;
+    start(cfg).await;
 }
 
 #[cfg(test)]
