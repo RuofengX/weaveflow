@@ -23,7 +23,8 @@ weaveflow 是一个 YAML 声明式 DAG 批处理引擎（daemon + CLI + HTTP/WS 
 ## Setup
 
 ```bash
-which weaveflow || cargo build --release   # 二进制在 target/release/weaveflow
+cargo install weaveflow                     # 从 crates.io 安装（推荐，二进制进 ~/.cargo/bin）
+# 或从源码：cargo build --release（二进制在 target/release/weaveflow）
 weaveflow pipeline ls --output json        # 探测 daemon 是否在线
 # 不在线则：weaveflow daemon start
 ```
