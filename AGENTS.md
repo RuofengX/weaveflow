@@ -4,7 +4,7 @@
 
 ```bash
 cargo build                    # compile
-cargo test --lib               # 169 unit tests (no external deps)
+cargo test --lib               # 186 unit tests (no external deps)
 cargo test --test '*'          # 28 integration test binaries (51 tests) — in-process
                                # Runner + temp redb, NO daemon/binary required
                                # (see tests/common/mod.rs)
@@ -35,14 +35,17 @@ src/
 │   ├── step.rs           StepDef (id, after, iterate, retry, cache, timeout_sec, #[serde(flatten)] op)
 │   ├── variable.rs       RefValue { Literal | Ref }, VariablePath, parse_string_to_refvalue
 │   ├── pipeline.rs       PipelineDef (name, slots, steps, output)
-│   ├── validator.rs      compile-time-like checks (step ids, refs, iterate config, JSON Schema,
-│   │                     filter/sort enum whitelist, timeout ≤ 365d, sandboxed JS syntax check)
+│   ├── validator.rs      compile-time-like checks (step ids, refs, iterate config + as_name
+│   │                     reserved-prefix/collision rules, JSON Schema, filter/sort/base64/http
+│   │                     enum whitelist, retry ≤ 100 attempts / ≤ 1h delay, timeout ≤ 365d,
+│   │                     llm.temperature finite, sandboxed JS syntax check)
 │   ├── rule.rs           RuleDef
 │   ├── storage.rs        StorageDef { result_ttl } + Ttl ("30d" — chrono TimeDelta, overflow/non-ASCII → error)
 │   └── retry.rs          RetryDef, BackoffStrategy (deny_unknown_fields)
 ├── engine/              # DAG executor
 │   ├── dag.rs            Dag + Kahn topological sort + implicit deps from input refs
-│   │                     (string values: only whole-string "{...}" counts as a dep — no ghost deps)
+│   │                     (deps come only from RefValue::Ref + inline tags; plain String fields
+│   │                     like filter.field/method/mode are literal — never deps, never interpolated)
 │   ├── runner.rs         Top-level run orchestrator (sole writer of Completed step state)
 │   ├── step.rs           Single-step runner (resolve → cache → operator → retry + step timeout)
 │   ├── cache.rs          compute_cache_key = SHA256(op_type + ":" + inputs_json)
@@ -94,13 +97,13 @@ src/
 
 ```
 weave daemon start [--bind 127.0.0.1:9928] [--max-concurrent-tasks N] [--allow-remote]
-weave daemon stop|restart|log [-f]
+weave daemon stop|restart|log [-f]   # stop 等待优雅排空（最长 SHUTDOWN_DRAIN_SECS+5s）再 SIGKILL
 weave serve --bind ...         # hidden; foreground equivalent of daemon start
 weave pipeline apply -f <file.yml> | -d '<yaml string>'   # -f and -d are FLAGS, not positional
 weave pipeline ls              # alias: list
 weave pipeline inspect <name>
 weave pipeline delete <name>
-weave run <name> [-i k=v] [-i k=@file.json] [--watch|--text-output]  # mutually exclusive
+weave run <name> [-i k=v] [-i k=@file.json] [--watch|--text-output]  # mutually exclusive; task Failed → exit 1
 weave check -f <file.yml>      # local validation, no daemon needed
 weave task ls
 weave task snapshot list <task_id>
@@ -174,7 +177,7 @@ All operator outputs are JSON `Value`; Scope stores `Arc<Value>`.
 | Var | `var` | Variable placeholder |
 | File | `file` | Read local files (canonicalize + `WEAVE_FILE_ALLOW_ROOTS` allowlist, Once-warn when unset) or URLs (SSRF-checked); 64MB cap |
 | Command | `command` | `sh -c` execution with `env_clear` + minimal env whitelist, `kill_on_drop`, 10MB stdout/stderr caps (keeps draining, sets `truncated: true`) |
-| LLM | `llm` | OpenAI-compatible API + images_b64 multimodal |
+| LLM | `llm` | OpenAI-compatible API + images_b64 multimodal; dedicated client with 600s total timeout (shared client is 60s) |
 
 Detailed input fields: [docs/operators.md](docs/operators.md).
 
@@ -187,16 +190,18 @@ YAML → serde_yaml → RawPipelineDef (Raw*Inputs with plain types)
 
 `yaml_to_refvalue(&Value)` detects whole-string `"{...}"` patterns. Embedded `{...}` inside a longer string stays a **literal** everywhere — parser, resolver, validator and DAG all agree (whole-string guard).
 
-Top-level `Value::Object`/`Value::Array` literals have nested `"{...}"` strings replaced with `{"Ref": {"parts": [...]}}` **inline tags**, so the resolver finds refs deep inside literal JSON. Resolver, validator (`parse_ref_tag`) and DAG (`collect_refs`) all require the object to have **exactly one key** (`len == 1`) before treating `"Ref"` as a tag — user data containing a `"Ref"` key alongside other keys passes through untouched.
+Top-level `Value::Object`/`Value::Array` literals have nested `"{...}"` strings replaced with `{"Ref": {"parts": [...]}}` **inline tags**, so the resolver finds refs deep inside literal JSON. Resolver, validator (`parse_ref_tag`) and DAG (`collect_refs`) all require the object to have **exactly one key** (`len == 1`) before treating `"Ref"` as a tag — user data containing a `"Ref"` key alongside other keys passes through untouched. A single-key `"Ref"` object whose value is NOT a valid VariablePath (e.g. `{"Ref": 123}`, CloudFormation-style `{"Ref": "MyResource"}`) is user data: all three consumers fall back to treating it as a plain object (resolver recurses, validator skips, DAG recurses). Single-key `"Literal"` objects are RefValue serde tags **only at operator-field positions** — inside a Literal payload they are user data and pass through unwrapped.
+
+Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field/order`, `dedup.field`, `base64.mode`, `command.shell`, `llm.model/image_type`) are **always literal** — a whole-string `"{...}"` there is NOT a ref: resolver never parses bare strings, and validator/DAG symmetrically ignore them (no false cycle, no false variable_ref_not_found).
 
 ## Resolver
 
-`resolve_value_tree` (vm/resolver.rs) resolves `RefValue::Ref` → Value from scope and merges everything into one `Value::Object` — no data/config split. Path semantics: `{step}` or `{step.output}` = whole step output; `{step.output.field}` = field drill-down; `{step.output.0.name}` = array index (non-numeric segment on an array or out-of-bounds index is a **hard error**). Missing object fields / segments on non-objects resolve to `Null` with a `warn!` log.
+`resolve_value_tree` (vm/resolver.rs) resolves `RefValue::Ref` → Value from scope and merges everything into one `Value::Object` — no data/config split. Path semantics: `{step}` or `{step.output}` = whole step output; `{step.output.field}` = field drill-down; `{step.output.0.name}` = array index (non-numeric segment on an array or out-of-bounds index is a **hard error**). Missing object fields / segments on non-objects resolve to `Null` with a `warn!` log. `slots` paths follow the same rules (array indices supported and strict since 2026-07-20; missing object keys → `Null`).
 
 ## Engine behavior — gotchas
 
 - **iterate `over` must include braces** (`over: "{slots.items}"`) — `raw.rs` rejects anything else with `ParseError::InvalidIterateOver`.
-- **iterate `as_name` is not actually bound**: the current element is injected into inputs under the fixed key `"data"`; `{item}`/`{item.field}` refs pass through as **literal strings**. Write steps so the operator consumes `data` (JS, command stdin, etc.).
+- **iterate `as_name` is not actually bound**: the current element is injected into inputs under the fixed key `"data"`; `{item}`/`{item.field}` refs pass through as **literal strings** (validator allows them since 2026-07-20). Write steps so the operator consumes `data` (JS, command stdin, etc.). Validator rejects `as` values that are empty, non-`[A-Za-z0-9_]`, `slots`/`env`, or colliding with a step id.
 - **iterate steps are retried per element** (`retry_with_op` wraps each chunk), not as a whole.
 - **iterate cache key includes the resolved `over` array** — same inputs with different `over` data do not collide.
 - Step timeout (`timeout_sec`) applies to every attempt of every iterate chunk; it cancels the operator future (for JS, the drop-guard interrupts the blocking thread).
@@ -205,13 +210,13 @@ Top-level `Value::Object`/`Value::Array` literals have nested `"{...}"` strings 
 ## Security posture
 
 - **No auth on any endpoint (C6 still open).** `--allow-remote` is required to bind non-loopback addresses, but bearer-token auth is NOT implemented — binding `0.0.0.0` is unauthenticated RCE via `command`/`file`; even on localhost, browser CSRF (simple POST, no preflight) can create+run pipelines. Treat the daemon as localhost-only.
-- `command` runs `sh -c` with `env_clear` + a minimal whitelist (PATH/HOME/LANG/LC_ALL/TZ); `file` canonicalizes and checks `WEAVE_FILE_ALLOW_ROOTS` (empty segments filtered with a warn; unset → one `Once` warn and allow-all); `{env.KEY}` values are recorded and redacted in persisted snapshots.
-- Shared HTTP client hardening: no redirects, per-DNS-result SSRF check (169.254.169.254 always blocked), 64MB streamed response cap, 60s total / 10s connect timeouts.
-- `js` sandbox: no fs/net, 256MB memory limit, 1MB stack; step timeout triggers real interruption via the drop-guard. **Without `step.timeout_sec`, a `while(1){}` still occupies a blocking thread indefinitely (design decision: timeouts live only at step layer).**
+- `command` runs `sh -c` with `env_clear` + a minimal whitelist (PATH/HOME/LANG/LC_ALL/TZ); `file` canonicalizes both the target and each `WEAVE_FILE_ALLOW_ROOTS` root before the prefix check (empty segments filtered with a warn; unset → one `Once` warn and allow-all); `{env.KEY}` values are recorded and redacted in persisted snapshots.
+- Shared HTTP client hardening: no redirects, per-DNS-result SSRF check (169.254.169.254 always blocked; IPv4-mapped IPv6 normalized before classification; `WEAVE_HTTP_BLOCK_PRIVATE=1` also covers 0.0.0.0, CGNAT 100.64/10, 198.18/15), 64MB streamed response cap, 60s total / 10s connect timeouts (llm uses a dedicated client with 600s total). **Known residual: DNS rebinding TOCTOU** — the pre-check and reqwest's connect each resolve DNS independently, so a low-TTL malicious domain can in principle pass the check and then resolve to a blocked IP (no resolve pinning with the shared client).
+- `js` sandbox: no fs/net, 256MB memory limit, 1MB stack; step timeout triggers real interruption via the drop-guard. `__native__.inflate` output is capped at 256MB on the Rust side (decompression bombs can't bypass the sandbox memory limit). **Without `step.timeout_sec`, a `while(1){}` still occupies a blocking thread indefinitely (design decision: timeouts live only at step layer).**
 
 ## Tracker / WS flow
 
-- `POST /runs` → `{task_id}` immediately (503 while draining); execution in a background `tokio::spawn` watched by a second task that fails the task if the runner panics.
+- `POST /runs` → `{task_id}` immediately (503 while draining; the draining check runs AFTER `in_flight` increment to close the shutdown TOCTOU); execution in a background `tokio::spawn` watched by a second task that fails the task if the runner panics — the watcher also marks all non-terminal steps `Failed` (`fail_non_terminal_steps`) and unconditionally decrements `in_flight` so `wait_for_drain` always converges.
 - WS `/runs/:task_id/ws` pushes `TaskSnapshot` JSON (broadcast channel, capacity 64, Lagged silently skipped).
 - `snapshot_and_subscribe()` builds the snapshot and subscribes in **one lock acquisition** — no get-then-subscribe race.
 - Terminal tasks are reaped by `cleanup_stale()` (terminal for >10 min) — tracker memory does not grow unboundedly.
@@ -221,7 +226,8 @@ Top-level `Value::Object`/`Value::Array` literals have nested `"{...}"` strings 
 
 - Five tables pre-created at `Database::open`; schema-versioned type names (`::v1`, Snapshot `::v2`). Opening a v0 database auto-migrates: backup to `<file>.v0.bak`, copy PIPELINE/TASK (stripping removed `snapshot_ttl`), drop SNAPSHOT/OBJECT/CACHE.
 - Concurrency: `RwLock<redb::Database>` inside `Database` (poison-tolerant); the write lock is taken **only** for `compact()`. No global DB Mutex.
-- Prune is two-phase (`prune_scan` read-only → `prune_execute` write txn): skips tasks in `tracker.running_task_ids()`, only deletes snapshots with seq ≤ the scan-time max_seq (snapshots written mid-prune survive), GCs unreferenced OBJECT rows and dangling CACHE entries, then compacts.
+- Prune is two-phase (`prune_scan` read-only → `prune_execute` write txn): skips tasks in `tracker.running_task_ids()` and tasks whose status is still `running` with no snapshots; terminal tasks without snapshots ARE prunable; only deletes snapshots with seq ≤ the scan-time max_seq (snapshots written mid-prune survive), GCs unreferenced OBJECT rows and dangling CACHE entries, then compacts.
+- `save_pipeline_upsert` does the name scan + insert in a single redb write transaction (write txns are globally serialized) — concurrent same-name applies cannot double-insert.
 - `find_pipeline_by_name` is a full table scan — **intentional** (pipeline count is small).
 - `storage.result_ttl` is live: default 3600s, floor 60s, stored in `TaskMeta.result_ttl_secs`. `snapshot_ttl` no longer exists (unknown-field error).
 
@@ -243,13 +249,13 @@ Error mapping: `WeaveError::BadRequest`/`Parse` → 400, `NotFound` → 404, `Un
 
 ## Tests
 
-- **169 lib tests** in-module (`#[cfg(test)]`) across dsl/engine/operator/store/tracker/vm; **24 bin tests** under `src/server` + `src/cli` (not in lib).
+- **186 lib tests** in-module (`#[cfg(test)]`) across dsl/engine/operator/store/tracker/vm; **24 bin tests** under `src/server` + `src/cli` (not in lib).
 - **28 integration test binaries** (51 tests) use `tests/common/mod.rs::run_yaml` — parse → validate → in-process `Runner` with a tempfile redb. No daemon, no network, no binary.
 - Coverage highlights: cache behavior (`tests/cache_control.rs`), retry/backoff/timeout (`tests/retry.rs`, `tests/step_timeout.rs`), env redaction, array index paths, merge deep, noop envelope (`tests/noop_output.rs`), v0 DB migration, Snapshot v2 layout roundtrip, prune max_seq guard, mark_interrupted, JS syntax sandbox (incl. `while(1){}` watchdog), `effective_max_workers`, command 10MB truncation, http_client split_url/SSRF, file allowlist edge cases, `wait_for_drain`, pidfile binary verification, `encode_segment`, log absolute offsets, `snapshot_and_subscribe` atomicity, `cleanup_stale`.
 
 ## Known bugs / open items
 
-The original 72-finding audit (2026-07-17) and the 2026-07-18 review + second-audit fix log (incl. the remaining open list: C6 auth, L4/L5/L6/L10/L12/L13/L14, intentional full-scan, JS-without-timeout blocking threads) are in **TODO.md → "代码审计报告" and "2026-07-18 复审 + 二次审计修复记录"**. Check them before touching engine/cache/resolver/daemon code.
+The original 72-finding audit (2026-07-17), the 2026-07-18 review + second-audit fix log (incl. the remaining open list: C6 auth, L4/L5/L6/L10/L12/L13/L14, intentional full-scan, JS-without-timeout blocking threads) and the **2026-07-20 third audit (24 fixes, 6 new open items: DNS rebinding TOCTOU, corrupt-row panics, cache two-txn window, unbounded queue, filter eq semantics, file TOCTOU)** are in **TODO.md → "代码审计报告"、"2026-07-18 复审 + 二次审计修复记录"、"三次审计修复记录"**. Check them before touching engine/cache/resolver/daemon code.
 
 ## Caveats when editing
 

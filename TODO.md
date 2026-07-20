@@ -377,3 +377,66 @@ engine 层 `run_with_timeout` 用 `tokio::time::timeout` 包裹 `op.run(inputs)`
 ### 附：TimeDelta 类型建议
 
 对 `timeout_sec: Option<chrono::TimeDelta>`：Raw 层保留 `Option<f64>`（YAML 输入），Pipeline 层（StepDef、JsInputs）内部存 `chrono::TimeDelta`，与 TTL 的 `Ttl(chrono::TimeDelta)` 保持一致风格。引擎层 `run_with_timeout` 转换为 `std::time::Duration`（`TimeDelta::to_std()`）。f64 → TimeDelta 用 `Duration::from_secs_f64(secs)` + `TimeDelta::from_std(dur)`，负数/NaN/Inf 在 validator 层已拦截。
+
+## 三次审计修复记录（2026-07-20）
+
+四轮并行只读 subagent 审计（engine/vm/tracker、dsl、store/server、operator/quickjs/cli），
+去重后 30 项，修复 24 项，余 6 项记入开放清单。分三批提交。
+
+### 批次 A — DSL / resolver / DAG 一致性
+
+| # | 级别 | 位置 | 问题 | 修法 |
+|---|------|------|------|------|
+| D1 | H | vm/resolver.rs | 单键 `{"Ref": <不可解析>}` 用户数据运行时硬错误，validator 却放行 | 解析失败回退为普通对象递归（三方对齐） |
+| D2 | M | vm/resolver.rs | Literal 负载内单键 `{"Literal": X}` 用户数据被静默拆包 | Literal 标签只在字段位置识别，负载内不递归识别 |
+| D3 | H | validator/dag | 裸 String 字段整串 `"{...}"`：validator/DAG 当 ref，resolver 当字面量（cycle 假阳性/误拒/静默错值） | validator/DAG 移除裸字符串 ref 识别，三方一致按字面量 |
+| D4 | M | validator | iterate.as 无校验，`as: slots` 等静默劫持 ref 解析 | 拒绝保留前缀/步骤 id 冲突/非法字符 |
+| D5 | M | validator | `{as_name.x}` 被误拒，与 resolver 透传语义相反 | as_name 前缀跳过存在性检查 |
+| D6 | M | validator | retry 无上限（u32::MAX 次 × u64::MAX ms） | max_attempts ≤ 100，delay_ms ≤ 1h |
+| D7 | L | validator | llm.temperature NaN/Inf 触发 to_value 失败被 unwrap_or(Null) 静默吞 | 有限数值校验 |
+| D8 | L | validator | base64.mode 无白名单（filter/sort 已有） | 补 mode + http.method 白名单 |
+| E1 | M | resolver | slots 路径不支持数组下标，静默 Null（step 路径是硬错误） | slots 与 step 分支对齐：数组严格、对象缺失 Null |
+| E4 | L | resolver | slot 解析失败 warn 把整层 slot 值写日志（大/敏感） | 日志只留路径与缺失段 |
+| E5 | L | validator | collect_slots_used 全路径比较，unused_slot 误报 | 按首段匹配 |
+
+### 批次 B — daemon / store
+
+| # | 级别 | 位置 | 问题 | 修法 |
+|---|------|------|------|------|
+| S3 | M | daemon.rs | draining 检查 → in_flight+1 之间 TOCTOU，停机窗口任务被中止 | 先占计数再复查 draining |
+| E2/S6 | M | daemon.rs | runner panic 跳过 in_flight 回收，drain 永远等满 30s | 回收移至外层 watcher 无条件执行 |
+| E3 | L | daemon.rs | panic 路径步骤永远 Running | tracker.fail_non_terminal_steps 收口 |
+| S1 | M | daemon.rs | stop() 10s SIGKILL < 30s drain，优雅停机被架空 | 超时改为 SHUTDOWN_DRAIN_SECS+5 |
+| S2 | M | daemon.rs | 健康检查不校验子进程存活，可误报启动成功（孤儿 daemon） | 循环内 try_wait |
+| S9 | L | daemon.rs | start 失败退出码 0 | exit(1) |
+| S10 | L | daemon.rs | kill(pid,0)=EPERM 误删他人 pidfile | EPERM 视为存活 |
+| S4 | M | store | save_pipeline_upsert check-then-act 并发同名双插 | 名称扫描并入写事务 |
+| S7 | L | store | 无 snapshot 的终态 task 永不进 prune plan | 非 running 且无 snapshot 也纳入 |
+
+### 批次 C — operator / quickjs / cli
+
+| # | 级别 | 位置 | 问题 | 修法 |
+|---|------|------|------|------|
+| O1 | H | http_client | SSRF 不识别 v4-mapped v6（`[::ffff:169.254.169.254]` 绕过）；0.0.0.0/CGNAT/198.18 未覆盖 | normalize_ip 归一化 + 补段 |
+| O3 | M | quickjs | inflate 解压炸弹：Rust 侧无界 Vec 绕过 256MB 沙箱限制，expect 可 panic | take(256MB+1) 有界读 + JS 异常 |
+| O4 | M | cli | 任务 Failed 时 CLI 退出码仍 0，CI 无法感知 | run_text/run_tui 返回 Err |
+| O6 | M | cli | TUI 同步阻塞循环直接跑在 tokio worker 上，单核饿死 WS reader | spawn_blocking |
+| O5 | M | llm | 共享 client 60s 总超时截断长生成 | llm 专用 client 600s |
+| O7 | L | sort/filter | 混合 int/float f64 比较在 ≥2^53 破坏全序 | cmp_i64_f64/cmp_u64_f64 精确比较 |
+| O9 | L | file | allowlist root 未 canonicalize，符号链接/相对 root 静默全拒 | root 先 canonicalize |
+| O11 | L | cli | daemon log 不读 X-Log-Truncated，缺口无提示 | 检测并提示 |
+
+### 仍开放（三次审计新增）
+
+| # | 说明 | 处置 |
+|---|------|------|
+| O2 | DNS rebinding TOCTOU：SSRF 检查与 reqwest 连接各自解析 DNS | 共享 OnceLock client 架构下难钉 resolve，记为已知残余风险（低 TTL 恶意域名场景） |
+| S5 | redb from_bytes 对损坏行 assert/expect panic | trait 限制无法返回 Result；单条坏行可 abort 请求/启动，待评估 catch_unwind |
+| S8 | set_cache_bytes OBJECT+CACHE 两事务，与 prune scan 存在窗口 | 后果仅 cache miss 自愈，低优先 |
+| S11 | semaphore 排队任务无上限（M16 有意设计的副作用） | 设计权衡，待需求 |
+| O8 | filter eq/ne/in 是严格 JSON 相等（1 ≠ 1.0），与 gt/lt 数值语义不一致 | 语义文档化，不改行为 |
+| O10 | file canonicalize→read TOCTOU（本地符号链接替换） | 需 openat2 级防护，本地威胁模型下接受 |
+| — | RawStepOp::Noop 带 inputs 键是否被 serde 静默吞掉 | 待验证 |
+| — | VariablePath::parse 的 trim() 使带空格字面量被意外当 ref | 设计取舍，待文档化 |
+
+本轮修复由模型 **kimi-for-coding/k3** 执行。测试：186 lib + 51 集成全绿，clippy 0 警告。
