@@ -270,7 +270,7 @@ Error mapping: `WeaveflowError::BadRequest`/`Parse` → 400, `NotFound` → 404,
 
 ## Known bugs / open items
 
-The original 72-finding audit (2026-07-17), the 2026-07-18 review + second-audit fix log (incl. the remaining open list: C6 auth, L4/L5/L6/L10/L12/L13/L14, intentional full-scan, JS-without-timeout blocking threads) and the **2026-07-20 third audit (24 fixes, 6 new open items: DNS rebinding TOCTOU, corrupt-row panics, cache two-txn window, unbounded queue, filter eq semantics, file TOCTOU)** are in **TODO.md → "代码审计报告"、"2026-07-18 复审 + 二次审计修复记录"、"三次审计修复记录"**. Check them before touching engine/cache/resolver/daemon code.
+All open items live in **TODO.md → "待修改（开放项）"**: priority-worthy (C6 auth, L14 llm api_key, S5 corrupt-row panics, Noop inputs swallowing), accepted residual risks (O2 DNS rebinding TOCTOU, S8 cache two-txn window, S11 unbounded queue, O10 file TOCTOU, L10/L12/L13), and documented-not-fixed semantics (L4 deep-copy, L5/L6 template literals, O8 filter eq `1 ≠ 1.0`). Intentional behaviors (full-scan `find_pipeline_by_name`, JS-without-timeout blocking threads, no implicit timeouts anywhere except step `timeout_sec`) are in TODO.md → "有意保留". Three rounds of audit detail (72 + 40+ + 30 findings, all fixed except the above) are archived in TODO.md → "归档：审计明细". Check them before touching engine/cache/resolver/daemon code.
 
 ## Caveats when editing
 
