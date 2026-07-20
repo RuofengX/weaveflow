@@ -13,10 +13,7 @@ impl Operator for VarOperator {
         OperatorSpec::new("var", "变量占位——将输入序列化输出，供下游引用")
     }
 
-    async fn run(
-        &self,
-        inputs: Value,
-    ) -> Result<Value, OperatorError> {
+    async fn run(&self, inputs: Value) -> Result<Value, OperatorError> {
         trace!("var operator (passthrough)");
         Ok(inputs)
     }

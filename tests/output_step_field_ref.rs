@@ -1,4 +1,3 @@
-
 // output_step_field_ref: pipeline output 为 {step.field} 时应返回字段值而非整个 step 输出
 
 #[path = "common/mod.rs"]

@@ -1,6 +1,5 @@
-
-use redb::{Key as RedbKey, TableDefinition, TypeName};
 use redb::Value as RedbValue;
+use redb::{Key as RedbKey, TableDefinition, TypeName};
 use std::cmp::Ordering;
 
 use crate::dsl::PipelineDef;
@@ -14,118 +13,226 @@ use uuid::Uuid;
 // ── TaskId（UUID v4，定长 16 字节） ───────────────────────────────────
 
 impl RedbValue for TaskId {
-    type SelfType<'a> = TaskId where Self: 'a;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
-    fn fixed_width() -> Option<usize> { Some(16) }
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where Self: 'a {
+    type SelfType<'a>
+        = TaskId
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
+    fn fixed_width() -> Option<usize> {
+        Some(16)
+    }
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
         let bytes: [u8; 16] = data[..16].try_into().expect("TaskId: 需要 16 字节");
         TaskId(Uuid::from_bytes(bytes))
     }
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
         value.0.as_bytes().to_vec()
     }
-    fn type_name() -> TypeName { TypeName::new("weaveflow::TaskId") }
+    fn type_name() -> TypeName {
+        TypeName::new("weaveflow::TaskId")
+    }
 }
 
 impl RedbKey for TaskId {
-    fn compare(data1: &[u8], data2: &[u8]) -> Ordering { data1.cmp(data2) }
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        data1.cmp(data2)
+    }
 }
 
 // ── PipelineId（UUID v4，定长 16 字节）
 
 impl RedbValue for PipelineId {
-    type SelfType<'a> = PipelineId where Self: 'a;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
-    fn fixed_width() -> Option<usize> { Some(16) }
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where Self: 'a {
+    type SelfType<'a>
+        = PipelineId
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
+    fn fixed_width() -> Option<usize> {
+        Some(16)
+    }
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
         let bytes: [u8; 16] = data[..16].try_into().expect("PipelineId: 需要 16 字节");
         PipelineId(Uuid::from_bytes(bytes))
     }
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
         value.0.as_bytes().to_vec()
     }
-    fn type_name() -> TypeName { TypeName::new("weaveflow::PipelineId") }
+    fn type_name() -> TypeName {
+        TypeName::new("weaveflow::PipelineId")
+    }
 }
 
 impl RedbKey for PipelineId {
-    fn compare(data1: &[u8], data2: &[u8]) -> Ordering { data1.cmp(data2) }
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        data1.cmp(data2)
+    }
 }
-
 
 // ── SnapshotKey（16 字节 UUID + 8 字节 u64 BE = 24 字节） ─────────────
 
 impl RedbValue for SnapshotKey {
-    type SelfType<'a> = SnapshotKey where Self: 'a;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
-    fn fixed_width() -> Option<usize> { Some(24) }
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where Self: 'a {
-        let uuid_bytes: [u8; 16] = data[..16].try_into().expect("SnapshotKey UUID: 需要 16 字节");
-        let seq = u64::from_be_bytes(data[16..24].try_into().expect("SnapshotKey seq: 需要 8 字节"));
-        SnapshotKey { task_id: Uuid::from_bytes(uuid_bytes), seq }
+    type SelfType<'a>
+        = SnapshotKey
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
+    fn fixed_width() -> Option<usize> {
+        Some(24)
     }
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        let uuid_bytes: [u8; 16] = data[..16]
+            .try_into()
+            .expect("SnapshotKey UUID: 需要 16 字节");
+        let seq = u64::from_be_bytes(
+            data[16..24]
+                .try_into()
+                .expect("SnapshotKey seq: 需要 8 字节"),
+        );
+        SnapshotKey {
+            task_id: Uuid::from_bytes(uuid_bytes),
+            seq,
+        }
+    }
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
         let mut buf = Vec::with_capacity(24);
         buf.extend_from_slice(value.task_id.as_bytes());
         buf.extend_from_slice(&value.seq.to_be_bytes());
         buf
     }
-    fn type_name() -> TypeName { TypeName::new("weaveflow::SnapshotKey") }
+    fn type_name() -> TypeName {
+        TypeName::new("weaveflow::SnapshotKey")
+    }
 }
 
 impl RedbKey for SnapshotKey {
-    fn compare(data1: &[u8], data2: &[u8]) -> Ordering { data1.cmp(data2) }
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        data1.cmp(data2)
+    }
 }
 
 // ── ObjectDigest（定长 32 字节 SHA256） ───────────────────────────────────
 
 impl RedbValue for ObjectDigest {
-    type SelfType<'a> = ObjectDigest where Self: 'a;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
-    fn fixed_width() -> Option<usize> { Some(32) }
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where Self: 'a {
-        let bytes: [u8; 32] = data
-            .try_into()
-            .expect("ObjectDigest: 需要 32 字节");
+    type SelfType<'a>
+        = ObjectDigest
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
+    fn fixed_width() -> Option<usize> {
+        Some(32)
+    }
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        let bytes: [u8; 32] = data.try_into().expect("ObjectDigest: 需要 32 字节");
         ObjectDigest(bytes)
     }
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
         value.as_bytes().to_vec()
     }
-    fn type_name() -> TypeName { TypeName::new("weaveflow::ObjectDigest::v1") }
+    fn type_name() -> TypeName {
+        TypeName::new("weaveflow::ObjectDigest::v1")
+    }
 }
 
 impl RedbKey for ObjectDigest {
-    fn compare(data1: &[u8], data2: &[u8]) -> Ordering { data1.cmp(data2) }
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        data1.cmp(data2)
+    }
 }
 
 // ── Value 类型：serde_json 序列化 ──────────────────────────────────────
 
 impl RedbValue for PipelineDef {
-    type SelfType<'a> = PipelineDef where Self: 'a;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
-    fn fixed_width() -> Option<usize> { None }
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where Self: 'a {
-        serde_json::from_slice(data)
-            .expect("反序列化 PipelineDef 失败")
+    type SelfType<'a>
+        = PipelineDef
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
+    fn fixed_width() -> Option<usize> {
+        None
     }
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        serde_json::from_slice(data).expect("反序列化 PipelineDef 失败")
+    }
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
         serde_json::to_vec(value).expect("序列化 PipelineDef 失败")
     }
-    fn type_name() -> TypeName { TypeName::new("weaveflow::PipelineDef::v1") }
+    fn type_name() -> TypeName {
+        TypeName::new("weaveflow::PipelineDef::v1")
+    }
 }
 
 impl RedbValue for TaskMeta {
-    type SelfType<'a> = TaskMeta where Self: 'a;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
-    fn fixed_width() -> Option<usize> { None }
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where Self: 'a {
-        serde_json::from_slice(data)
-            .expect("反序列化 TaskMeta 失败")
+    type SelfType<'a>
+        = TaskMeta
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
+    fn fixed_width() -> Option<usize> {
+        None
     }
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        serde_json::from_slice(data).expect("反序列化 TaskMeta 失败")
+    }
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
         serde_json::to_vec(value).expect("序列化 TaskMeta 失败")
     }
-    fn type_name() -> TypeName { TypeName::new("weaveflow::TaskMeta::v1") }
+    fn type_name() -> TypeName {
+        TypeName::new("weaveflow::TaskMeta::v1")
+    }
 }
 
 // ── Snapshot：自定义二进制布局（避免 serde_json 序列化 Vec<u8> 的 4 倍膨胀）──
@@ -150,16 +257,27 @@ fn snapshot_decode_header(data: &[u8]) -> (u64, StepId) {
         "Snapshot: step_id 长度 {step_len} 越界 (总长 {})",
         data.len()
     );
-    let step_id = String::from_utf8(data[12..12 + step_len].to_vec())
-        .expect("Snapshot: step_id 非 UTF-8");
+    let step_id =
+        String::from_utf8(data[12..12 + step_len].to_vec()).expect("Snapshot: step_id 非 UTF-8");
     (seq, StepId(step_id))
 }
 
 impl RedbValue for Snapshot {
-    type SelfType<'a> = Snapshot where Self: 'a;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
-    fn fixed_width() -> Option<usize> { None }
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where Self: 'a {
+    type SelfType<'a>
+        = Snapshot
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
         let (seq, step_id) = snapshot_decode_header(data);
         let step_len = u32::from_be_bytes(data[8..12].try_into().expect("len 4 字节")) as usize;
         Snapshot {
@@ -168,10 +286,15 @@ impl RedbValue for Snapshot {
             output: data[12 + step_len..].to_vec(),
         }
     }
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
         snapshot_encode(value.seq, &value.step_id.0, &value.output)
     }
-    fn type_name() -> TypeName { TypeName::new("weaveflow::Snapshot::v2") }
+    fn type_name() -> TypeName {
+        TypeName::new("weaveflow::Snapshot::v2")
+    }
 }
 
 /// 只读 header 的 Snapshot 视图（同表同类型名），用于列表/统计时跳过 output 拷贝。
@@ -182,31 +305,62 @@ pub(crate) struct SnapshotHeader {
 }
 
 impl RedbValue for SnapshotHeader {
-    type SelfType<'a> = SnapshotHeader where Self: 'a;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
-    fn fixed_width() -> Option<usize> { None }
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where Self: 'a {
+    type SelfType<'a>
+        = SnapshotHeader
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
         let (seq, step_id) = snapshot_decode_header(data);
         SnapshotHeader { seq, step_id }
     }
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
         snapshot_encode(value.seq, &value.step_id.0, &[])
     }
-    fn type_name() -> TypeName { TypeName::new("weaveflow::Snapshot::v2") }
+    fn type_name() -> TypeName {
+        TypeName::new("weaveflow::Snapshot::v2")
+    }
 }
 
 impl RedbValue for ObjectValue {
-    type SelfType<'a> = ObjectValue where Self: 'a;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
-    fn fixed_width() -> Option<usize> { None }
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where Self: 'a {
-        serde_json::from_slice(data)
-            .expect("反序列化 ObjectValue 失败")
+    type SelfType<'a>
+        = ObjectValue
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
+    fn fixed_width() -> Option<usize> {
+        None
     }
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        serde_json::from_slice(data).expect("反序列化 ObjectValue 失败")
+    }
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
         serde_json::to_vec(value).expect("序列化 ObjectValue 失败")
     }
-    fn type_name() -> TypeName { TypeName::new("weaveflow::Object::v1") }
+    fn type_name() -> TypeName {
+        TypeName::new("weaveflow::Object::v1")
+    }
 }
 
 pub const PIPELINE: TableDefinition<PipelineId, PipelineDef> = TableDefinition::new("pipeline");
@@ -220,23 +374,39 @@ pub const OBJECT: TableDefinition<ObjectDigest, ObjectValue> = TableDefinition::
 pub struct CacheKey(pub ObjectDigest);
 
 impl RedbValue for CacheKey {
-    type SelfType<'a> = CacheKey where Self: 'a;
-    type AsBytes<'a> = Vec<u8> where Self: 'a;
-    fn fixed_width() -> Option<usize> { Some(32) }
-    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where Self: 'a {
-        let bytes: [u8; 32] = data
-            .try_into()
-            .expect("CacheKey: 需要 32 字节");
+    type SelfType<'a>
+        = CacheKey
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
+    fn fixed_width() -> Option<usize> {
+        Some(32)
+    }
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        let bytes: [u8; 32] = data.try_into().expect("CacheKey: 需要 32 字节");
         CacheKey(ObjectDigest(bytes))
     }
-    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
         value.0.as_bytes().to_vec()
     }
-    fn type_name() -> TypeName { TypeName::new("weaveflow::CacheKey") }
+    fn type_name() -> TypeName {
+        TypeName::new("weaveflow::CacheKey")
+    }
 }
 
 impl RedbKey for CacheKey {
-    fn compare(data1: &[u8], data2: &[u8]) -> Ordering { data1.cmp(data2) }
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        data1.cmp(data2)
+    }
 }
 
 pub const CACHE: TableDefinition<CacheKey, ObjectDigest> = TableDefinition::new("cache");
@@ -254,16 +424,32 @@ macro_rules! v0_value {
         pub(crate) struct $name(pub serde_json::Value);
 
         impl RedbValue for $name {
-            type SelfType<'a> = $name where Self: 'a;
-            type AsBytes<'a> = Vec<u8> where Self: 'a;
-            fn fixed_width() -> Option<usize> { None }
-            fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a> where Self: 'a {
+            type SelfType<'a>
+                = $name
+            where
+                Self: 'a;
+            type AsBytes<'a>
+                = Vec<u8>
+            where
+                Self: 'a;
+            fn fixed_width() -> Option<usize> {
+                None
+            }
+            fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+            where
+                Self: 'a,
+            {
                 $name(serde_json::from_slice(data).expect("反序列化 v0 行失败"))
             }
-            fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
+            fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+            where
+                Self: 'b,
+            {
                 serde_json::to_vec(&value.0).expect("序列化 v0 行失败")
             }
-            fn type_name() -> TypeName { TypeName::new($type_name) }
+            fn type_name() -> TypeName {
+                TypeName::new($type_name)
+            }
         }
     };
 }
@@ -297,7 +483,10 @@ mod tests {
             assert!(dbg.contains("::v1"), "type name {dbg} missing ::v1 suffix");
         }
         let snap = format!("{:?}", <Snapshot as RedbValue>::type_name());
-        assert!(snap.contains("::v2"), "type name {snap} missing ::v2 suffix");
+        assert!(
+            snap.contains("::v2"),
+            "type name {snap} missing ::v2 suffix"
+        );
         let snap_header = format!("{:?}", <SnapshotHeader as RedbValue>::type_name());
         assert_eq!(snap, snap_header, "SnapshotHeader 必须与 Snapshot 同类型名");
     }

@@ -21,7 +21,9 @@ fn bench_iterate_batch(c: &mut Criterion) {
     let tmpdir = TempDir::new("iter");
 
     for &bs in &[Some(100), Some(200), Some(500), None] {
-        let label = bs.map(|n| format!("batch_size_{n}")).unwrap_or_else(|| "batch_none".into());
+        let label = bs
+            .map(|n| format!("batch_size_{n}"))
+            .unwrap_or_else(|| "batch_none".into());
         let yaml = build_iterate_pipeline(bs);
         let def = weaveflow::dsl::parser::parse(&yaml).expect("parse");
 

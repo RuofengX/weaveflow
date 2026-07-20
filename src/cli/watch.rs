@@ -4,9 +4,11 @@ use std::io;
 use std::sync::Arc;
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{prelude::*, widgets::*};
 use serde_json::Value;
@@ -58,11 +60,13 @@ pub fn run_tui(
     match res {
         Ok(()) => {
             if let Some(ref data) = state.data {
-                let out = data
-                    .get("status")
-                    .and_then(|s| s.get("Completed"));
+                let out = data.get("status").and_then(|s| s.get("Completed"));
                 if let Some(out) = out {
-                    if out.get("_binary").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    if out
+                        .get("_binary")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
                         let size = out.get("_size").and_then(|v| v.as_u64()).unwrap_or(0);
                         println!("\n[binary {size} bytes]");
                     } else if out.is_object() || out.is_array() {
@@ -112,88 +116,101 @@ pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), Str
     let mut finished = false;
     let mut task_error: Option<String> = None;
     while let Some(data) = rx.recv().await {
-                let status = data
-                    .get("status")
-                    .and_then(|s| s.as_object())
-                    .and_then(|o| o.keys().next().map(|k| k.as_str()))
-                    .unwrap_or("unknown");
+        let status = data
+            .get("status")
+            .and_then(|s| s.as_object())
+            .and_then(|o| o.keys().next().map(|k| k.as_str()))
+            .unwrap_or("unknown");
 
-                print_text_layer(&data, &mut completed_layers);
+        print_text_layer(&data, &mut completed_layers);
 
-                if status == "Completed" || status == "Failed" {
-                    if status == "Completed" {
-                        if let Some(out) = data
-                            .get("status")
-                            .and_then(|s| s.get("Completed"))
-                        {
-                            if out.get("_binary").and_then(|v| v.as_bool()).unwrap_or(false) {
-                                let size = out.get("_size").and_then(|v| v.as_u64()).unwrap_or(0);
-                                println!("[weaveflow] output: [binary {size} bytes]");
-                            } else if out.is_string() && out.as_str().map(|s| s.chars().count()).unwrap_or(0) > 200 {
-                                let s = out.as_str().unwrap();
-                                let preview: String = s.chars().take(200).collect();
-                                println!("[weaveflow] output: {preview}... ({} chars)", s.chars().count());
-                            } else {
-                                println!(
-                                    "[weaveflow] output: {}",
-                                    serde_json::to_string(out).unwrap_or_default()
-                                );
-                            }
-                        }
-                        if let Some(steps) = data.get("steps").and_then(|s| s.as_array()) {
-                            println!("[weaveflow] step progress:");
-                            for step in steps {
-                                let sid = step.get("step_id").and_then(|v| v.as_str()).unwrap_or("?");
-                                let state = step.get("state").and_then(|s| s.as_object());
-                                let state_str = match state {
-                                    Some(obj) => {
-                                        let variant = obj.keys().next().map(|k| k.as_str()).unwrap_or("?");
-                                        match variant {
-                                            "Completed" => {
-                                                let dur = obj.get("Completed")
-                                                    .and_then(|c| c.get("duration_ms"))
-                                                    .and_then(|v| v.as_u64())
-                                                    .unwrap_or(0);
-                                                let cached = obj.get("Completed")
-                                                    .and_then(|c| c.get("cached"))
-                                                    .and_then(|v| v.as_bool())
-                                                    .unwrap_or(false);
-                                                if cached { format!("✓ ({dur}ms ♻)") } else { format!("✓ ({dur}ms)") }
-                                            }
-                                            "Failed" => {
-                                                let err = obj.get("Failed")
-                                                    .and_then(|f| f.get("error"))
-                                                    .and_then(|v| v.as_str())
-                                                    .unwrap_or("?");
-                                                format!("✗ ({err})")
-                                            }
-                                            "Iterating" => "◐".to_string(),
-                                            "Running" => "●".to_string(),
-                                            "Skipped" => "—".to_string(),
-                                            _ => variant.to_string(),
+        if status == "Completed" || status == "Failed" {
+            if status == "Completed" {
+                if let Some(out) = data.get("status").and_then(|s| s.get("Completed")) {
+                    if out
+                        .get("_binary")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        let size = out.get("_size").and_then(|v| v.as_u64()).unwrap_or(0);
+                        println!("[weaveflow] output: [binary {size} bytes]");
+                    } else if out.is_string()
+                        && out.as_str().map(|s| s.chars().count()).unwrap_or(0) > 200
+                    {
+                        let s = out.as_str().unwrap();
+                        let preview: String = s.chars().take(200).collect();
+                        println!(
+                            "[weaveflow] output: {preview}... ({} chars)",
+                            s.chars().count()
+                        );
+                    } else {
+                        println!(
+                            "[weaveflow] output: {}",
+                            serde_json::to_string(out).unwrap_or_default()
+                        );
+                    }
+                }
+                if let Some(steps) = data.get("steps").and_then(|s| s.as_array()) {
+                    println!("[weaveflow] step progress:");
+                    for step in steps {
+                        let sid = step.get("step_id").and_then(|v| v.as_str()).unwrap_or("?");
+                        let state = step.get("state").and_then(|s| s.as_object());
+                        let state_str = match state {
+                            Some(obj) => {
+                                let variant = obj.keys().next().map(|k| k.as_str()).unwrap_or("?");
+                                match variant {
+                                    "Completed" => {
+                                        let dur = obj
+                                            .get("Completed")
+                                            .and_then(|c| c.get("duration_ms"))
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0);
+                                        let cached = obj
+                                            .get("Completed")
+                                            .and_then(|c| c.get("cached"))
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false);
+                                        if cached {
+                                            format!("✓ ({dur}ms ♻)")
+                                        } else {
+                                            format!("✓ ({dur}ms)")
                                         }
                                     }
-                                    None => "?".to_string(),
-                                };
-                                println!("  {sid}: {state_str}");
+                                    "Failed" => {
+                                        let err = obj
+                                            .get("Failed")
+                                            .and_then(|f| f.get("error"))
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("?");
+                                        format!("✗ ({err})")
+                                    }
+                                    "Iterating" => "◐".to_string(),
+                                    "Running" => "●".to_string(),
+                                    "Skipped" => "—".to_string(),
+                                    _ => variant.to_string(),
+                                }
                             }
-                        }
+                            None => "?".to_string(),
+                        };
+                        println!("  {sid}: {state_str}");
                     }
-                    if status == "Failed" {
-                        let err = data
-                            .get("status")
-                            .and_then(|s| s.get("Failed"))
-                            .and_then(|f| f.as_str())
-                            .unwrap_or("unknown error");
-                        eprintln!("[weaveflow] error: {err}");
-                        task_error = Some(err.to_string());
-                    }
-                    if let Some(dur) = data.get("total_duration_ms").and_then(|v| v.as_u64()) {
-                        println!("[weaveflow] completed in {}ms", dur);
-                    }
-                    finished = true;
-                    break;
                 }
+            }
+            if status == "Failed" {
+                let err = data
+                    .get("status")
+                    .and_then(|s| s.get("Failed"))
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("unknown error");
+                eprintln!("[weaveflow] error: {err}");
+                task_error = Some(err.to_string());
+            }
+            if let Some(dur) = data.get("total_duration_ms").and_then(|v| v.as_u64()) {
+                println!("[weaveflow] completed in {}ms", dur);
+            }
+            finished = true;
+            break;
+        }
     }
     if !finished {
         return Err("connection to daemon lost before task completion".to_string());
@@ -251,10 +268,7 @@ fn print_text_layer(data: &Value, completed: &mut HashSet<usize>) {
     let step_details = steps_detail_map(data);
 
     for layer in &layers {
-        let idx = layer
-            .get("index")
-            .and_then(|i| i.as_u64())
-            .unwrap_or(0) as usize;
+        let idx = layer.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
         if completed.contains(&idx) {
             continue;
         }
@@ -295,7 +309,11 @@ fn print_text_layer(data: &Value, completed: &mut HashSet<usize>) {
             })
             .collect();
 
-        let parallel = if step_ids.len() > 1 { " (parallel)" } else { "" };
+        let parallel = if step_ids.len() > 1 {
+            " (parallel)"
+        } else {
+            ""
+        };
         println!(
             "[weaveflow] Layer {}{}: {}",
             idx + 1,
@@ -411,12 +429,13 @@ fn run_app(
 
         if event::poll(std::time::Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-                    && (matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
-                        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)))
-                    {
-                        return Ok(());
-                    }
+            && key.kind == KeyEventKind::Press
+            && (matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                || (key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)))
+        {
+            return Ok(());
+        }
 
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -469,38 +488,36 @@ fn ui(f: &mut Frame, state: &TuiState) {
 
         for sid in &step_ids {
             let (icon, detail) = match step_states.get(*sid) {
-                Some((state_variant, detail_str)) => {
-                    match state_variant.as_str() {
-                        "Pending" => {
-                            counts.pending += 1;
-                            ("○", "pending".to_string())
-                        }
-                        "Skipped" => {
-                            counts.skipped += 1;
-                            ("—", "skipped".to_string())
-                        }
-                        "Running" => {
-                            counts.running += 1;
-                            ("●", detail_str.clone())
-                        }
-                        "Iterating" => {
-                            counts.iterating += 1;
-                            ("◐", detail_str.clone())
-                        }
-                        "Completed" => {
-                            counts.completed += 1;
-                            ("✓", detail_str.clone())
-                        }
-                        "Failed" => {
-                            counts.failed += 1;
-                            ("✗", detail_str.clone())
-                        }
-                        _ => {
-                            counts.pending += 1;
-                            ("○", "?".to_string())
-                        }
+                Some((state_variant, detail_str)) => match state_variant.as_str() {
+                    "Pending" => {
+                        counts.pending += 1;
+                        ("○", "pending".to_string())
                     }
-                }
+                    "Skipped" => {
+                        counts.skipped += 1;
+                        ("—", "skipped".to_string())
+                    }
+                    "Running" => {
+                        counts.running += 1;
+                        ("●", detail_str.clone())
+                    }
+                    "Iterating" => {
+                        counts.iterating += 1;
+                        ("◐", detail_str.clone())
+                    }
+                    "Completed" => {
+                        counts.completed += 1;
+                        ("✓", detail_str.clone())
+                    }
+                    "Failed" => {
+                        counts.failed += 1;
+                        ("✗", detail_str.clone())
+                    }
+                    _ => {
+                        counts.pending += 1;
+                        ("○", "?".to_string())
+                    }
+                },
                 None => {
                     counts.pending += 1;
                     ("○", "unknown".to_string())
@@ -537,7 +554,12 @@ fn ui(f: &mut Frame, state: &TuiState) {
     )));
     lines.push(Line::from(format!(
         "● {} running  ◐ {} iterating  ✓ {} done  — {} skipped  ○ {} pending  ✗ {} failed",
-        counts.running, counts.iterating, counts.completed, counts.skipped, counts.pending, counts.failed,
+        counts.running,
+        counts.iterating,
+        counts.completed,
+        counts.skipped,
+        counts.pending,
+        counts.failed,
     )));
 
     let status = data
@@ -546,10 +568,16 @@ fn ui(f: &mut Frame, state: &TuiState) {
         .and_then(|o| o.keys().next().map(|k| k.as_str()))
         .unwrap_or("?");
     match status {
-        "Completed" => lines.push(Line::from(Span::styled("COMPLETED", Style::default().fg(Color::Green).bold()))),
+        "Completed" => lines.push(Line::from(Span::styled(
+            "COMPLETED",
+            Style::default().fg(Color::Green).bold(),
+        ))),
         "Failed" => {
             let err = state.error.as_deref().unwrap_or("unknown");
-            lines.push(Line::from(Span::styled(format!("FAILED: {err}"), Style::default().fg(Color::Red).bold())));
+            lines.push(Line::from(Span::styled(
+                format!("FAILED: {err}"),
+                Style::default().fg(Color::Red).bold(),
+            )));
         }
         _ => {}
     }
@@ -573,16 +601,13 @@ fn build_step_states(data: &Value) -> HashMap<String, (String, String)> {
 
     // Prefer top-level "steps" array (always present in TaskSnapshot).
     // Fall back to "status.{variant}.steps" for backward compatibility.
-    let steps_arr = data
-        .get("steps")
-        .and_then(|s| s.as_array())
-        .or_else(|| {
-            data.get("status")
-                .and_then(|s| s.as_object())
-                .and_then(|obj| obj.values().next())
-                .and_then(|inner| inner.get("steps"))
-                .and_then(|s| s.as_array())
-        });
+    let steps_arr = data.get("steps").and_then(|s| s.as_array()).or_else(|| {
+        data.get("status")
+            .and_then(|s| s.as_object())
+            .and_then(|obj| obj.values().next())
+            .and_then(|inner| inner.get("steps"))
+            .and_then(|s| s.as_array())
+    });
 
     let Some(steps_arr) = steps_arr else {
         return map;
@@ -598,7 +623,12 @@ fn build_step_states(data: &Value) -> HashMap<String, (String, String)> {
 
         let (variant, detail) = match state_obj {
             Some(obj) => {
-                let variant = obj.keys().next().map(|k| k.as_str()).unwrap_or("?").to_string();
+                let variant = obj
+                    .keys()
+                    .next()
+                    .map(|k| k.as_str())
+                    .unwrap_or("?")
+                    .to_string();
                 let detail = match variant.as_str() {
                     "Pending" => "pending".to_string(),
                     "Skipped" => "skipped".to_string(),
@@ -613,11 +643,15 @@ fn build_step_states(data: &Value) -> HashMap<String, (String, String)> {
                         format!("running {}ms", elapsed.max(0))
                     }
                     "Iterating" => {
-                        let progress = obj
-                            .get("Iterating")
-                            .and_then(|i| i.get("progress"));
-                        let done = progress.and_then(|p| p.get("done")).and_then(|v| v.as_u64()).unwrap_or(0);
-                        let total = progress.and_then(|p| p.get("total")).and_then(|v| v.as_u64()).unwrap_or(0);
+                        let progress = obj.get("Iterating").and_then(|i| i.get("progress"));
+                        let done = progress
+                            .and_then(|p| p.get("done"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let total = progress
+                            .and_then(|p| p.get("total"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
                         let bar = progress_bar(done, total, 20);
                         format!("{bar} {done}/{total}")
                     }
@@ -635,13 +669,12 @@ fn build_step_states(data: &Value) -> HashMap<String, (String, String)> {
                         let cache = if cached { " ♻" } else { "" };
                         format!("{dur}ms{cache}")
                     }
-                    "Failed" => {
-                        obj.get("Failed")
-                            .and_then(|f| f.get("error"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("error")
-                            .to_string()
-                    }
+                    "Failed" => obj
+                        .get("Failed")
+                        .and_then(|f| f.get("error"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("error")
+                        .to_string(),
                     _ => "?".to_string(),
                 };
                 (variant, detail)

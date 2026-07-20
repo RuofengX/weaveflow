@@ -1,4 +1,3 @@
-
 // merge_literal_inputs_key: 字面对象中的 inputs 键不应坍缩，兄弟键必须保留
 
 #[path = "common/mod.rs"]

@@ -33,37 +33,51 @@ impl Drop for TempDir {
 pub fn generate_orders(n: usize) -> Vec<serde_json::Value> {
     let statuses = ["paid", "pending", "paid", "cancelled", "paid"];
     let cities = [
-        "Beijing", "Shanghai", "Shenzhen", "Hangzhou", "Chengdu",
-        "Guangzhou", "Nanjing", "Wuhan", "Xian", "Chongqing",
+        "Beijing",
+        "Shanghai",
+        "Shenzhen",
+        "Hangzhou",
+        "Chengdu",
+        "Guangzhou",
+        "Nanjing",
+        "Wuhan",
+        "Xian",
+        "Chongqing",
     ];
     (0..n)
-        .map(|i| json!({
-            "order_id": format!("ORD-{:06}", i),
-            "user_id": format!("U{}", i % 1000),
-            "city": cities[i % cities.len()],
-            "status": statuses[i % statuses.len()],
-            "total": (100.0 + ((i * 7) % 9000) as f64) / 10.0,
-        }))
+        .map(|i| {
+            json!({
+                "order_id": format!("ORD-{:06}", i),
+                "user_id": format!("U{}", i % 1000),
+                "city": cities[i % cities.len()],
+                "status": statuses[i % statuses.len()],
+                "total": (100.0 + ((i * 7) % 9000) as f64) / 10.0,
+            })
+        })
         .collect()
 }
 
 pub fn generate_nested_data(n: usize) -> Vec<serde_json::Value> {
     let tags = ["urgent", "normal", "low", "urgent", "normal"];
     (0..n)
-        .map(|i| json!({
-            "id": i,
-            "priority": tags[i % tags.len()],
-            "metadata": {
-                "source": format!("src-{}", i % 5),
-                "version": i as u32 % 3 + 1,
-            },
-            "values": (0..(i % 10 + 1)).map(|j| j as f64 * 1.5).collect::<Vec<_>>(),
-        }))
+        .map(|i| {
+            json!({
+                "id": i,
+                "priority": tags[i % tags.len()],
+                "metadata": {
+                    "source": format!("src-{}", i % 5),
+                    "version": i as u32 % 3 + 1,
+                },
+                "values": (0..(i % 10 + 1)).map(|j| j as f64 * 1.5).collect::<Vec<_>>(),
+            })
+        })
         .collect()
 }
 
 pub fn build_iterate_pipeline(batch_size: Option<usize>) -> String {
-    let batch = batch_size.map(|n| format!("batch:\n        size: {n}\n")).unwrap_or_default();
+    let batch = batch_size
+        .map(|n| format!("batch:\n        size: {n}\n"))
+        .unwrap_or_default();
     format!(
         r#"name: etl_iterate
 steps:
@@ -202,7 +216,10 @@ pub fn setup(
     let layer_infos: Vec<LayerInfo> = layers
         .iter()
         .enumerate()
-        .map(|(i, step_ids)| LayerInfo { index: i, step_ids: step_ids.clone() })
+        .map(|(i, step_ids)| LayerInfo {
+            index: i,
+            step_ids: step_ids.clone(),
+        })
         .collect();
 
     let task_id = db
@@ -230,5 +247,8 @@ pub fn fresh_db(tmpdir: &TempDir, prefix: &str, counter: &AtomicUsize) -> (Arc<D
     let n = counter.fetch_add(1, Ordering::Relaxed);
     let dir = tmpdir.0.join(format!("{prefix}-{n}"));
     let _ = std::fs::create_dir_all(&dir);
-    (Arc::new(Database::open(dir.join("weaveflow.redb")).expect("open db")), dir)
+    (
+        Arc::new(Database::open(dir.join("weaveflow.redb")).expect("open db")),
+        dir,
+    )
 }

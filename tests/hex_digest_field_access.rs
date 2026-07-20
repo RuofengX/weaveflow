@@ -1,4 +1,3 @@
-
 // hex_digest_field_access
 
 #[path = "common/mod.rs"]

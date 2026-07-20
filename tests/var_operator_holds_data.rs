@@ -1,4 +1,3 @@
-
 // var_operator_holds_data
 
 #[path = "common/mod.rs"]

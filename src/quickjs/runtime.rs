@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
 
@@ -89,8 +89,9 @@ fn run_in_new_runtime(script: &str, interrupted: Arc<AtomicBool>) -> WeaveflowRe
                     .expect("base64 decode failed")
             });
 
-            let native = rquickjs::Object::new(ctx.clone())
-                .map_err(|e| crate::error::WeaveflowError::Internal(format!("create __native__: {e}")))?;
+            let native = rquickjs::Object::new(ctx.clone()).map_err(|e| {
+                crate::error::WeaveflowError::Internal(format!("create __native__: {e}"))
+            })?;
             native
                 .set("inflate", inflate_fn)
                 .map_err(|e| crate::error::WeaveflowError::Internal(format!("set inflate: {e}")))?;
@@ -103,9 +104,9 @@ fn run_in_new_runtime(script: &str, interrupted: Arc<AtomicBool>) -> WeaveflowRe
             globals.set("__native__", native).unwrap();
         }
 
-        let json_str: String = ctx
-            .eval(script)
-            .map_err(|e| crate::error::WeaveflowError::Internal(format!("JS runtime error: {e}")))?;
+        let json_str: String = ctx.eval(script).map_err(|e| {
+            crate::error::WeaveflowError::Internal(format!("JS runtime error: {e}"))
+        })?;
         let val: Value = serde_json::from_str(&json_str)
             .map_err(|e| crate::error::WeaveflowError::Internal(format!("parse JS output: {e}")))?;
         let obj = val.as_object();

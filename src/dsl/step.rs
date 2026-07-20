@@ -40,7 +40,7 @@ impl From<&str> for StepId {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
- pub struct StepDef {
+pub struct StepDef {
     pub id: StepId,
     #[serde(default)]
     pub after: Option<Vec<StepId>>,

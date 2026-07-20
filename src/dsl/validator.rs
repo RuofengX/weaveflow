@@ -92,13 +92,10 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
         } else if !is_valid_step_id(&step.id.0) {
             report.errors.push(ValidationError {
                 code: "invalid_name_charset".into(),
-                message: format!(
-                    "步骤 ID 含非法字符（仅允许 [A-Za-z0-9_-]）: {}",
-                    step.id
-                ),
+                message: format!("步骤 ID 含非法字符（仅允许 [A-Za-z0-9_-]）: {}", step.id),
             });
         }
-        if step.id.0 == "slots" || step.id.0 == "env"  {
+        if step.id.0 == "slots" || step.id.0 == "env" {
             report.errors.push(ValidationError {
                 code: "reserved_step_id".into(),
                 message: format!("步骤 ID 不能使用保留名称: {}", step.id),
@@ -134,8 +131,7 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
 
         // 检查 inputs 中的变量引用
         {
-            let op_val =
-                serde_json::to_value(&step.op).unwrap_or(Value::Null);
+            let op_val = serde_json::to_value(&step.op).unwrap_or(Value::Null);
             let as_name = step.iterate.as_ref().map(|c| c.as_name.as_str());
             check_ref_in_json(&op_val, &all_step_ids, &step.id, as_name, &mut report);
         }
@@ -198,18 +194,17 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
                     });
                 }
             }
-            StepOp::Sort(inputs)
-                if !SORT_ORDERS.contains(&inputs.order.as_str()) => {
-                    report.errors.push(ValidationError {
-                        code: "invalid_operator_config".into(),
-                        message: format!(
-                            "步骤 {} 的 sort.order 非法: {}（可选: {}）",
-                            step.id,
-                            inputs.order,
-                            SORT_ORDERS.join("/")
-                        ),
-                    });
-                }
+            StepOp::Sort(inputs) if !SORT_ORDERS.contains(&inputs.order.as_str()) => {
+                report.errors.push(ValidationError {
+                    code: "invalid_operator_config".into(),
+                    message: format!(
+                        "步骤 {} 的 sort.order 非法: {}（可选: {}）",
+                        step.id,
+                        inputs.order,
+                        SORT_ORDERS.join("/")
+                    ),
+                });
+            }
             _ => {}
         }
 
@@ -273,10 +268,7 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
         } else if !is_valid_slot_name(&slot.name) {
             report.errors.push(ValidationError {
                 code: "invalid_name_charset".into(),
-                message: format!(
-                    "slot 名称含非法字符（仅允许 [A-Za-z0-9_-]）: {}",
-                    slot.name
-                ),
+                message: format!("slot 名称含非法字符（仅允许 [A-Za-z0-9_-]）: {}", slot.name),
             });
         }
         if !slot.name.is_empty() && !seen_slots.insert(&slot.name) {
@@ -327,10 +319,7 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
                 if dep != &step.id && !all_step_ids.contains(dep.0.as_str()) {
                     report.errors.push(ValidationError {
                         code: "after_ref_not_found".into(),
-                        message: format!(
-                            "步骤 {} 的 after 引用了不存在的步骤: {}",
-                            step.id, dep
-                        ),
+                        message: format!("步骤 {} 的 after 引用了不存在的步骤: {}", step.id, dep),
                     });
                 }
             }
@@ -410,21 +399,30 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
         let sid = step.id.clone();
         if let Some(ref after) = step.after {
             for dep in after {
-                upstream_deps.entry(sid.clone()).or_default().push(dep.clone());
+                upstream_deps
+                    .entry(sid.clone())
+                    .or_default()
+                    .push(dep.clone());
             }
         }
         {
             let op_val = serde_json::to_value(&step.op).unwrap_or(Value::Null);
             for (prefix, _) in refs_in_json(&op_val) {
                 if prefix != "slots" && prefix != "env" {
-                    upstream_deps.entry(sid.clone()).or_default().push(StepId::from(prefix));
+                    upstream_deps
+                        .entry(sid.clone())
+                        .or_default()
+                        .push(StepId::from(prefix));
                 }
             }
         }
         if let Some(ref cfg) = step.iterate {
             for (prefix, _) in refs_in_path(&cfg.over) {
                 if prefix != "slots" && prefix != "env" {
-                    upstream_deps.entry(sid.clone()).or_default().push(StepId::from(prefix));
+                    upstream_deps
+                        .entry(sid.clone())
+                        .or_default()
+                        .push(StepId::from(prefix));
                 }
             }
         }
@@ -640,10 +638,7 @@ fn check_step_ref_prefix(
     } else if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix) {
         report.errors.push(ValidationError {
             code: "variable_ref_not_found".into(),
-            message: format!(
-                "步骤 {} 中引用了不存在的步骤: {}",
-                step_id, prefix
-            ),
+            message: format!("步骤 {} 中引用了不存在的步骤: {}", step_id, prefix),
         });
     }
 }
@@ -675,19 +670,18 @@ fn check_ref_in_json(
     }
 }
 
-fn check_output_ref(
-    output: &RefValue,
-    all_ids: &HashSet<StepId>,
-    report: &mut ValidationReport,
-) {
+fn check_output_ref(output: &RefValue, all_ids: &HashSet<StepId>, report: &mut ValidationReport) {
     match output {
         RefValue::Ref(path) => {
             if let Some(prefix) = path.parts.first()
-                && prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
-                    report.errors.push(ValidationError {
-                        code: "output_ref_not_found".into(),
-                        message: format!("output 引用了不存在的步骤: {}", prefix),
-                    });
+                && prefix != "slots"
+                && prefix != "env"
+                && !all_ids.contains(prefix.as_str())
+            {
+                report.errors.push(ValidationError {
+                    code: "output_ref_not_found".into(),
+                    message: format!("output 引用了不存在的步骤: {}", prefix),
+                });
             }
         }
         RefValue::Literal(lit) => {
@@ -718,7 +712,11 @@ fn check_iterate_config(
                 message: format!("步骤 {} 的 iterate.as 不能为空", step_id),
             });
         } else {
-            if !cfg.as_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            if !cfg
+                .as_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
                 report.errors.push(ValidationError {
                     code: "invalid_iterate_config".into(),
                     message: format!(
@@ -783,7 +781,10 @@ fn check_iterate_config(
                     code: "self_reference".into(),
                     message: format!("步骤 {} 的 iterate.over 引用了自身", step_id),
                 });
-            } else if prefix != "slots" && prefix != "env" && !all_step_ids.contains(prefix.as_str()) {
+            } else if prefix != "slots"
+                && prefix != "env"
+                && !all_step_ids.contains(prefix.as_str())
+            {
                 report.errors.push(ValidationError {
                     code: "variable_ref_not_found".into(),
                     message: format!(
@@ -843,22 +844,20 @@ fn check_js_syntax(id: &StepId, code: &RefValue, report: &mut ValidationReport) 
             interrupted.store(true, Ordering::SeqCst);
         })
     };
-    let syntax_err: Option<String> = ctx.with(|ctx| {
-        match ctx.eval::<rquickjs::Value, _>(source) {
-            Ok(_) => None,
-            Err(rquickjs::Error::Exception) => {
-                let ex = ctx.catch();
-                if let Some(obj) = ex.as_object() {
-                    let name = obj.get::<_, String>("name").unwrap_or_default();
-                    if name == "SyntaxError" {
-                        let message = obj.get::<_, String>("message").unwrap_or_default();
-                        return Some(format!("{name}: {message}"));
-                    }
+    let syntax_err: Option<String> = ctx.with(|ctx| match ctx.eval::<rquickjs::Value, _>(source) {
+        Ok(_) => None,
+        Err(rquickjs::Error::Exception) => {
+            let ex = ctx.catch();
+            if let Some(obj) = ex.as_object() {
+                let name = obj.get::<_, String>("name").unwrap_or_default();
+                if name == "SyntaxError" {
+                    let message = obj.get::<_, String>("message").unwrap_or_default();
+                    return Some(format!("{name}: {message}"));
                 }
-                None
             }
-            Err(_) => None,
+            None
         }
+        Err(_) => None,
     });
     done.store(true, Ordering::SeqCst);
     let _ = watchdog.join();
@@ -901,7 +900,11 @@ mod tests {
     fn step_noop(id: &str, after: Vec<&str>) -> StepDef {
         StepDef {
             id: id.into(),
-            after: if after.is_empty() { None } else { Some(after.into_iter().map(|s| s.into()).collect()) },
+            after: if after.is_empty() {
+                None
+            } else {
+                Some(after.into_iter().map(|s| s.into()).collect())
+            },
             iterate: None,
             cache: None,
             retry: None,
@@ -943,7 +946,12 @@ mod tests {
         let mut def = valid_def();
         def.name = "".into();
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "empty_pipeline_name"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "empty_pipeline_name")
+        );
     }
 
     #[test]
@@ -986,7 +994,12 @@ mod tests {
             schema: json!({"type": "number"}),
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "duplicate_slot_name"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "duplicate_slot_name")
+        );
     }
 
     #[test]
@@ -1010,7 +1023,12 @@ mod tests {
         let mut def = valid_def();
         def.steps.push(step_noop("step_b", vec!["fetch", "fetch"]));
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "duplicate_after_entry"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "duplicate_after_entry")
+        );
     }
 
     #[test]
@@ -1018,7 +1036,12 @@ mod tests {
         let mut def = valid_def();
         def.steps[0].after = Some(vec!["nonexistent".into()]);
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "after_ref_not_found"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "after_ref_not_found")
+        );
     }
 
     #[test]
@@ -1039,7 +1062,12 @@ mod tests {
             body: None,
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "variable_ref_not_found")
+        );
     }
 
     #[test]
@@ -1047,7 +1075,12 @@ mod tests {
         let mut def = valid_def();
         def.output = var_ref("{nonexistent.output}");
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "output_ref_not_found"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "output_ref_not_found")
+        );
     }
 
     #[test]
@@ -1095,7 +1128,12 @@ mod tests {
             batch: None,
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_iterate_config"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_iterate_config")
+        );
     }
 
     #[test]
@@ -1108,7 +1146,12 @@ mod tests {
             batch: Some(BatchConfig { size: 0 }),
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_iterate_config"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_iterate_config")
+        );
     }
 
     #[test]
@@ -1123,7 +1166,10 @@ mod tests {
             });
             let report = validate(&def);
             assert!(
-                report.errors.iter().any(|e| e.code == "invalid_iterate_config"),
+                report
+                    .errors
+                    .iter()
+                    .any(|e| e.code == "invalid_iterate_config"),
                 "as_name '{reserved}' must be rejected"
             );
         }
@@ -1139,7 +1185,12 @@ mod tests {
             batch: None,
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_iterate_config"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_iterate_config")
+        );
     }
 
     #[test]
@@ -1158,7 +1209,10 @@ mod tests {
         });
         let report = validate(&def);
         assert!(
-            !report.errors.iter().any(|e| e.code == "variable_ref_not_found"),
+            !report
+                .errors
+                .iter()
+                .any(|e| e.code == "variable_ref_not_found"),
             "as_name ref must not be flagged: {:?}",
             report.errors
         );
@@ -1173,7 +1227,12 @@ mod tests {
             delay_ms: 1000,
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_retry_config"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_retry_config")
+        );
 
         let mut def = valid_def();
         def.steps[0].retry = Some(RetryDef {
@@ -1182,7 +1241,12 @@ mod tests {
             delay_ms: u64::MAX,
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_retry_config"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_retry_config")
+        );
     }
 
     #[test]
@@ -1193,7 +1257,12 @@ mod tests {
             mode: Some("rot13".into()),
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_operator_config"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_operator_config")
+        );
 
         let mut def = valid_def();
         def.steps[0].op = StepOp::Base64(Base64Inputs {
@@ -1219,7 +1288,12 @@ mod tests {
             skip_vision_check: None,
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_operator_config"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_operator_config")
+        );
     }
 
     #[test]
@@ -1266,7 +1340,12 @@ mod tests {
             )),
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "variable_ref_not_found")
+        );
     }
 
     #[test]
@@ -1288,7 +1367,12 @@ mod tests {
             delay_ms: 1000,
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_retry_config"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_retry_config")
+        );
     }
 
     #[test]
@@ -1310,7 +1394,11 @@ mod tests {
             value: Some(literal(json!("prefix {nonexistent.output} suffix"))),
         });
         let report = validate(&def);
-        assert!(report.is_ok(), "embedded ref should not be flagged: {:?}", report.errors);
+        assert!(
+            report.is_ok(),
+            "embedded ref should not be flagged: {:?}",
+            report.errors
+        );
     }
 
     #[test]
@@ -1325,7 +1413,10 @@ mod tests {
         });
         let report = validate(&def);
         assert!(
-            !report.errors.iter().any(|e| e.code == "variable_ref_not_found"),
+            !report
+                .errors
+                .iter()
+                .any(|e| e.code == "variable_ref_not_found"),
             "literal string must not be flagged: {:?}",
             report.errors
         );
@@ -1336,7 +1427,11 @@ mod tests {
         let mut def = valid_def();
         def.output = literal(json!("prefix {ghost.output} suffix"));
         let report = validate(&def);
-        assert!(report.is_ok(), "embedded ref in output should not be flagged: {:?}", report.errors);
+        assert!(
+            report.is_ok(),
+            "embedded ref in output should not be flagged: {:?}",
+            report.errors
+        );
     }
 
     fn step_var_ref(id: &str, ref_str: &str) -> StepDef {
@@ -1365,7 +1460,10 @@ mod tests {
     #[test]
     fn cycle_via_input_refs_detected() {
         let mut def = valid_def();
-        def.steps = vec![step_var_ref("a", "{b.output}"), step_var_ref("b", "{a.output}")];
+        def.steps = vec![
+            step_var_ref("a", "{b.output}"),
+            step_var_ref("b", "{a.output}"),
+        ];
         def.output = var_ref("{a.output}");
         let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "cycle_detected"));
@@ -1437,7 +1535,12 @@ mod tests {
         let mut def = valid_def();
         def.name = "bad/name?x".into();
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_name_charset"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_name_charset")
+        );
     }
 
     #[test]
@@ -1454,7 +1557,12 @@ mod tests {
         def.steps[0].id = "bad.id".into();
         def.output = var_ref("{bad.output}");
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_name_charset"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_name_charset")
+        );
     }
 
     #[test]
@@ -1462,7 +1570,12 @@ mod tests {
         let mut def = valid_def();
         def.slots[0].name = "my.slot".into();
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_name_charset"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_name_charset")
+        );
     }
 
     #[test]
@@ -1470,7 +1583,12 @@ mod tests {
         let mut def = valid_def();
         def.name = "..".into();
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_pipeline_name"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_pipeline_name")
+        );
     }
 
     #[test]
@@ -1483,7 +1601,12 @@ mod tests {
             batch: None,
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_iterate_config"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_iterate_config")
+        );
     }
 
     #[test]
@@ -1496,7 +1619,12 @@ mod tests {
             value: None,
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_operator_config"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_operator_config")
+        );
     }
 
     #[test]
@@ -1509,7 +1637,12 @@ mod tests {
             value: None,
         });
         let report = validate(&def);
-        assert!(!report.errors.iter().any(|e| e.code == "invalid_operator_config"));
+        assert!(
+            !report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_operator_config")
+        );
     }
 
     #[test]
@@ -1521,7 +1654,12 @@ mod tests {
             order: "ascending".into(),
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "invalid_operator_config"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_operator_config")
+        );
     }
 
     #[test]
@@ -1551,7 +1689,12 @@ mod tests {
             }))),
         });
         let report = validate(&def);
-        assert!(report.errors.iter().any(|e| e.code == "variable_ref_not_found"));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "variable_ref_not_found")
+        );
     }
 
     #[test]
@@ -1576,7 +1719,9 @@ mod tests {
     fn embedded_slot_ref_in_js_code_not_flagged() {
         let mut def = valid_def();
         def.steps[0].op = StepOp::Js(JsInputs {
-            code: literal(json!("function run(data) { return data + '{slots.token}'; }")),
+            code: literal(json!(
+                "function run(data) { return data + '{slots.token}'; }"
+            )),
             data: None,
         });
         let report = validate(&def);

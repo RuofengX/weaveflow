@@ -1,4 +1,3 @@
-
 // base64_encode_decode_roundtrip
 
 #[path = "common/mod.rs"]

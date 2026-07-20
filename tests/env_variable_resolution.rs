@@ -1,4 +1,3 @@
-
 // env_variable_resolution
 
 #[path = "common/mod.rs"]
@@ -9,7 +8,9 @@ use std::collections::HashMap;
 
 #[test]
 fn env_variable_resolution() {
-    unsafe { std::env::set_var("WEAVEFLOW_TEST_ENV", "env_val"); }
+    unsafe {
+        std::env::set_var("WEAVEFLOW_TEST_ENV", "env_val");
+    }
     let yaml = r#"
 name: env_test
 steps:

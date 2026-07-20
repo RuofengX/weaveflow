@@ -1,4 +1,3 @@
-
 // empty_array_input
 
 #[path = "common/mod.rs"]

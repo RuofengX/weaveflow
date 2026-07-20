@@ -1,9 +1,9 @@
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer;
 
 const MAX_RING_BYTES: usize = 1_000_000;
 
@@ -102,8 +102,7 @@ pub fn init_logging() -> RingWriter {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_filter(env_filter);
+    let stdout_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
 
     let ring_layer = tracing_subscriber::fmt::layer()
         .with_writer(ring.clone())

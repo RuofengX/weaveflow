@@ -122,15 +122,24 @@ impl IntoResponse for WeaveflowError {
             WeaveflowError::Unavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
             WeaveflowError::Internal(detail) => {
                 tracing::error!(%detail, "internal error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".into())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".into(),
+                )
             }
             WeaveflowError::Operator(detail) => {
                 tracing::error!(%detail, "operator error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".into())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".into(),
+                )
             }
             _ => {
                 tracing::error!(error = %self, "unhandled error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".into())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".into(),
+                )
             }
         };
         let body = axum::Json(json!({"error": msg}));

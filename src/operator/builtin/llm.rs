@@ -11,7 +11,10 @@ fn extract_images(inputs: &Value) -> (Vec<&str>, bool) {
     let mut found = false;
 
     let images: Vec<&str> = match inputs.get("images_b64") {
-        Some(Value::String(s)) => { found = true; vec![s.as_str()] }
+        Some(Value::String(s)) => {
+            found = true;
+            vec![s.as_str()]
+        }
         Some(Value::Array(arr)) => {
             let imgs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
             found = !imgs.is_empty();
@@ -24,10 +27,7 @@ fn extract_images(inputs: &Value) -> (Vec<&str>, bool) {
 }
 
 fn safe_truncate(s: &str, n: usize) -> &str {
-    let end = s.char_indices()
-        .nth(n)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
+    let end = s.char_indices().nth(n).map(|(i, _)| i).unwrap_or(s.len());
     &s[..end]
 }
 
@@ -37,10 +37,7 @@ impl Operator for LlmOperator {
         OperatorSpec::new("llm", "OpenAI 兼容的 LLM 推理，返回文本内容").with_cache(false)
     }
 
-    async fn run(
-        &self,
-        inputs: Value,
-    ) -> Result<Value, OperatorError> {
+    async fn run(&self, inputs: Value) -> Result<Value, OperatorError> {
         debug!("llm request");
         let url = inputs
             .get("url")
@@ -127,9 +124,8 @@ impl Operator for LlmOperator {
             .await
             .map_err(|e| OperatorError::Runtime(format!("llm request: {e}")))?;
 
-        http_client::check_content_length(resp.content_length()).ok_or_else(|| {
-            OperatorError::Runtime("response body exceeds 64MB limit".into())
-        })?;
+        http_client::check_content_length(resp.content_length())
+            .ok_or_else(|| OperatorError::Runtime("response body exceeds 64MB limit".into()))?;
 
         let status = resp.status();
         let body_bytes = http_client::read_body_limited(resp).await?;
@@ -142,9 +138,8 @@ impl Operator for LlmOperator {
             )));
         }
 
-        let resp_json: Value = serde_json::from_str(&body_text).map_err(|e| {
-            OperatorError::Runtime(format!("llm parse response: {e}"))
-        })?;
+        let resp_json: Value = serde_json::from_str(&body_text)
+            .map_err(|e| OperatorError::Runtime(format!("llm parse response: {e}")))?;
 
         if let Some(err) = resp_json.get("error") {
             let msg = err
@@ -159,7 +154,10 @@ impl Operator for LlmOperator {
                     || msg.contains("multimodal")
                     || code.contains("invalid_request"))
             {
-                format!(" — hint: model '{}' may not support vision/image inputs. ", model)
+                format!(
+                    " — hint: model '{}' may not support vision/image inputs. ",
+                    model
+                )
             } else {
                 String::new()
             };

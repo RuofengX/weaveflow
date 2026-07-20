@@ -19,20 +19,14 @@ impl Operator for CommandOperator {
         OperatorSpec::new("command", "执行 shell 命令").with_cache(false)
     }
 
-    async fn run(
-        &self,
-        inputs: Value,
-    ) -> Result<Value, OperatorError> {
+    async fn run(&self, inputs: Value) -> Result<Value, OperatorError> {
         let cmd = inputs
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| OperatorError::Config("command 算子需要 command 字段".into()))?;
         debug!(cmd = %cmd, "command execution");
 
-        let shell = inputs
-            .get("shell")
-            .and_then(|v| v.as_str())
-            .unwrap_or("sh");
+        let shell = inputs.get("shell").and_then(|v| v.as_str()).unwrap_or("sh");
 
         let stdin_data = inputs
             .get("stdin")
@@ -60,11 +54,12 @@ impl Operator for CommandOperator {
         let stderr = child.stderr.take().unwrap();
 
         if let Some(input) = stdin_data
-            && let Some(mut s) = stdin.take() {
-                tokio::spawn(async move {
-                    let _ = s.write_all(input.as_bytes()).await;
-                });
-            }
+            && let Some(mut s) = stdin.take()
+        {
+            tokio::spawn(async move {
+                let _ = s.write_all(input.as_bytes()).await;
+            });
+        }
         drop(stdin);
 
         let max_bytes = http_client::MAX_STDIO_BYTES;

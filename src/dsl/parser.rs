@@ -60,7 +60,9 @@ output: "{fetch.output}"
         assert_eq!(def.steps[0].id, StepId::from("fetch"));
         assert_eq!(def.steps[0].op.op_type(), "http");
         assert!(matches!(def.output, RefValue::Ref(_)));
-        let StepOp::Http(ref inputs) = def.steps[0].op else { panic!("expected http") };
+        let StepOp::Http(ref inputs) = def.steps[0].op else {
+            panic!("expected http")
+        };
         assert!(matches!(inputs.url, RefValue::Ref(_)));
     }
 
@@ -180,7 +182,9 @@ steps:
 output: done
 "#;
         let def = parse(yaml).unwrap();
-        let StepOp::Var(ref v) = def.steps[0].op else { panic!("expected var") };
+        let StepOp::Var(ref v) = def.steps[0].op else {
+            panic!("expected var")
+        };
         assert!(matches!(v.value, Some(RefValue::Literal(_))));
         assert!(matches!(def.output, RefValue::Literal(_)));
     }

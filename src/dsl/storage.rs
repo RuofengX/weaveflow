@@ -47,7 +47,9 @@ impl<'de> serde::Deserialize<'de> for Ttl {
             "d" => chrono::TimeDelta::try_days(num),
             _ => return Err(serde::de::Error::custom(format!("无效单位: {}", unit))),
         };
-        delta.map(Ttl).ok_or_else(|| serde::de::Error::custom(format!("TTL 溢出: {}", s)))
+        delta
+            .map(Ttl)
+            .ok_or_else(|| serde::de::Error::custom(format!("TTL 溢出: {}", s)))
     }
 }
 

@@ -79,9 +79,7 @@ pub async fn block_private_ips(url_str: &str) -> Result<(), OperatorError> {
             let addr_str = format!("{host}:{port}");
             tokio::net::lookup_host(&addr_str)
                 .await
-                .map_err(|e| {
-                    OperatorError::Runtime(format!("DNS resolve {host}: {e}"))
-                })?
+                .map_err(|e| OperatorError::Runtime(format!("DNS resolve {host}: {e}")))?
                 .map(|sa| sa.ip())
                 .collect()
         }
@@ -187,9 +185,18 @@ mod tests {
 
     #[test]
     fn split_url_default_ports() {
-        assert_eq!(split_url("http://example.com/path"), Some(("example.com".into(), 80)));
-        assert_eq!(split_url("https://example.com"), Some(("example.com".into(), 443)));
-        assert_eq!(split_url("http://example.com:8080/x"), Some(("example.com".into(), 8080)));
+        assert_eq!(
+            split_url("http://example.com/path"),
+            Some(("example.com".into(), 80))
+        );
+        assert_eq!(
+            split_url("https://example.com"),
+            Some(("example.com".into(), 443))
+        );
+        assert_eq!(
+            split_url("http://example.com:8080/x"),
+            Some(("example.com".into(), 8080))
+        );
     }
 
     #[test]

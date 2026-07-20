@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tracing::debug;
 
-use base64::Engine;
 use crate::operator::{Operator, OperatorError, OperatorSpec};
+use base64::Engine;
 
 pub struct Base64Operator;
 
@@ -13,11 +13,11 @@ impl Operator for Base64Operator {
         OperatorSpec::new("base64", "Base64 编解码")
     }
 
-    async fn run(
-        &self,
-        inputs: Value,
-    ) -> Result<Value, OperatorError> {
-        let mode = inputs.get("mode").and_then(|v| v.as_str()).unwrap_or("encode");
+    async fn run(&self, inputs: Value) -> Result<Value, OperatorError> {
+        let mode = inputs
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("encode");
         debug!(mode, "base64 operator");
         let data = match inputs.get("data") {
             Some(v) if !v.is_null() => v,
@@ -80,16 +80,25 @@ mod tests {
     #[tokio::test]
     async fn missing_data_returns_config_error() {
         let op = Base64Operator;
-        let err = op.run(json!({ "mode": "encode" })).await.expect_err("must fail");
+        let err = op
+            .run(json!({ "mode": "encode" }))
+            .await
+            .expect_err("must fail");
         assert!(matches!(err, OperatorError::Config(_)));
-        let err = op.run(json!({ "data": null, "mode": "encode" })).await.expect_err("must fail");
+        let err = op
+            .run(json!({ "data": null, "mode": "encode" }))
+            .await
+            .expect_err("must fail");
         assert!(matches!(err, OperatorError::Config(_)));
     }
 
     #[tokio::test]
     async fn unknown_mode_returns_config_error() {
         let op = Base64Operator;
-        let err = op.run(json!({ "data": "x", "mode": "rot13" })).await.expect_err("must fail");
+        let err = op
+            .run(json!({ "data": "x", "mode": "rot13" }))
+            .await
+            .expect_err("must fail");
         assert!(matches!(err, OperatorError::Config(_)));
     }
 }

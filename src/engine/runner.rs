@@ -43,10 +43,10 @@ impl Runner {
         .await;
         if let Err(ref e) = result {
             self.tracker.fail(&task_id, e.to_string()).await;
-            if let Err(db_err) = self.db.set_task_status(
-                &task_id,
-                crate::tracker::meta::TASK_STATUS_FAILED,
-            ) {
+            if let Err(db_err) = self
+                .db
+                .set_task_status(&task_id, crate::tracker::meta::TASK_STATUS_FAILED)
+            {
                 warn!(task_id = %task_id, error = %db_err, "set_task_status(failed) failed");
             }
         }
@@ -99,9 +99,7 @@ pub async fn run_inner(
             match jsonschema::compile(&slot_def.schema) {
                 Ok(schema) => {
                     if let Err(errors) = schema.validate(val) {
-                        let msgs: Vec<String> = errors
-                            .map(|e| e.to_string())
-                            .collect();
+                        let msgs: Vec<String> = errors.map(|e| e.to_string()).collect();
                         return Err(WeaveflowError::BadRequest(format!(
                             "slot '{}' validation failed: {}",
                             slot_def.name,
@@ -124,7 +122,7 @@ pub async fn run_inner(
     let dag = Dag::from_pipeline(pipeline)?;
     let layers = dag.topological_sort()?;
 
-    for step_id in layers.iter().flatten(){
+    for step_id in layers.iter().flatten() {
         tracker
             .update_step(&task_id, step_id, StepState::Pending)
             .await;
@@ -175,7 +173,11 @@ pub async fn run_inner(
         }
 
         // 这里等待层中所有步骤完成后再处理错误，提高可观测性
-        type StepOutcome = (StepId, DateTime<Utc>, Result<(Value, u32, bool), (WeaveflowError, u32)>);
+        type StepOutcome = (
+            StepId,
+            DateTime<Utc>,
+            Result<(Value, u32, bool), (WeaveflowError, u32)>,
+        );
         let results: Vec<StepOutcome> = futures::future::join_all(futures).await;
 
         let mut layer_failed = false;
@@ -185,9 +187,7 @@ pub async fn run_inner(
             match result {
                 Ok((output, attempts_used, cache_hit)) => {
                     let completed_at = Utc::now();
-                    let duration_ms = (completed_at - started_at)
-                        .num_milliseconds()
-                        .max(0) as u64;
+                    let duration_ms = (completed_at - started_at).num_milliseconds().max(0) as u64;
                     debug!(step = %step_id, duration_ms, "parallel step completed");
                     scope.set_output(&step_id, output.clone());
                     save_step_snapshot(
@@ -270,10 +270,7 @@ pub async fn run_inner(
 
     info!(task_id = %task_id, pipeline = %pipeline.name, "pipeline run completed");
     tracker.complete(&task_id, output_val).await;
-    if let Err(db_err) = db.set_task_status(
-        &task_id,
-        crate::tracker::meta::TASK_STATUS_COMPLETED,
-    ) {
+    if let Err(db_err) = db.set_task_status(&task_id, crate::tracker::meta::TASK_STATUS_COMPLETED) {
         warn!(task_id = %task_id, error = %db_err, "set_task_status(completed) failed");
     }
 

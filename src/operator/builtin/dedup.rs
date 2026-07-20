@@ -13,11 +13,12 @@ impl Operator for DedupOperator {
         OperatorSpec::new("dedup", "按字段去重数组")
     }
 
-    async fn run(
-        &self,
-        inputs: Value,
-    ) -> Result<Value, OperatorError> {
-        let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    async fn run(&self, inputs: Value) -> Result<Value, OperatorError> {
+        let field = inputs
+            .get("field")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         debug!(field, "dedup operator");
         let data = if let Value::Object(mut m) = inputs {
             match m.remove("data") {
@@ -114,9 +115,15 @@ mod tests {
     #[tokio::test]
     async fn missing_data_returns_config_error() {
         let op = DedupOperator;
-        let err = op.run(json!({ "field": "id" })).await.expect_err("must fail");
+        let err = op
+            .run(json!({ "field": "id" }))
+            .await
+            .expect_err("must fail");
         assert!(matches!(err, OperatorError::Config(_)));
-        let err = op.run(json!({ "data": null, "field": "id" })).await.expect_err("must fail");
+        let err = op
+            .run(json!({ "data": null, "field": "id" }))
+            .await
+            .expect_err("must fail");
         assert!(matches!(err, OperatorError::Config(_)));
     }
 }

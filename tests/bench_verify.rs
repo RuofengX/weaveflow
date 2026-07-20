@@ -28,10 +28,14 @@ steps:
 output: "{f.output}"
 "#;
 
-    let orders: Vec<serde_json::Value> = (0..200).map(|i| json!({
-        "status": if i % 3 == 0 { "paid" } else { "pending" },
-        "total": i,
-    })).collect();
+    let orders: Vec<serde_json::Value> = (0..200)
+        .map(|i| {
+            json!({
+                "status": if i % 3 == 0 { "paid" } else { "pending" },
+                "total": i,
+            })
+        })
+        .collect();
 
     let def = parse(yaml).unwrap();
     let tmp = tempfile::tempdir().unwrap();

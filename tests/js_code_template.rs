@@ -1,4 +1,3 @@
-
 // js_code_template — 测试 code 字段中使用 { } RefValue 引用上游输出的 JS 代码
 
 #[path = "common/mod.rs"]

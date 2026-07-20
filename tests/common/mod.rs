@@ -12,8 +12,7 @@ use weaveflow::tracker::{LayerInfo, TaskTracker};
 
 pub fn temp_db() -> (Database, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db = Database::open(dir.path().join("weaveflow.redb"))
-        .expect("open db");
+    let db = Database::open(dir.path().join("weaveflow.redb")).expect("open db");
     (db, dir)
 }
 

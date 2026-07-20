@@ -50,12 +50,11 @@ pub async fn execute_step(
         compute_cache_key(step.op.op_type(), &inputs)
     };
 
-    if cache_enabled
-        && let Some(v) = db.check_cache_bytes(&cache_key).map_err(|e| (e, 0))? {
-            debug!(step = %step.id, op = %step.op.op_type(), "cache hit");
-            scope.set_output(&step.id, v.clone());
-            return Ok((v, 0, true));
-        }
+    if cache_enabled && let Some(v) = db.check_cache_bytes(&cache_key).map_err(|e| (e, 0))? {
+        debug!(step = %step.id, op = %step.op.op_type(), "cache hit");
+        scope.set_output(&step.id, v.clone());
+        return Ok((v, 0, true));
+    }
     debug!(step = %step.id, op = %step.op.op_type(), "cache miss");
 
     // 4. Iterate 路径：展开输入数组，分批执行，聚合结果。
@@ -81,7 +80,8 @@ pub async fn execute_step(
     }
 
     info!(step = %step.id, op = %step.op.op_type(), "executing");
-    let (output, attempts) = execute_with_retry(db, op.as_ref(), inputs, &cache_key, step, cache_enabled).await?;
+    let (output, attempts) =
+        execute_with_retry(db, op.as_ref(), inputs, &cache_key, step, cache_enabled).await?;
     Ok((output, attempts, false))
 }
 
@@ -130,7 +130,10 @@ pub(crate) async fn retry_with_op(
         }
     }
     warn!(step = %step.id, max_attempts, "retry exhausted");
-    Err((OperatorError::Runtime("retry exhausted".into()), max_attempts))
+    Err((
+        OperatorError::Runtime("retry exhausted".into()),
+        max_attempts,
+    ))
 }
 
 /// 调用 retry_with_op 执行算子并缓存成功输出；缓存写失败降级为告警。
@@ -163,9 +166,8 @@ pub(crate) async fn run_with_timeout(
 ) -> Result<Value, OperatorError> {
     match step.timeout_sec {
         Some(secs) if secs.is_finite() && secs > 0.0 => {
-            let duration = std::time::Duration::try_from_secs_f64(secs).map_err(|e| {
-                OperatorError::Config(format!("invalid timeout_sec {secs}: {e}"))
-            })?;
+            let duration = std::time::Duration::try_from_secs_f64(secs)
+                .map_err(|e| OperatorError::Config(format!("invalid timeout_sec {secs}: {e}")))?;
             match tokio::time::timeout(duration, op.run(inputs)).await {
                 Ok(result) => result,
                 Err(_) => {

@@ -52,40 +52,55 @@ impl Dag {
                     if !steps.contains_key(after_id) {
                         return Err(DagError::RefNotFound(after_id.clone()));
                     }
-                    out_edges.entry(after_id.clone()).or_default().push(step.id.clone());
-                    in_edges.entry(step.id.clone()).or_default().push(after_id.clone());
+                    out_edges
+                        .entry(after_id.clone())
+                        .or_default()
+                        .push(step.id.clone());
+                    in_edges
+                        .entry(step.id.clone())
+                        .or_default()
+                        .push(after_id.clone());
                 }
             }
         }
 
         for step in &def.steps {
             let deps = extract_output_refs_from_step(step, &step_ids);
-            let iterate_deps = step.iterate
+            let iterate_deps = step
+                .iterate
                 .as_ref()
                 .map(|cfg| extract_refs_from_path(&cfg.over, &step_ids))
                 .unwrap_or_default();
-            let all_deps: Vec<StepId> = deps.into_iter()
-                .chain(iterate_deps)
-                .collect();
+            let all_deps: Vec<StepId> = deps.into_iter().chain(iterate_deps).collect();
             for dep_id in all_deps {
                 if !steps.contains_key(&dep_id) {
                     return Err(DagError::RefNotFound(dep_id));
                 }
-                out_edges.entry(dep_id.clone()).or_default().push(step.id.clone());
+                out_edges
+                    .entry(dep_id.clone())
+                    .or_default()
+                    .push(step.id.clone());
                 in_edges.entry(step.id.clone()).or_default().push(dep_id);
             }
         }
 
-        Ok(Dag { steps, in_edges, out_edges })
+        Ok(Dag {
+            steps,
+            in_edges,
+            out_edges,
+        })
     }
 
     pub fn topological_sort(&self) -> Result<Vec<DagLayer>, DagError> {
         debug!(steps = self.steps.len(), "topological sort");
-        let mut in_degree: HashMap<&StepId, usize> = self.steps.keys()
+        let mut in_degree: HashMap<&StepId, usize> = self
+            .steps
+            .keys()
             .map(|id| (id, self.in_edges.get(id).map(|e| e.len()).unwrap_or(0)))
             .collect();
 
-        let mut queue: VecDeque<&StepId> = in_degree.iter()
+        let mut queue: VecDeque<&StepId> = in_degree
+            .iter()
             .filter(|(_, deg)| **deg == 0)
             .map(|(&id, _)| id)
             .collect();
@@ -115,7 +130,9 @@ impl Dag {
         }
 
         if visited != self.steps.len() {
-            let remaining: Vec<StepId> = self.steps.keys()
+            let remaining: Vec<StepId> = self
+                .steps
+                .keys()
                 .filter(|id| in_degree.get(id).is_none_or(|&d| d != 0))
                 .cloned()
                 .collect();
@@ -146,11 +163,10 @@ impl Dag {
     }
 }
 
-fn extract_output_refs_from_step(
-    step: &StepDef,
-    known_steps: &HashSet<StepId>,
-) -> Vec<StepId> {
-    let Ok(op_value) = serde_json::to_value(&step.op) else { return vec![] };
+fn extract_output_refs_from_step(step: &StepDef, known_steps: &HashSet<StepId>) -> Vec<StepId> {
+    let Ok(op_value) = serde_json::to_value(&step.op) else {
+        return vec![];
+    };
     let mut refs = Vec::new();
     collect_refs(&op_value, &mut refs, known_steps);
     refs.sort();
@@ -158,22 +174,16 @@ fn extract_output_refs_from_step(
     refs
 }
 
-fn extract_refs_from_path(
-    path: &VariablePath,
-    known_steps: &HashSet<StepId>,
-) -> Vec<StepId> {
+fn extract_refs_from_path(path: &VariablePath, known_steps: &HashSet<StepId>) -> Vec<StepId> {
     if let Some(first) = path.parts.first()
-        && known_steps.contains(first.as_str()) {
-            return vec![StepId::from(first.clone())];
-        }
+        && known_steps.contains(first.as_str())
+    {
+        return vec![StepId::from(first.clone())];
+    }
     vec![]
 }
 
-fn collect_refs(
-    val: &serde_json::Value,
-    results: &mut Vec<StepId>,
-    known_steps: &HashSet<StepId>,
-) {
+fn collect_refs(val: &serde_json::Value, results: &mut Vec<StepId>, known_steps: &HashSet<StepId>) {
     match val {
         serde_json::Value::Object(map) => {
             if map.len() == 1 && map.contains_key("Ref") {
@@ -231,7 +241,11 @@ mod tests {
     fn step(id: &str, after: Vec<&str>) -> StepDef {
         StepDef {
             id: StepId::from(id),
-            after: if after.is_empty() { None } else { Some(after.into_iter().map(StepId::from).collect()) },
+            after: if after.is_empty() {
+                None
+            } else {
+                Some(after.into_iter().map(StepId::from).collect())
+            },
             iterate: None,
             cache: None,
             retry: None,
@@ -350,9 +364,7 @@ mod tests {
 
     #[test]
     fn ref_not_found() {
-        let steps = vec![
-            step("a", vec!["nonexistent"]),
-        ];
+        let steps = vec![step("a", vec!["nonexistent"])];
         let p = make_pipeline(steps);
         let result = Dag::from_pipeline(&p);
         assert!(result.is_err());
@@ -383,7 +395,9 @@ mod tests {
             retry: None,
             timeout_sec: None,
             op: StepOp::Var(step_op::VarInputs {
-                value: Some(RefValue::Ref(VariablePath::parse("{d.output.items}").unwrap())),
+                value: Some(RefValue::Ref(
+                    VariablePath::parse("{d.output.items}").unwrap(),
+                )),
             }),
         };
         let p = make_pipeline(vec![step("d", vec![]), s_e]);
@@ -419,10 +433,7 @@ mod tests {
 
     #[test]
     fn duplicate_step_id_errors() {
-        let steps = vec![
-            step("a", vec![]),
-            step("a", vec![]),
-        ];
+        let steps = vec![step("a", vec![]), step("a", vec![])];
         let p = make_pipeline(steps);
         let result = Dag::from_pipeline(&p);
         assert!(result.is_err());

@@ -7,10 +7,7 @@ use crate::dsl::{StepId, VariablePath};
 use crate::error::{WeaveflowError, WeaveflowResult};
 use crate::vm::Scope;
 
-pub fn resolve_inputs(
-    scope: &Scope,
-    step: &crate::dsl::StepDef,
-) -> WeaveflowResult<Value> {
+pub fn resolve_inputs(scope: &Scope, step: &crate::dsl::StepDef) -> WeaveflowResult<Value> {
     let as_name = step.iterate.as_ref().map(|c| c.as_name.as_str());
 
     let op_value = serde_json::to_value(&step.op)

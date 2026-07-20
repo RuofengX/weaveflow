@@ -1,4 +1,3 @@
-
 // merge_operator_objects
 
 #[path = "common/mod.rs"]

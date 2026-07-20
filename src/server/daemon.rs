@@ -3,20 +3,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use axum::{
+    Json, Router,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{Path, State},
     routing::{get, post},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use weaveflow::dsl::{parser::parse, StepId};
 use weaveflow::dsl::validator::validate;
-use weaveflow::error::WeaveflowError;
+use weaveflow::dsl::{StepId, parser::parse};
 use weaveflow::engine::dag::Dag;
 use weaveflow::engine::runner::Runner;
+use weaveflow::error::WeaveflowError;
 use weaveflow::store::{Database, PruneOptions};
 use weaveflow::tracker::{LayerInfo, TaskId, TaskSnapshot, TaskStatus, TaskTracker};
 
@@ -154,16 +154,12 @@ async fn delete_pipeline(
     Ok(Json(serde_json::json!({"deleted": name})))
 }
 
-async fn list_pipelines(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, WeaveflowError> {
+async fn list_pipelines(State(state): State<Arc<AppState>>) -> Result<Json<Value>, WeaveflowError> {
     tracing::info!("GET /pipelines");
     let items = state.db.list_pipelines()?;
     let list: Vec<Value> = items
         .iter()
-        .map(|(pid, def)| {
-            serde_json::json!({"id": pid.to_string(), "name": &*def.name})
-        })
+        .map(|(pid, def)| serde_json::json!({"id": pid.to_string(), "name": &*def.name}))
         .collect();
     Ok(Json(serde_json::json!(list)))
 }
@@ -182,7 +178,9 @@ async fn get_pipeline(
             .load_pipeline(&pid)?
             .ok_or_else(|| WeaveflowError::NotFound(format!("pipeline {name_or_id} not found")))?
     } else {
-        return Err(WeaveflowError::NotFound(format!("pipeline {name_or_id} not found")));
+        return Err(WeaveflowError::NotFound(format!(
+            "pipeline {name_or_id} not found"
+        )));
     };
     let val =
         serde_json::to_value(&pipeline).map_err(|e| WeaveflowError::Internal(e.to_string()))?;
@@ -211,7 +209,7 @@ async fn run_pipeline(
             return Err(WeaveflowError::NotFound(format!(
                 "pipeline {} not found",
                 req.pipeline
-            )))
+            )));
         }
     };
 
@@ -300,9 +298,7 @@ async fn run_pipeline(
                         .map(|p| {
                             p.downcast_ref::<String>()
                                 .cloned()
-                                .or_else(|| {
-                                    p.downcast_ref::<&str>().map(|s| s.to_string())
-                                })
+                                .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
                                 .unwrap_or_else(|| "unknown panic".to_string())
                         })
                         .unwrap_or_else(|_| "internal panic (cancelled)".to_string());
@@ -354,9 +350,7 @@ fn result_ttl_secs(pipeline: &weaveflow::dsl::PipelineDef) -> i64 {
         .unwrap_or(3600)
 }
 
-async fn list_tasks(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, WeaveflowError> {
+async fn list_tasks(State(state): State<Arc<AppState>>) -> Result<Json<Value>, WeaveflowError> {
     tracing::info!("GET /tasks");
     let tasks = state.db.list_tasks()?;
     let list: Vec<Value> = tasks
@@ -476,7 +470,12 @@ async fn prune_tasks(
     };
     let plan = state.db.prune_scan(&options)?;
     let report = state.db.prune_execute(&plan, options.dry_run)?;
-    tracing::info!(tasks = report.tasks_removed, objects = report.objects_removed, bytes = report.bytes_freed, "prune complete");
+    tracing::info!(
+        tasks = report.tasks_removed,
+        objects = report.objects_removed,
+        bytes = report.bytes_freed,
+        "prune complete"
+    );
     Ok(Json(PruneResponse {
         tasks_removed: report.tasks_removed,
         snapshots_removed: report.snapshots_removed,
@@ -487,11 +486,12 @@ async fn prune_tasks(
     }))
 }
 
-async fn list_operators(
-) -> Result<Json<Value>, WeaveflowError> {
+async fn list_operators() -> Result<Json<Value>, WeaveflowError> {
     tracing::info!("GET /system/operators");
     let builtins = weaveflow::operator::builtins();
-    let list: Vec<Value> = builtins.values().map(|op| {
+    let list: Vec<Value> = builtins
+        .values()
+        .map(|op| {
             let spec = op.spec();
             serde_json::json!({
                 "type_name": spec.type_name,
@@ -508,7 +508,10 @@ async fn get_logs(
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
 ) -> axum::response::Response {
-    let offset: u64 = params.get("offset").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let offset: u64 = params
+        .get("offset")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let chunk = state.log_ring.read_since(offset);
     let mut text = String::new();
     if chunk.truncated {
@@ -521,12 +524,11 @@ async fn get_logs(
         chunk.next_offset.to_string().parse().unwrap(),
     );
     if chunk.truncated {
-        resp.headers_mut().insert("X-Log-Truncated", "1".parse().unwrap());
+        resp.headers_mut()
+            .insert("X-Log-Truncated", "1".parse().unwrap());
     }
-    resp.headers_mut().insert(
-        "content-type",
-        "text/plain; charset=utf-8".parse().unwrap(),
-    );
+    resp.headers_mut()
+        .insert("content-type", "text/plain; charset=utf-8".parse().unwrap());
     resp
 }
 
@@ -636,10 +638,7 @@ fn build_app(state: Arc<AppState>) -> Router {
         .route("/runs/:task_id", get(get_task))
         .route("/runs/:task_id/ws", get(ws_task))
         .route("/runs/:task_id/snapshots", get(list_snapshots))
-        .route(
-            "/runs/:task_id/snapshots/:seq",
-            get(get_snapshot_by_seq),
-        )
+        .route("/runs/:task_id/snapshots/:seq", get(get_snapshot_by_seq))
         .route("/prune", post(prune_tasks))
         .route("/system/operators", get(list_operators))
         .route("/system/logs", get(get_logs))
@@ -802,11 +801,8 @@ async fn wait_for_drain(
         if start.elapsed() >= timeout {
             return n;
         }
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            notify.notified(),
-        )
-        .await;
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(200), notify.notified()).await;
     }
 }
 
@@ -873,9 +869,7 @@ fn is_daemon_running() -> bool {
 pub async fn start(cfg: &ServeConfig) {
     let bind = cfg.bind.as_str();
     if is_daemon_running() {
-        eprintln!(
-            "daemon is already running. Use `weaveflow daemon restart` to restart."
-        );
+        eprintln!("daemon is already running. Use `weaveflow daemon restart` to restart.");
         return;
     }
     enforce_bind_safety(bind, cfg.allow_remote);
@@ -1040,10 +1034,7 @@ pub async fn stop(timeout: std::time::Duration) {
     let pid_str = match std::fs::read_to_string(&path) {
         Ok(s) => s.trim().to_string(),
         Err(_) => {
-            eprintln!(
-                "daemon not running (no PID file at {})",
-                path.display()
-            );
+            eprintln!("daemon not running (no PID file at {})", path.display());
             return;
         }
     };
@@ -1071,17 +1062,14 @@ pub async fn stop(timeout: std::time::Duration) {
         libc::kill(pid as i32, libc::SIGTERM);
     }
 
-    let exited = tokio::time::timeout(
-        timeout,
-        async {
-            loop {
-                if unsafe { libc::kill(pid as i32, 0) } != 0 {
-                    return true;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let exited = tokio::time::timeout(timeout, async {
+        loop {
+            if unsafe { libc::kill(pid as i32, 0) } != 0 {
+                return true;
             }
-        },
-    )
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
     .await
     .unwrap_or(false);
 
@@ -1106,17 +1094,15 @@ pub async fn restart(cfg: &ServeConfig, stop_timeout: std::time::Duration) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::logging::RingWriter;
+    use super::*;
     use std::path::PathBuf;
 
     fn temp_db() -> (Database, PathBuf) {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "weaveflow-server-test-{}-{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("weaveflow-server-test-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).ok();
         let db = Database::open(dir.join("weaveflow.redb")).expect("open db");
@@ -1164,7 +1150,10 @@ mod tests {
 
     #[test]
     fn verify_pid_binary_nonexistent_pid() {
-        assert!(!verify_pid_binary(99999999, &std::env::current_exe().unwrap()));
+        assert!(!verify_pid_binary(
+            99999999,
+            &std::env::current_exe().unwrap()
+        ));
     }
 
     #[test]
@@ -1182,9 +1171,7 @@ mod tests {
 
         let app = build_app(state);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -1256,7 +1243,12 @@ output: "{greet.output}"
         // Verify task completed (not stuck in Running)
         let progress = task_body.get("progress").expect("progress field missing");
         let status = progress.get("status").expect("status field missing");
-        let status_keys: Vec<&str> = status.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let status_keys: Vec<&str> = status
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
         assert!(
             status_keys.contains(&"Completed") || status_keys.contains(&"Failed"),
             "expected Completed or Failed, got: {:?}",
@@ -1313,9 +1305,7 @@ output: "{s.output}"
         let state = test_state(db.clone());
 
         let app = build_app(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -1362,12 +1352,8 @@ output: "{s.output}"
     async fn wait_for_drain_returns_zero_when_idle() {
         let in_flight = AtomicUsize::new(0);
         let notify = tokio::sync::Notify::new();
-        let remaining = wait_for_drain(
-            &in_flight,
-            &notify,
-            std::time::Duration::from_millis(100),
-        )
-        .await;
+        let remaining =
+            wait_for_drain(&in_flight, &notify, std::time::Duration::from_millis(100)).await;
         assert_eq!(remaining, 0);
     }
 
@@ -1383,12 +1369,8 @@ output: "{s.output}"
                 c_notify.notify_waiters();
             }
         });
-        let remaining = wait_for_drain(
-            &in_flight,
-            &notify,
-            std::time::Duration::from_secs(5),
-        )
-        .await;
+        let remaining =
+            wait_for_drain(&in_flight, &notify, std::time::Duration::from_secs(5)).await;
         assert_eq!(remaining, 0);
     }
 
@@ -1397,15 +1379,10 @@ output: "{s.output}"
         let in_flight = AtomicUsize::new(2);
         let notify = tokio::sync::Notify::new();
         let start = std::time::Instant::now();
-        let remaining = wait_for_drain(
-            &in_flight,
-            &notify,
-            std::time::Duration::from_millis(300),
-        )
-        .await;
+        let remaining =
+            wait_for_drain(&in_flight, &notify, std::time::Duration::from_millis(300)).await;
         assert_eq!(remaining, 2);
         assert!(start.elapsed() >= std::time::Duration::from_millis(300));
         assert!(start.elapsed() < std::time::Duration::from_secs(3));
     }
 }
-

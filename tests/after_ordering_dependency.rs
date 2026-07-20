@@ -1,4 +1,3 @@
-
 // after_ordering_dependency
 
 #[path = "common/mod.rs"]

@@ -1,4 +1,3 @@
-
 // file_operator — 读本地文件 + 作为二进制 data 传给下游
 
 #[path = "common/mod.rs"]
@@ -117,5 +116,8 @@ output: "{{{{read.output}}}}"
     let result = run_yaml(&yaml, HashMap::new());
     assert!(result.is_err(), "expected error for directory path");
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("not a regular file"), "expected 'not a regular file' in error, got: {err}");
+    assert!(
+        err.contains("not a regular file"),
+        "expected 'not a regular file' in error, got: {err}"
+    );
 }

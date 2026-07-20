@@ -14,13 +14,18 @@ impl Operator for SortOperator {
         OperatorSpec::new("sort", "按字段排序数组")
     }
 
-    async fn run(
-        &self,
-        inputs: Value,
-    ) -> Result<Value, OperatorError> {
-        let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    async fn run(&self, inputs: Value) -> Result<Value, OperatorError> {
+        let field = inputs
+            .get("field")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         debug!(field, "sort operator");
-        let order = inputs.get("order").and_then(|v| v.as_str()).unwrap_or("asc").to_string();
+        let order = inputs
+            .get("order")
+            .and_then(|v| v.as_str())
+            .unwrap_or("asc")
+            .to_string();
         if !matches!(order.as_str(), "asc" | "desc") {
             return Err(OperatorError::Config(format!(
                 "sort 不支持 order: {order}（可选: asc/desc）"
@@ -132,10 +137,18 @@ mod tests {
 
     #[tokio::test]
     async fn big_integer_sort_is_exact() {
-        let data = json!([9007199254740993_i64, 9007199254740992_i64, 9007199254740994_i64]);
+        let data = json!([
+            9007199254740993_i64,
+            9007199254740992_i64,
+            9007199254740994_i64
+        ]);
         assert_eq!(
             sort(data).await,
-            json!([9007199254740992_i64, 9007199254740993_i64, 9007199254740994_i64])
+            json!([
+                9007199254740992_i64,
+                9007199254740993_i64,
+                9007199254740994_i64
+            ])
         );
     }
 
@@ -152,9 +165,15 @@ mod tests {
     #[tokio::test]
     async fn missing_data_returns_config_error() {
         let op = SortOperator;
-        let err = op.run(json!({ "field": "x" })).await.expect_err("must fail");
+        let err = op
+            .run(json!({ "field": "x" }))
+            .await
+            .expect_err("must fail");
         assert!(matches!(err, OperatorError::Config(_)));
-        let err = op.run(json!({ "data": null })).await.expect_err("must fail");
+        let err = op
+            .run(json!({ "data": null }))
+            .await
+            .expect_err("must fail");
         assert!(matches!(err, OperatorError::Config(_)));
     }
 }

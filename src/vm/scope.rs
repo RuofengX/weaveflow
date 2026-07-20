@@ -17,9 +17,7 @@ pub struct Scope {
 
 impl Scope {
     pub fn new(slots: HashMap<String, Value>) -> Self {
-        let value = Value::Object(
-            slots.into_iter().collect()
-        );
+        let value = Value::Object(slots.into_iter().collect());
         Self {
             outputs: HashMap::new(),
             slots: Arc::new(value),

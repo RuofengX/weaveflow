@@ -6,7 +6,7 @@ use tracing::{debug, info};
 use crate::dsl::StepId;
 
 use super::meta::TaskId;
-use super::state::{Progress, StepProgress, StepState, TaskStatus, LayerInfo};
+use super::state::{LayerInfo, Progress, StepProgress, StepState, TaskStatus};
 
 /// 对外暴露的 task 状态快照。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -114,10 +114,11 @@ impl TaskTracker {
         let mut runs = self.runs.lock().unwrap();
         if let Some(run) = runs.get_mut(task_id) {
             if let Some(step) = run.progress.step_mut(step_id)
-                && let StepState::Iterating { progress, .. } = &mut step.state {
-                    progress.done = done;
-                    progress.total = total;
-                }
+                && let StepState::Iterating { progress, .. } = &mut step.state
+            {
+                progress.done = done;
+                progress.total = total;
+            }
             self.broadcast(run);
         }
     }
@@ -155,9 +156,10 @@ impl TaskTracker {
                 );
                 if !terminal {
                     let (started_at, attempts) = match &step.state {
-                        StepState::Running { started_at, attempts } => {
-                            (Some(*started_at), *attempts)
-                        }
+                        StepState::Running {
+                            started_at,
+                            attempts,
+                        } => (Some(*started_at), *attempts),
                         StepState::Iterating { started_at, .. } => (Some(*started_at), 1),
                         _ => (None, 0),
                     };
@@ -224,16 +226,13 @@ impl TaskTracker {
     // ── internal ──
 
     fn broadcast(&self, run: &RunState) {
-        let bytes =
-            serde_json::to_vec(&self.build_snapshot(run)).unwrap_or_default();
+        let bytes = serde_json::to_vec(&self.build_snapshot(run)).unwrap_or_default();
         let _ = run.tx.send(bytes);
     }
 
     fn build_snapshot(&self, run: &RunState) -> TaskSnapshot {
         let total_duration_ms = match (run.started_at, run.completed_at) {
-            (Some(start), Some(end)) => {
-                Some((end - start).num_milliseconds().max(0) as u64)
-            }
+            (Some(start), Some(end)) => Some((end - start).num_milliseconds().max(0) as u64),
             _ => None,
         };
         let status = match &run.status {
@@ -274,7 +273,16 @@ mod tests {
         let tracker = TaskTracker::new();
         let task_id = TaskId::new();
         let (_rx, _) = tracker
-            .create(task_id, "p".to_string(), vec![(step_id("a"), None), (step_id("b"), None), (step_id("c"), None)], vec![])
+            .create(
+                task_id,
+                "p".to_string(),
+                vec![
+                    (step_id("a"), None),
+                    (step_id("b"), None),
+                    (step_id("c"), None),
+                ],
+                vec![],
+            )
             .await;
         tracker
             .update_step(
@@ -300,7 +308,9 @@ mod tests {
             )
             .await;
 
-        tracker.fail_non_terminal_steps(&task_id, "task panicked").await;
+        tracker
+            .fail_non_terminal_steps(&task_id, "task panicked")
+            .await;
 
         let snapshot = tracker.get(&task_id).await.unwrap();
         let progress = running_progress(&snapshot);
@@ -321,14 +331,21 @@ mod tests {
         let tracker = TaskTracker::new();
         let task_id = TaskId::new();
         let (_rx, initial) = tracker
-            .create(task_id, "p".to_string(), vec![(step_id("a"), None), (step_id("b"), None)], vec![])
+            .create(
+                task_id,
+                "p".to_string(),
+                vec![(step_id("a"), None), (step_id("b"), None)],
+                vec![],
+            )
             .await;
 
         let progress = running_progress(&initial);
-        assert!(progress
-            .steps
-            .iter()
-            .all(|s| matches!(s.state, StepState::Pending)));
+        assert!(
+            progress
+                .steps
+                .iter()
+                .all(|s| matches!(s.state, StepState::Pending))
+        );
 
         tracker
             .update_step(
@@ -432,7 +449,9 @@ mod tests {
                 },
             )
             .await;
-        tracker.complete(&task_id, serde_json::json!({"ok": true})).await;
+        tracker
+            .complete(&task_id, serde_json::json!({"ok": true}))
+            .await;
 
         let snapshot = tracker.get(&task_id).await.unwrap();
         assert!(matches!(snapshot.status, TaskStatus::Completed(_)));
@@ -450,8 +469,7 @@ mod tests {
             .create(task_id, "p".to_string(), vec![(step_id("a"), None)], vec![])
             .await;
 
-        let (snapshot, mut rx2) =
-            tracker.snapshot_and_subscribe(&task_id).await.unwrap();
+        let (snapshot, mut rx2) = tracker.snapshot_and_subscribe(&task_id).await.unwrap();
         assert!(matches!(snapshot.status, TaskStatus::Running(_)));
 
         tracker
@@ -459,7 +477,10 @@ mod tests {
             .await;
         let bytes = rx2.recv().await.unwrap();
         let pushed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(pushed["status"]["Completed"], serde_json::json!({"ok": true}));
+        assert_eq!(
+            pushed["status"]["Completed"],
+            serde_json::json!({"ok": true})
+        );
     }
 
     #[tokio::test]
@@ -473,8 +494,7 @@ mod tests {
             .complete(&task_id, serde_json::json!({"ok": true}))
             .await;
 
-        let (snapshot, _rx2) =
-            tracker.snapshot_and_subscribe(&task_id).await.unwrap();
+        let (snapshot, _rx2) = tracker.snapshot_and_subscribe(&task_id).await.unwrap();
         assert!(matches!(snapshot.status, TaskStatus::Completed(_)));
     }
 
@@ -487,7 +507,12 @@ mod tests {
             .create(running, "p".to_string(), vec![(step_id("a"), None)], vec![])
             .await;
         let (_rx2, _i2) = tracker
-            .create(completed, "p".to_string(), vec![(step_id("a"), None)], vec![])
+            .create(
+                completed,
+                "p".to_string(),
+                vec![(step_id("a"), None)],
+                vec![],
+            )
             .await;
         tracker
             .complete(&completed, serde_json::json!({"ok": true}))
@@ -513,8 +538,7 @@ mod tests {
         {
             let mut runs = tracker.runs.lock().unwrap();
             if let Some(run) = runs.get_mut(&task_id) {
-                run.completed_at =
-                    Some(Utc::now() - chrono::TimeDelta::try_minutes(11).unwrap());
+                run.completed_at = Some(Utc::now() - chrono::TimeDelta::try_minutes(11).unwrap());
             }
         }
 
@@ -534,8 +558,7 @@ mod tests {
         {
             let mut runs = tracker.runs.lock().unwrap();
             if let Some(run) = runs.get_mut(&task_id) {
-                run.started_at =
-                    Some(Utc::now() - chrono::TimeDelta::try_minutes(30).unwrap());
+                run.started_at = Some(Utc::now() - chrono::TimeDelta::try_minutes(30).unwrap());
             }
         }
 

@@ -1,4 +1,3 @@
-
 // array_index_path: {step.output.0.name} 数组下标路径解析；越界返回错误
 
 #[path = "common/mod.rs"]

@@ -12,11 +12,15 @@ impl Default for TaskId {
 }
 
 impl TaskId {
-    pub fn new() -> Self { TaskId(uuid::Uuid::new_v4()) }
+    pub fn new() -> Self {
+        TaskId(uuid::Uuid::new_v4())
+    }
 }
 
 impl From<uuid::Uuid> for TaskId {
-    fn from(u: uuid::Uuid) -> Self { TaskId(u) }
+    fn from(u: uuid::Uuid) -> Self {
+        TaskId(u)
+    }
 }
 
 impl std::fmt::Display for TaskId {
@@ -37,11 +41,15 @@ impl Default for PipelineId {
 }
 
 impl PipelineId {
-    pub fn new() -> Self { PipelineId(uuid::Uuid::new_v4()) }
+    pub fn new() -> Self {
+        PipelineId(uuid::Uuid::new_v4())
+    }
 }
 
 impl From<uuid::Uuid> for PipelineId {
-    fn from(u: uuid::Uuid) -> Self { PipelineId(u) }
+    fn from(u: uuid::Uuid) -> Self {
+        PipelineId(u)
+    }
 }
 
 impl std::fmt::Display for PipelineId {

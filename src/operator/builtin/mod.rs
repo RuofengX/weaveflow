@@ -154,7 +154,10 @@ mod tests {
         let a = json!(9007199254740992_i64);
         let b = json!(9007199254740993_i64);
         assert_eq!(compare_json_numbers(&a, &b), Some(std::cmp::Ordering::Less));
-        assert_eq!(compare_json_numbers(&b, &a), Some(std::cmp::Ordering::Greater));
+        assert_eq!(
+            compare_json_numbers(&b, &a),
+            Some(std::cmp::Ordering::Greater)
+        );
     }
 
     #[test]
@@ -169,14 +172,29 @@ mod tests {
         assert_eq!(compare_json_numbers(&c, &b), Some(Equal));
         assert_eq!(compare_json_numbers(&b, &c), Some(Equal));
         // 非整数 float
-        assert_eq!(compare_json_numbers(&json!(3_i64), &json!(3.5_f64)), Some(Less));
-        assert_eq!(compare_json_numbers(&json!(4_i64), &json!(3.5_f64)), Some(Greater));
-        assert_eq!(compare_json_numbers(&json!(-4_i64), &json!(-3.5_f64)), Some(Less));
-        assert_eq!(compare_json_numbers(&json!(-3_i64), &json!(-3.5_f64)), Some(Greater));
+        assert_eq!(
+            compare_json_numbers(&json!(3_i64), &json!(3.5_f64)),
+            Some(Less)
+        );
+        assert_eq!(
+            compare_json_numbers(&json!(4_i64), &json!(3.5_f64)),
+            Some(Greater)
+        );
+        assert_eq!(
+            compare_json_numbers(&json!(-4_i64), &json!(-3.5_f64)),
+            Some(Less)
+        );
+        assert_eq!(
+            compare_json_numbers(&json!(-3_i64), &json!(-3.5_f64)),
+            Some(Greater)
+        );
         // 超出 i64 的 u64 与 f64
         let big = json!(u64::MAX);
         assert_eq!(compare_json_numbers(&big, &json!(1.0_f64)), Some(Greater));
         assert_eq!(compare_json_numbers(&json!(1.0_f64), &big), Some(Less));
-        assert_eq!(compare_json_numbers(&json!(-1_i64), &json!(1.5_f64)), Some(Less));
+        assert_eq!(
+            compare_json_numbers(&json!(-1_i64), &json!(1.5_f64)),
+            Some(Less)
+        );
     }
 }

@@ -12,10 +12,7 @@ impl Operator for NoopOperator {
         OperatorSpec::new("noop", "直接透传输入")
     }
 
-    async fn run(
-        &self,
-        inputs: Value,
-    ) -> Result<Value, OperatorError> {
+    async fn run(&self, inputs: Value) -> Result<Value, OperatorError> {
         trace!("noop operator");
         Ok(inputs)
     }

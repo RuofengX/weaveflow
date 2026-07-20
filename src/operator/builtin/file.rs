@@ -1,5 +1,5 @@
-use base64::Engine;
 use async_trait::async_trait;
+use base64::Engine;
 use serde_json::Value;
 use tracing::{debug, warn};
 
@@ -42,7 +42,10 @@ fn extension_to_mimetype(ext: &str) -> &'static str {
 }
 
 fn detect_mimetype(path: &str) -> &'static str {
-    if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
         extension_to_mimetype(ext)
     } else {
         "application/octet-stream"
@@ -89,7 +92,9 @@ fn is_allowed_path(canonical: &std::path::Path) -> bool {
         warn!(dropped, "WEAVEFLOW_FILE_ALLOW_ROOTS 含空段，已忽略");
     }
     if kept.is_empty() {
-        warn!("WEAVEFLOW_FILE_ALLOW_ROOTS 已设置但过滤空段后为空（配置疑似有误），所有路径将被拒绝");
+        warn!(
+            "WEAVEFLOW_FILE_ALLOW_ROOTS 已设置但过滤空段后为空（配置疑似有误），所有路径将被拒绝"
+        );
         return false;
     }
     // root 也需 canonicalize：root 含符号链接或写成相对路径时，
@@ -117,10 +122,7 @@ impl Operator for FileOperator {
         OperatorSpec::new("file", "读取本地文件或远程 URL，产出 JSON 对象").with_cache(false)
     }
 
-    async fn run(
-        &self,
-        inputs: Value,
-    ) -> Result<Value, OperatorError> {
+    async fn run(&self, inputs: Value) -> Result<Value, OperatorError> {
         debug!("file operator");
         if let Some(path) = inputs.get("path").and_then(|v| v.as_str()) {
             let canonical = tokio::fs::canonicalize(path)
@@ -173,14 +175,11 @@ impl Operator for FileOperator {
 
             let status = resp.status();
             if !status.is_success() {
-                return Err(OperatorError::Runtime(format!(
-                    "HTTP GET {url} → {status}"
-                )));
+                return Err(OperatorError::Runtime(format!("HTTP GET {url} → {status}")));
             }
 
-            http_client::check_content_length(resp.content_length()).ok_or_else(|| {
-                OperatorError::Runtime("response body exceeds 64MB limit".into())
-            })?;
+            http_client::check_content_length(resp.content_length())
+                .ok_or_else(|| OperatorError::Runtime("response body exceeds 64MB limit".into()))?;
 
             let mimetype = resp
                 .headers()

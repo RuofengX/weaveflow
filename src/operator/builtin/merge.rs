@@ -12,21 +12,25 @@ impl Operator for MergeOperator {
         OperatorSpec::new("merge", "合并两个对象")
     }
 
-    async fn run(
-        &self,
-        inputs: Value,
-    ) -> Result<Value, OperatorError> {
+    async fn run(&self, inputs: Value) -> Result<Value, OperatorError> {
         debug!("merge operator");
-        let a = inputs.get("a").cloned()
+        let a = inputs
+            .get("a")
+            .cloned()
             .or_else(|| inputs.get("data").cloned());
         let a = match a {
             Some(v) if !v.is_null() => v,
             _ => Value::Null,
         };
 
-        let b = inputs.get("b").cloned()
+        let b = inputs
+            .get("b")
+            .cloned()
             .ok_or_else(|| OperatorError::Config("缺少 b 字段".into()))?;
-        let deep = inputs.get("deep").and_then(|v| v.as_bool()).unwrap_or(false);
+        let deep = inputs
+            .get("deep")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         match (a.as_object(), b.as_object()) {
             (Some(oa), Some(ob)) => {

@@ -8,7 +8,7 @@ use super::retry::RetryDef;
 use super::step::{BatchConfig, IterateConfig, StepDef, StepId};
 use super::step_op::{self, StepOp};
 use super::storage::StorageDef;
-use super::variable::{parse_string_to_refvalue, RefValue, VariablePath};
+use super::variable::{RefValue, VariablePath, parse_string_to_refvalue};
 
 // ---------------------------------------------------------------------------
 // Raw pipeline — no RefValue, no catch-all HashMap on steps
@@ -246,7 +246,11 @@ impl From<RawStepOp> for StepOp {
             RawStepOp::Http(r) => StepOp::Http(step_op::HttpInputs {
                 url: yaml_to_refvalue(&r.url),
                 method: r.method,
-                headers: r.headers.map(|m| m.into_iter().map(|(k, v)| (k, yaml_to_refvalue(&v))).collect()),
+                headers: r.headers.map(|m| {
+                    m.into_iter()
+                        .map(|(k, v)| (k, yaml_to_refvalue(&v)))
+                        .collect()
+                }),
                 body: r.body.as_ref().map(yaml_to_refvalue),
             }),
             RawStepOp::Js(r) => StepOp::Js(step_op::JsInputs {
@@ -336,16 +340,14 @@ fn yaml_to_refvalue(v: &Value) -> RefValue {
                 RefValue::Literal(v.clone())
             }
         }
-        Value::Object(map) => {
-            RefValue::Literal(Value::Object(
-                map.iter().map(|(k, v)| (k.clone(), replace_template_strings(v))).collect(),
-            ))
-        }
-        Value::Array(arr) => {
-            RefValue::Literal(Value::Array(
-                arr.iter().map(replace_template_strings).collect(),
-            ))
-        }
+        Value::Object(map) => RefValue::Literal(Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), replace_template_strings(v)))
+                .collect(),
+        )),
+        Value::Array(arr) => RefValue::Literal(Value::Array(
+            arr.iter().map(replace_template_strings).collect(),
+        )),
         _ => RefValue::Literal(v.clone()),
     }
 }
@@ -357,23 +359,18 @@ fn replace_template_strings(v: &Value) -> Value {
         Value::String(s) => {
             if let Some(path) = VariablePath::parse(s) {
                 let mut map = serde_json::Map::new();
-                map.insert(
-                    "Ref".into(),
-                    serde_json::json!({"parts": path.parts}),
-                );
+                map.insert("Ref".into(), serde_json::json!({"parts": path.parts}));
                 Value::Object(map)
             } else {
                 v.clone()
             }
         }
-        Value::Object(map) => {
-            Value::Object(
-                map.iter().map(|(k, v)| (k.clone(), replace_template_strings(v))).collect(),
-            )
-        }
-        Value::Array(arr) => {
-            Value::Array(arr.iter().map(replace_template_strings).collect())
-        }
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), replace_template_strings(v)))
+                .collect(),
+        ),
+        Value::Array(arr) => Value::Array(arr.iter().map(replace_template_strings).collect()),
         _ => v.clone(),
     }
 }

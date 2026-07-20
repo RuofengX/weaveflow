@@ -34,13 +34,18 @@ impl Operator for FilterOperator {
         OperatorSpec::new("filter", "按条件过滤数组元素")
     }
 
-    async fn run(
-        &self,
-        inputs: Value,
-    ) -> Result<Value, OperatorError> {
-        let field = inputs.get("field").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    async fn run(&self, inputs: Value) -> Result<Value, OperatorError> {
+        let field = inputs
+            .get("field")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         debug!(field, "filter operator");
-        let operator = inputs.get("operator").and_then(|v| v.as_str()).unwrap_or("eq").to_string();
+        let operator = inputs
+            .get("operator")
+            .and_then(|v| v.as_str())
+            .unwrap_or("eq")
+            .to_string();
         if !matches!(
             operator.as_str(),
             "eq" | "ne" | "gt" | "gte" | "lt" | "lte" | "in" | "contains"
@@ -137,9 +142,15 @@ mod tests {
     #[tokio::test]
     async fn missing_data_returns_config_error() {
         let op = FilterOperator;
-        let err = op.run(json!({ "operator": "eq", "value": 1 })).await.expect_err("must fail");
+        let err = op
+            .run(json!({ "operator": "eq", "value": 1 }))
+            .await
+            .expect_err("must fail");
         assert!(matches!(err, OperatorError::Config(_)));
-        let err = op.run(json!({ "data": null, "operator": "eq", "value": 1 })).await.expect_err("must fail");
+        let err = op
+            .run(json!({ "data": null, "operator": "eq", "value": 1 }))
+            .await
+            .expect_err("must fail");
         assert!(matches!(err, OperatorError::Config(_)));
     }
 }

@@ -12,7 +12,12 @@ pub struct OperatorSpec {
 
 impl OperatorSpec {
     pub fn new(type_name: impl Into<String>, description: impl Into<String>) -> Self {
-        OperatorSpec { type_name: type_name.into(), description: description.into(), iterate: false, cache: true }
+        OperatorSpec {
+            type_name: type_name.into(),
+            description: description.into(),
+            iterate: false,
+            cache: true,
+        }
     }
     pub fn with_iterate(mut self, yes: bool) -> Self {
         self.iterate = yes;
@@ -38,8 +43,5 @@ pub enum OperatorError {
 pub trait Operator: Send + Sync {
     fn spec(&self) -> OperatorSpec;
 
-    async fn run(
-        &self,
-        inputs: Value,
-    ) -> Result<Value, OperatorError>;
+    async fn run(&self, inputs: Value) -> Result<Value, OperatorError>;
 }

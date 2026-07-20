@@ -1,4 +1,3 @@
-
 // unknown_operator_fails_validation
 
 #[path = "common/mod.rs"]

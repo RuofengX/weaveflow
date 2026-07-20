@@ -1,4 +1,3 @@
-
 // cache_control
 
 #[path = "common/mod.rs"]
@@ -58,7 +57,11 @@ fn cacheable_step_reads_cache() {
     cache_seed(&db, &key, &json!("poisoned"));
 
     let result = run_yaml_with_db(VAR_YAML_CACHED, HashMap::new(), db.clone()).expect("run");
-    assert_eq!(result, json!("poisoned"), "cacheable step should hit seeded cache");
+    assert_eq!(
+        result,
+        json!("poisoned"),
+        "cacheable step should hit seeded cache"
+    );
 }
 
 #[test]
@@ -69,7 +72,11 @@ fn cache_false_step_skips_cache_read_write() {
     cache_seed(&db, &key, &json!("poisoned"));
 
     let result = run_yaml_with_db(VAR_YAML_NO_CACHE, HashMap::new(), db.clone()).expect("run");
-    assert_eq!(result, json!({"value": 42}), "cache:false must not read cache");
+    assert_eq!(
+        result,
+        json!({"value": 42}),
+        "cache:false must not read cache"
+    );
     assert_eq!(
         cache_lookup(&db, &key),
         Some(json!("poisoned")),

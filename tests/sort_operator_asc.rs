@@ -1,4 +1,3 @@
-
 // sort_operator_asc
 
 #[path = "common/mod.rs"]
@@ -24,5 +23,8 @@ steps:
 output: "{s1.output}"
 "#;
     let result = run_yaml(yaml, HashMap::new()).expect("run");
-    assert_eq!(result, json!([{ "name": "a" }, { "name": "b" }, { "name": "c" }]));
+    assert_eq!(
+        result,
+        json!([{ "name": "a" }, { "name": "b" }, { "name": "c" }])
+    );
 }

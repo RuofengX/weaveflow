@@ -9,8 +9,8 @@ use crate::engine::step::{resolve_operator, retry_with_op};
 use crate::error::WeaveflowError;
 use crate::operator::Operator;
 use crate::tracker::{IterateProgress, StepState, TaskId, TaskTracker};
-use crate::vm::resolver::resolve_ref;
 use crate::vm::Scope;
+use crate::vm::resolver::resolve_ref;
 
 pub fn effective_max_workers(cfg: &IterateConfig) -> usize {
     cfg.max_workers
@@ -34,10 +34,7 @@ pub async fn execute_iterate(
         && batch.size == 0
     {
         return Err((
-            WeaveflowError::BadRequest(format!(
-                "步骤 {} 的 iterate.batch.size 不能为 0",
-                step.id
-            )),
+            WeaveflowError::BadRequest(format!("步骤 {} 的 iterate.batch.size 不能为 0", step.id)),
             0,
         ));
     }
@@ -168,9 +165,7 @@ pub async fn execute_iterate(
     scope.set_output(&step.id, final_result.clone());
 
     let completed_at = Utc::now();
-    let duration_ms = (completed_at - started_at)
-        .num_milliseconds()
-        .max(0) as u64;
+    let duration_ms = (completed_at - started_at).num_milliseconds().max(0) as u64;
     info!(
         step = %step.id,
         items = total_items,

@@ -13,13 +13,15 @@ impl Operator for HttpOperator {
         OperatorSpec::new("http", "HTTP 请求").with_cache(false)
     }
 
-    async fn run(
-        &self,
-        inputs: Value,
-    ) -> Result<Value, OperatorError> {
-        let url = inputs.get("url").and_then(|v| v.as_str())
+    async fn run(&self, inputs: Value) -> Result<Value, OperatorError> {
+        let url = inputs
+            .get("url")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| OperatorError::Config("缺少 url".into()))?;
-        let method = inputs.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+        let method = inputs
+            .get("method")
+            .and_then(|v| v.as_str())
+            .unwrap_or("GET");
         debug!(url = %url, method, "http request");
 
         let client = http_client::http_client();
@@ -55,12 +57,13 @@ impl Operator for HttpOperator {
             }
         }
 
-        let resp = req_builder.send().await
+        let resp = req_builder
+            .send()
+            .await
             .map_err(|e| OperatorError::Runtime(format!("HTTP: {e}")))?;
 
-        http_client::check_content_length(resp.content_length()).ok_or_else(|| {
-            OperatorError::Runtime("response body exceeds 64MB limit".into())
-        })?;
+        http_client::check_content_length(resp.content_length())
+            .ok_or_else(|| OperatorError::Runtime("response body exceeds 64MB limit".into()))?;
 
         let status = resp.status().as_u16();
         let body_bytes = http_client::read_body_limited(resp).await?;

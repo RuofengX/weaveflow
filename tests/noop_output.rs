@@ -1,4 +1,3 @@
-
 // noop_output: 顶层 op 信封处理 — noop（无 inputs）输出不被 {"type":"noop"} 污染；
 // iterate 场景注入的 "data" 必须存活
 
