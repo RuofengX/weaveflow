@@ -4,7 +4,7 @@
 
 ## 鉴权现状：没有鉴权
 
-所有 HTTP/WS 端点（`/runs`、`/pipelines`、`/prune` …）**没有任何身份验证**（审计项 C6 未修复）。
+所有 HTTP/WS 端点（`/runs`、`/pipelines`、`/prune` …）**没有任何身份验证**（设计决策：鉴权属网关/反代层职责，见 TODO.md"有意保留"）。
 
 - `--allow-remote` 只是允许绑定非 loopback 地址，**不是**鉴权机制。
 - 绑定 `0.0.0.0` = 未授权 RCE：任何人都能注册含 `command`/`file` 算子的 pipeline 并运行。

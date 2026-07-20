@@ -158,6 +158,8 @@ pub struct LlmInputs {
     pub temperature: Option<f64>,
     #[serde(default)]
     pub skip_vision_check: Option<bool>,
+    #[serde(default)]
+    pub api_key: Option<RefValue>,
 }
 
 fn default_max_tokens() -> u64 {

@@ -252,6 +252,17 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
                         ),
                     });
                 }
+                if let Some(RefValue::Literal(_)) = &inputs.api_key {
+                    report.errors.push(ValidationError {
+                        code: "insecure_api_key".into(),
+                        message: format!(
+                            "步骤 {} 的 llm.api_key 不允许明文配置（会明文进入流水线定义）。\
+                             请改用引用，如 api_key: \"{{env.OPENAI_API_KEY}}\"，\
+                             或经 var/file 步骤输出注入",
+                            step.id
+                        ),
+                    });
+                }
             }
             _ => {}
         }
@@ -1286,6 +1297,7 @@ mod tests {
             max_tokens: 100,
             temperature: Some(f64::NAN),
             skip_vision_check: None,
+            api_key: None,
         });
         let report = validate(&def);
         assert!(
@@ -1293,6 +1305,55 @@ mod tests {
                 .errors
                 .iter()
                 .any(|e| e.code == "invalid_operator_config")
+        );
+    }
+
+    #[test]
+    fn llm_api_key_literal_rejected() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Llm(LlmInputs {
+            url: var_ref("{slots.url}"),
+            model: "m".into(),
+            prompt: literal(json!("hi")),
+            system: None,
+            images_b64: None,
+            image_type: None,
+            max_tokens: 100,
+            temperature: None,
+            skip_vision_check: None,
+            api_key: Some(literal(json!("sk-plaintext"))),
+        });
+        let report = validate(&def);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "insecure_api_key"),
+            "expected insecure_api_key error: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn llm_api_key_ref_accepted() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Llm(LlmInputs {
+            url: var_ref("{slots.url}"),
+            model: "m".into(),
+            prompt: literal(json!("hi")),
+            system: None,
+            images_b64: None,
+            image_type: None,
+            max_tokens: 100,
+            temperature: None,
+            skip_vision_check: None,
+            api_key: Some(var_ref("{env.OPENAI_API_KEY}")),
+        });
+        let report = validate(&def);
+        assert!(
+            !report.errors.iter().any(|e| e.code == "insecure_api_key"),
+            "env ref api_key must be accepted: {:?}",
+            report.errors
         );
     }
 

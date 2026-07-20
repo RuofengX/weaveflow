@@ -2,7 +2,7 @@
 
 > 本文件只记两件事：**待修改的开放项**（上半）与 **v1.0 已完成的修改**（下半）。
 > 行为与用法文档在 [docs/](docs/README.md)；工程约定在 [AGENTS.md](AGENTS.md)。
-> 质量基线：186 lib tests + 51 集成测试（28 个二进制）+ 24 bin tests 全绿，`cargo clippy --all-targets` 0 警告。
+> 质量基线：188 lib tests + 51 集成测试（28 个二进制）+ 24 bin tests 全绿，`cargo clippy --all-targets` 0 警告。
 
 ---
 
@@ -10,12 +10,7 @@
 
 ## A. 值得优先处理
 
-| # | 位置 | 问题 | 处置方向 |
-|---|------|------|---------|
-| C6 | `server/daemon.rs` | **全部端点无鉴权**：绑定非 loopback = 未认证 RCE；localhost 下有浏览器 CSRF 风险 | 实现 bearer token 鉴权；当前靠默认绑 `127.0.0.1` + `--allow-remote` 入口守卫兜底，daemon 视为 localhost-only |
-| L14 | `operator/builtin/llm.rs` | llm 算子缺 `api_key`/`headers` 字段（密钥只能塞 header 字面量或 env 插值）；URL 未脱敏 | 算子级字段新增 |
-| S5 | `store/database.rs` | redb `from_bytes` 对损坏行 assert/expect panic；单条坏行可 abort 请求/启动 | trait 限制无法返回 Result；评估 catch_unwind 包裹 |
-| — | `dsl/raw.rs` | `RawStepOp::Noop` 带 `inputs` 键是否被 serde 静默吞掉 | 待验证；若吞掉则加校验报错 |
+（暂无 —— 原 A 组 C6/L14/S5/Noop 已于 2026-07-20 全部处置，见下方"开放项处置决议"）
 
 ## B. 低优先 / 已接受的残余风险
 
@@ -43,6 +38,8 @@
 
 | 行为 | 理由 |
 |------|------|
+| **全部端点无鉴权（C6）** | 定位 localhost-only 工具，鉴权是网关/反代层职责；`--allow-remote` 绑非 loopback 时启动打印醒目警告。开放此能力是为便于 hack，非开发者场景 |
+| **redb 坏行 `from_bytes` panic（S5）** | 任何时刻都假定数据库文件完好；文件系统级腐败不在防御范围（redb 自带 checksum）。catch_unwind 包裹无实际收益 |
 | `find_pipeline_by_name` 全表扫描 | pipeline 数量小，不加索引 |
 | JS step 无 `timeout_sec` 时死循环占 blocking 线程 | 超时只在 step 层（2026-07-20 用户决策：任何隐式超时都不得截断 step 执行） |
 | `yes` 类无限输出命令跑到 step 超时为止 | 10MB 截断只保护内存；`kill_on_drop` 保证 step 超时取消时回收子进程 |
@@ -62,7 +59,7 @@
 - TaskTracker：in-memory 状态机 + `snapshot_and_subscribe` 原子订阅 + WS broadcast + cleanup_stale
 - daemon：REST + WS + 优雅停机 drain + 并发信号量 + pidfile 二进制校验 + 环形日志（绝对 offset）
 - CLI：pipeline/run/task/system/check 全命令 + `--watch` TUI + `--text-output` + 非 TTY 自动回退 + 统一配置层（flag > env > 默认）+ `--output json` / JSONL 快照流
-- 12 个内置算子：http / js / filter / sort / dedup / merge / base64 / noop / var / file / command / llm
+- 12 个内置算子：http / js / filter / sort / dedup / merge / base64 / noop / var / file / command / llm（`api_key` Bearer 注入，validator 拒明文）
 - 安全加固：共享 HTTP client（不跟 redirect、全 DNS SSRF 检查、64MB 流式限长、无隐式总超时）/ command env_clear+白名单+10MB 截断 / file 白名单+64MB / QuickJS 沙箱 256MB+1MB 栈+inflate 限长
 - `pipeline apply` 同名 upsert（单写事务原子）/ `run -i k=@file.json` 文件输入 / 任务失败退出码 1
 - 文档体系：docs/ 八篇分册 + agent SKILL
@@ -81,6 +78,16 @@
 
 任何隐式超时都不得截断 step 执行：共享 HTTP client 的 60s 总超时与 llm 的 600s 专用超时一并移除。
 超时只在 step 层（`timeout_sec`）显式配置；未配置时请求可无限等待。connect_timeout 10s 保留为建连快速失败下限。
+
+### 2026-07-20 开放项处置决议（A 组清零）
+
+- **C6（无鉴权）→ 有意保留**：weaveflow 只做 localhost 开放服务，鉴权属网关层职责；`--allow-remote` 保留启动警告。
+- **S5（redb 坏行 panic）→ 有意保留（wontfix）**：假定数据库完好；文件系统腐败不是防御目标。
+- **Noop inputs 吞没 → 验证为误报**：serde adjacent-tag 对 unit variant 带 `inputs` 直接 parse 报错
+  （`invalid type: map, expected unit variant RawStepOp::Noop`），不存在静默吞没，无需修复（报错定位信息较差，可接受）。
+- **L14（llm api_key）→ 已修复**：`LlmInputs` 新增 `api_key` 字段（发送 `Authorization: Bearer`）；
+  validator 拒绝明文字面量（`insecure_api_key`），仅接受 `{env.*}` / var / file 步骤引用（`{env.*}` 自动进快照脱敏集）；
+  新增 2 个 validator 测试；docs/operators.md 已同步。
 
 ---
 

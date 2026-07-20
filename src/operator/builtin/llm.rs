@@ -116,10 +116,18 @@ impl Operator for LlmOperator {
         http_client::block_private_ips(url).await?;
 
         let client = http_client::http_client();
-        let resp = client
+        let mut req = client
             .post(url)
             .header("Content-Type", "application/json")
-            .body(body_bytes)
+            .body(body_bytes);
+        if let Some(key) = inputs
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| OperatorError::Runtime(format!("llm request: {e}")))?;

@@ -187,6 +187,8 @@ pub struct RawLlmInputs {
     pub temperature: Option<f64>,
     #[serde(default)]
     pub skip_vision_check: Option<bool>,
+    #[serde(default)]
+    pub api_key: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -304,6 +306,7 @@ impl From<RawStepOp> for StepOp {
                 max_tokens: r.max_tokens.unwrap_or(4096),
                 temperature: r.temperature,
                 skip_vision_check: r.skip_vision_check,
+                api_key: r.api_key.as_ref().map(yaml_to_refvalue),
             }),
         }
     }
