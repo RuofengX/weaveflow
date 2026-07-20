@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::json;
-use weave::engine::dag::Dag;
-use weave::engine::runner::Runner;
-use weave::store::Database;
-use weave::tracker::{LayerInfo, TaskId, TaskTracker};
+use weaveflow::engine::dag::Dag;
+use weaveflow::engine::runner::Runner;
+use weaveflow::store::Database;
+use weaveflow::tracker::{LayerInfo, TaskId, TaskTracker};
 
 pub const DATA_SIZE: usize = 2_000;
 
@@ -18,7 +18,7 @@ pub struct TempDir(PathBuf);
 impl TempDir {
     pub fn new(prefix: &str) -> Self {
         let n = std::process::id();
-        let path = std::env::temp_dir().join(format!("weave-bench-{prefix}-{n}"));
+        let path = std::env::temp_dir().join(format!("weaveflow-bench-{prefix}-{n}"));
         let _ = std::fs::create_dir_all(&path);
         TempDir(path)
     }
@@ -186,7 +186,7 @@ output: "{v.output}""#
 
 pub fn setup(
     rt: &tokio::runtime::Runtime,
-    def: &weave::dsl::PipelineDef,
+    def: &weaveflow::dsl::PipelineDef,
     db: Arc<Database>,
     slots: HashMap<String, serde_json::Value>,
 ) -> (Runner, TaskId, HashMap<String, serde_json::Value>) {
@@ -194,7 +194,7 @@ pub fn setup(
 
     let dag = Dag::from_pipeline(def).expect("dag");
     let layers = dag.topological_sort().expect("topo");
-    let steps_with_timeout: Vec<(weave::dsl::StepId, Option<f64>)> = layers
+    let steps_with_timeout: Vec<(weaveflow::dsl::StepId, Option<f64>)> = layers
         .iter()
         .flatten()
         .map(|id| (id.clone(), dag.step(id).and_then(|s| s.timeout_sec)))
@@ -217,7 +217,7 @@ pub fn setup(
 
 pub fn run_once(
     rt: &tokio::runtime::Runtime,
-    def: &weave::dsl::PipelineDef,
+    def: &weaveflow::dsl::PipelineDef,
     db: &Arc<Database>,
     slots: HashMap<String, serde_json::Value>,
 ) -> usize {
@@ -230,5 +230,5 @@ pub fn fresh_db(tmpdir: &TempDir, prefix: &str, counter: &AtomicUsize) -> (Arc<D
     let n = counter.fetch_add(1, Ordering::Relaxed);
     let dir = tmpdir.0.join(format!("{prefix}-{n}"));
     let _ = std::fs::create_dir_all(&dir);
-    (Arc::new(Database::open(dir.join("weave.redb")).expect("open db")), dir)
+    (Arc::new(Database::open(dir.join("weaveflow.redb")).expect("open db")), dir)
 }

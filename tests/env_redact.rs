@@ -5,15 +5,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
-use weave::dsl::parser::parse;
-use weave::dsl::validator::validate;
-use weave::engine::dag::Dag;
-use weave::engine::runner::Runner;
-use weave::tracker::{LayerInfo, TaskTracker};
+use weaveflow::dsl::parser::parse;
+use weaveflow::dsl::validator::validate;
+use weaveflow::engine::dag::Dag;
+use weaveflow::engine::runner::Runner;
+use weaveflow::tracker::{LayerInfo, TaskTracker};
 
 #[test]
 fn env_value_redacted_in_persisted_snapshot() {
-    unsafe { std::env::set_var("WEAVE_TEST_REDACT_SECRET", "sk-live-secret-12345") };
+    unsafe { std::env::set_var("WEAVEFLOW_TEST_REDACT_SECRET", "sk-live-secret-12345") };
     let yaml = r#"
 name: env_redact
 steps:
@@ -21,7 +21,7 @@ steps:
     type: var
     inputs:
       value:
-        api_key: "{env.WEAVE_TEST_REDACT_SECRET}"
+        api_key: "{env.WEAVEFLOW_TEST_REDACT_SECRET}"
         note: "plain"
 output: "{leak.output.value}"
 "#;
@@ -76,14 +76,14 @@ output: "{leak.output.value}"
 
 #[test]
 fn short_env_value_not_redacted() {
-    unsafe { std::env::set_var("WEAVE_TEST_SHORT", "abc") };
+    unsafe { std::env::set_var("WEAVEFLOW_TEST_SHORT", "abc") };
     let yaml = r#"
 name: env_short
 steps:
   - id: s1
     type: var
     inputs:
-      value: "{env.WEAVE_TEST_SHORT}"
+      value: "{env.WEAVEFLOW_TEST_SHORT}"
 output: "{s1.output.value}"
 "#;
     let result = common::run_yaml(yaml, HashMap::new()).expect("run");

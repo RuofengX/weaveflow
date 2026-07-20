@@ -128,20 +128,20 @@ pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), Str
                         {
                             if out.get("_binary").and_then(|v| v.as_bool()).unwrap_or(false) {
                                 let size = out.get("_size").and_then(|v| v.as_u64()).unwrap_or(0);
-                                println!("[weave] output: [binary {size} bytes]");
+                                println!("[weaveflow] output: [binary {size} bytes]");
                             } else if out.is_string() && out.as_str().map(|s| s.chars().count()).unwrap_or(0) > 200 {
                                 let s = out.as_str().unwrap();
                                 let preview: String = s.chars().take(200).collect();
-                                println!("[weave] output: {preview}... ({} chars)", s.chars().count());
+                                println!("[weaveflow] output: {preview}... ({} chars)", s.chars().count());
                             } else {
                                 println!(
-                                    "[weave] output: {}",
+                                    "[weaveflow] output: {}",
                                     serde_json::to_string(out).unwrap_or_default()
                                 );
                             }
                         }
                         if let Some(steps) = data.get("steps").and_then(|s| s.as_array()) {
-                            println!("[weave] step progress:");
+                            println!("[weaveflow] step progress:");
                             for step in steps {
                                 let sid = step.get("step_id").and_then(|v| v.as_str()).unwrap_or("?");
                                 let state = step.get("state").and_then(|s| s.as_object());
@@ -185,11 +185,11 @@ pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), Str
                             .and_then(|s| s.get("Failed"))
                             .and_then(|f| f.as_str())
                             .unwrap_or("unknown error");
-                        eprintln!("[weave] error: {err}");
+                        eprintln!("[weaveflow] error: {err}");
                         task_error = Some(err.to_string());
                     }
                     if let Some(dur) = data.get("total_duration_ms").and_then(|v| v.as_u64()) {
-                        println!("[weave] completed in {}ms", dur);
+                        println!("[weaveflow] completed in {}ms", dur);
                     }
                     finished = true;
                     break;
@@ -263,7 +263,7 @@ fn print_text_layer(data: &Value, completed: &mut HashSet<usize>) {
 
         let parallel = if step_ids.len() > 1 { " (parallel)" } else { "" };
         println!(
-            "[weave] Layer {}{}: {}",
+            "[weaveflow] Layer {}{}: {}",
             idx + 1,
             parallel,
             parts.join(", ")
@@ -391,7 +391,7 @@ fn run_app(
 fn ui(f: &mut Frame, state: &TuiState) {
     let area = f.area();
     let title = format!(
-        " weave run: {} — {} ",
+        " weaveflow run: {} — {} ",
         state.pipeline_name, state.task_id
     );
     let block = Block::default()

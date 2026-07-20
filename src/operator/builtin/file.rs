@@ -75,21 +75,21 @@ fn is_allowed_path_with_roots(canonical: &std::path::Path, roots: &str) -> bool 
 
 fn is_allowed_path(canonical: &std::path::Path) -> bool {
     static WARN_NO_ROOTS: std::sync::Once = std::sync::Once::new();
-    let raw = std::env::var("WEAVE_FILE_ALLOW_ROOTS").unwrap_or_default();
+    let raw = std::env::var("WEAVEFLOW_FILE_ALLOW_ROOTS").unwrap_or_default();
     if raw.is_empty() {
         WARN_NO_ROOTS.call_once(|| {
             warn!(
-                "WEAVE_FILE_ALLOW_ROOTS 未配置，file 算子允许读取所有本地路径；生产环境建议配置白名单根目录"
+                "WEAVEFLOW_FILE_ALLOW_ROOTS 未配置，file 算子允许读取所有本地路径；生产环境建议配置白名单根目录"
             );
         });
         return true;
     }
     let (kept, dropped) = split_roots(&raw);
     if dropped > 0 {
-        warn!(dropped, "WEAVE_FILE_ALLOW_ROOTS 含空段，已忽略");
+        warn!(dropped, "WEAVEFLOW_FILE_ALLOW_ROOTS 含空段，已忽略");
     }
     if kept.is_empty() {
-        warn!("WEAVE_FILE_ALLOW_ROOTS 已设置但过滤空段后为空（配置疑似有误），所有路径将被拒绝");
+        warn!("WEAVEFLOW_FILE_ALLOW_ROOTS 已设置但过滤空段后为空（配置疑似有误），所有路径将被拒绝");
         return false;
     }
     // root 也需 canonicalize：root 含符号链接或写成相对路径时，
@@ -99,13 +99,13 @@ fn is_allowed_path(canonical: &std::path::Path) -> bool {
         .filter_map(|root| match std::fs::canonicalize(root) {
             Ok(p) => Some(p),
             Err(e) => {
-                warn!(root, error = %e, "WEAVE_FILE_ALLOW_ROOTS 中的根目录无法 canonicalize，已忽略");
+                warn!(root, error = %e, "WEAVEFLOW_FILE_ALLOW_ROOTS 中的根目录无法 canonicalize，已忽略");
                 None
             }
         })
         .collect();
     if roots.is_empty() {
-        warn!("WEAVE_FILE_ALLOW_ROOTS 中的根目录全部无效，所有路径将被拒绝");
+        warn!("WEAVEFLOW_FILE_ALLOW_ROOTS 中的根目录全部无效，所有路径将被拒绝");
         return false;
     }
     roots.iter().any(|root| canonical.starts_with(root))

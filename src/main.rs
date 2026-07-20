@@ -1,17 +1,17 @@
-// weave CLI — Docker-like CLI for DAG pipeline management.
+// weaveflow CLI — Docker-like CLI for DAG pipeline management.
 //
 // Subcommands:
-//   weave serve --bind 127.0.0.1:9928     (hidden, daemon-internal)
-//   weave daemon start [--bind ADDR]
-//   weave daemon stop
-//   weave pipeline apply -f pipe.yaml
-//   weave pipeline ls|list
-//   weave pipeline inspect <name>
-//   weave run <name> [-i k=v] [-i ...]
-//   weave task ls|list
-//   weave task snapshot list <task-id>
-//   weave task snapshot show <task-id> <seq>
-//   weave system prune [--force] [--dry-run]
+//   weaveflow serve --bind 127.0.0.1:9928     (hidden, daemon-internal)
+//   weaveflow daemon start [--bind ADDR]
+//   weaveflow daemon stop
+//   weaveflow pipeline apply -f pipe.yaml
+//   weaveflow pipeline ls|list
+//   weaveflow pipeline inspect <name>
+//   weaveflow run <name> [-i k=v] [-i ...]
+//   weaveflow task ls|list
+//   weaveflow task snapshot list <task-id>
+//   weaveflow task snapshot show <task-id> <seq>
+//   weaveflow system prune [--force] [--dry-run]
 
 use clap::{Parser, Subcommand};
 
@@ -21,7 +21,7 @@ mod server;
 const DEFAULT_BIND: &str = "127.0.0.1:9928";
 
 #[derive(Parser)]
-#[command(name = "weave", version = env!("CARGO_PKG_VERSION"), about = "DAG batch processing engine")]
+#[command(name = "weaveflow", version = env!("CARGO_PKG_VERSION"), about = "DAG batch processing engine")]
 struct Cli {
     /// Daemon address (default: 127.0.0.1:9928)
     #[arg(long, default_value = DEFAULT_BIND, global = true)]
@@ -33,21 +33,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the weave HTTP server (internal, called by daemon)
+    /// Start the weaveflow HTTP server (internal, called by daemon)
     #[command(hide = true)]
     Serve {
         #[arg(long, default_value = DEFAULT_BIND)]
         bind: String,
         /// Maximum number of concurrently running tasks (default: unlimited).
-        /// Also configurable via WEAVE_MAX_CONCURRENT_TASKS env var.
-        #[arg(long, env = "WEAVE_MAX_CONCURRENT_TASKS")]
+        /// Also configurable via WEAVEFLOW_MAX_CONCURRENT_TASKS env var.
+        #[arg(long, env = "WEAVEFLOW_MAX_CONCURRENT_TASKS")]
         max_concurrent_tasks: Option<usize>,
         /// Acknowledge the risk of binding to a non-loopback address without authentication
         #[arg(long)]
         allow_remote: bool,
     },
 
-    /// Manage the weave daemon process
+    /// Manage the weaveflow daemon process
     #[command(subcommand)]
     Daemon(DaemonCmd),
 
@@ -93,8 +93,8 @@ enum DaemonCmd {
         #[arg(long, default_value = DEFAULT_BIND)]
         bind: String,
         /// Maximum number of concurrently running tasks (default: unlimited).
-        /// Also configurable via WEAVE_MAX_CONCURRENT_TASKS env var.
-        #[arg(long, env = "WEAVE_MAX_CONCURRENT_TASKS")]
+        /// Also configurable via WEAVEFLOW_MAX_CONCURRENT_TASKS env var.
+        #[arg(long, env = "WEAVEFLOW_MAX_CONCURRENT_TASKS")]
         max_concurrent_tasks: Option<usize>,
         /// Acknowledge the risk of binding to a non-loopback address without authentication
         #[arg(long)]
@@ -107,8 +107,8 @@ enum DaemonCmd {
         #[arg(long, default_value = DEFAULT_BIND)]
         bind: String,
         /// Maximum number of concurrently running tasks (default: unlimited).
-        /// Also configurable via WEAVE_MAX_CONCURRENT_TASKS env var.
-        #[arg(long, env = "WEAVE_MAX_CONCURRENT_TASKS")]
+        /// Also configurable via WEAVEFLOW_MAX_CONCURRENT_TASKS env var.
+        #[arg(long, env = "WEAVEFLOW_MAX_CONCURRENT_TASKS")]
         max_concurrent_tasks: Option<usize>,
         /// Acknowledge the risk of binding to a non-loopback address without authentication
         #[arg(long)]
@@ -216,7 +216,7 @@ async fn daemon_log(addr: &str, live: bool) -> Result<(), String> {
                     .map(|s| s == "true" || s == "1")
                     .unwrap_or(false);
                 if truncated {
-                    eprintln!("[weave] 日志缓冲已绕回，offset 之前的日志有缺口");
+                    eprintln!("[weaveflow] 日志缓冲已绕回，offset 之前的日志有缺口");
                 }
                 match resp.text().await {
                     Ok(body) => {
@@ -252,9 +252,9 @@ fn exit_on_err(r: Result<(), String>) {
 fn check_pipeline(file: &str) -> Result<(), String> {
     let yaml = std::fs::read_to_string(file)
         .map_err(|e| format!("读取文件 {file}: {e}"))?;
-    let def = weave::dsl::parser::parse(&yaml)
+    let def = weaveflow::dsl::parser::parse(&yaml)
         .map_err(|e| format!("YAML 解析失败: {e}"))?;
-    let report = weave::dsl::validator::validate(&def);
+    let report = weaveflow::dsl::validator::validate(&def);
 
     if !report.errors.is_empty() {
         eprintln!("错误 ({} 项):", report.errors.len());

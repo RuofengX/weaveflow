@@ -5,7 +5,7 @@
 const { MongoClient } = require('mongodb');
 
 const MONGO_URL = 'mongodb://localhost:27017';
-const DB_NAME = 'weave_bench';
+const DB_NAME = 'weaveflow_bench';
 const INPUT_COL = 'users';
 const STEP_NAMES = ['filter_adults', 'sort_by_age', 'dedup_email', 'add_processed'];
 

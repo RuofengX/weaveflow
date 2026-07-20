@@ -16,10 +16,10 @@ steps:
     type: var
     inputs:
       value:
-        name: "weave"
+        name: "weaveflow"
         version: "0.1"
 output: "{s.value}"
 "#;
     let result = run_yaml(yaml, HashMap::new()).expect("run");
-    assert_eq!(result, json!({ "name": "weave", "version": "0.1" }));
+    assert_eq!(result, json!({ "name": "weaveflow", "version": "0.1" }));
 }

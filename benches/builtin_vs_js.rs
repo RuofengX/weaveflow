@@ -21,7 +21,7 @@ fn bench_builtin_vs_js(c: &mut Criterion) {
     let tmpdir = TempDir::new("bvj");
 
     let yaml_builtin = build_single_filter_pipeline();
-    let def_builtin = weave::dsl::parser::parse(&yaml_builtin).expect("parse");
+    let def_builtin = weaveflow::dsl::parser::parse(&yaml_builtin).expect("parse");
     let counter = AtomicUsize::new(0);
 
     group.bench_function("filter_builtin_miss", |b| {
@@ -44,7 +44,7 @@ fn bench_builtin_vs_js(c: &mut Criterion) {
     });
 
     let yaml_js = build_inline_js_pipeline();
-    let def_js = weave::dsl::parser::parse(&yaml_js).expect("parse js");
+    let def_js = weaveflow::dsl::parser::parse(&yaml_js).expect("parse js");
     let counter2 = AtomicUsize::new(0);
 
     group.bench_function("filter_inline_js_miss", |b| {

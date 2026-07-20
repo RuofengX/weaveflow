@@ -16,7 +16,7 @@ use tracing::{debug, info, trace, warn};
 use crate::dsl::StepDef;
 use crate::engine::cache::compute_cache_key;
 use crate::engine::iterate::execute_iterate;
-use crate::error::{WeaveError, WeaveResult};
+use crate::error::{WeaveflowError, WeaveflowResult};
 use crate::operator::{Operator, OperatorError, get_builtin};
 use crate::store::Database;
 use crate::tracker::{TaskId, TaskTracker};
@@ -29,7 +29,7 @@ pub async fn execute_step(
     step: &StepDef,
     task_id: &TaskId,
     tracker: &TaskTracker,
-) -> Result<(Value, u32, bool), (WeaveError, u32)> {
+) -> Result<(Value, u32, bool), (WeaveflowError, u32)> {
     // 1. 解析输入：将 scope 中的 slots、env、上游输出填入 step 的 inputs 占位符。
     let inputs = resolve_inputs(scope, step).map_err(|e| (e, 0))?;
     trace!(step = %step.id, op = %step.op.op_type(), "inputs resolved");
@@ -141,10 +141,10 @@ pub async fn execute_with_retry(
     cache_key: &[u8],
     step: &StepDef,
     cache_enabled: bool,
-) -> Result<(Value, u32), (WeaveError, u32)> {
+) -> Result<(Value, u32), (WeaveflowError, u32)> {
     let (output, attempts) = retry_with_op(op, inputs, step)
         .await
-        .map_err(|(e, a)| (WeaveError::from(e), a))?;
+        .map_err(|(e, a)| (WeaveflowError::from(e), a))?;
     if cache_enabled {
         if let Err(e) = db.set_cache_bytes(cache_key, &output) {
             warn!(step = %step.id, error = %e, "cache write failed; continuing without cache");
@@ -180,8 +180,8 @@ pub(crate) async fn run_with_timeout(
 
 /// 从编译期注册表查找 step 对应的算子。
 /// 所有算子（包括 JS）统一通过 op_type 查找，不再有特殊处理分支。
-pub fn resolve_operator(step: &StepDef) -> WeaveResult<Box<dyn Operator>> {
+pub fn resolve_operator(step: &StepDef) -> WeaveflowResult<Box<dyn Operator>> {
     let op_type = step.op.op_type();
     trace!(step = %step.id, op_type, "resolving operator");
-    get_builtin(op_type).ok_or_else(|| WeaveError::Internal(format!("未注册: {op_type}")))
+    get_builtin(op_type).ok_or_else(|| WeaveflowError::Internal(format!("未注册: {op_type}")))
 }

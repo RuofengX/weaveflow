@@ -2,23 +2,23 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
-use weave::dsl::parser::parse;
-use weave::dsl::validator::validate;
-use weave::engine::dag::Dag;
-use weave::engine::runner::Runner;
-use weave::error::WeaveResult;
-use weave::store::Database;
-use weave::tracker::{LayerInfo, TaskTracker};
+use weaveflow::dsl::parser::parse;
+use weaveflow::dsl::validator::validate;
+use weaveflow::engine::dag::Dag;
+use weaveflow::engine::runner::Runner;
+use weaveflow::error::WeaveflowResult;
+use weaveflow::store::Database;
+use weaveflow::tracker::{LayerInfo, TaskTracker};
 
 pub fn temp_db() -> (Database, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let db = Database::open(dir.path().join("weave.redb"))
+    let db = Database::open(dir.path().join("weaveflow.redb"))
         .expect("open db");
     (db, dir)
 }
 
 #[allow(dead_code)]
-pub fn run_yaml(yaml: &str, slots: HashMap<String, Value>) -> WeaveResult<Value> {
+pub fn run_yaml(yaml: &str, slots: HashMap<String, Value>) -> WeaveflowResult<Value> {
     let (db, _dir) = temp_db();
     run_yaml_with_db(yaml, slots, Arc::new(db))
 }
@@ -27,7 +27,7 @@ pub fn run_yaml_with_db(
     yaml: &str,
     slots: HashMap<String, Value>,
     db: Arc<Database>,
-) -> WeaveResult<Value> {
+) -> WeaveflowResult<Value> {
     let def = parse(yaml)?;
     let report = validate(&def);
     assert!(report.is_ok(), "validation: {:?}", report.errors);

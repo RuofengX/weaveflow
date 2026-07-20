@@ -21,7 +21,7 @@ fn bench_operator_chain(c: &mut Criterion) {
     let tmpdir = TempDir::new("chain");
 
     let yaml = build_chained_pipeline();
-    let def = weave::dsl::parser::parse(&yaml).expect("parse");
+    let def = weaveflow::dsl::parser::parse(&yaml).expect("parse");
 
     let counter = AtomicUsize::new(0);
     group.bench_function("chain_filter_sort_dedup", |b| {

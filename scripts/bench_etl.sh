@@ -33,15 +33,15 @@ for i in range(10000):
         'items': items,
         'total': round(total, 2),
     })
-with open('/tmp/weave_ecomm_input.json', 'w') as f:
+with open('/tmp/weaveflow_ecomm_input.json', 'w') as f:
     json.dump(orders, f)
-print(f'Generated {len(orders)} orders → /tmp/weave_ecomm_input.json')
+print(f'Generated {len(orders)} orders → /tmp/weaveflow_ecomm_input.json')
 "
 
 echo ""
 echo "--- Node.js + MongoDB ---"
 for i in 1 2 3; do
-    cat /tmp/weave_ecomm_input.json | node scripts/bench_ecomm_mongo.js
+    cat /tmp/weaveflow_ecomm_input.json | node scripts/bench_ecomm_mongo.js
     echo ""
 done
 

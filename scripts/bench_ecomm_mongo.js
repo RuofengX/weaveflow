@@ -4,7 +4,7 @@
 const { MongoClient } = require('mongodb');
 
 const MONGO_URL = 'mongodb://localhost:27017';
-const DB_NAME = 'weave_bench_ecomm';
+const DB_NAME = 'weaveflow_bench_ecomm';
 const STEP_IDS = ['filter_paid', 'calc_item_totals', 'dedup_cities', 'sort_by_total', 'enrich_region'];
 
 async function main() {

@@ -1,19 +1,19 @@
-# weave — 实施路线图
+# weaveflow — 实施路线图
 
 ## 已完成 ✅
 
 - [x] DSL 解析层：schema / parser / validator
 - [x] 语义 Key 类型：PipelineId / TaskId / SnapshotKey / ObjectDigest / CacheKey
 - [x] 存储层：Database 门面 + 五表 (PIPELINE/TASK/SNAPSHOT/OBJECT/CACHE) + Prune
-- [x] WeaveError 统一错误枚举 (thiserror) + Axum IntoResponse
+- [x] WeaveflowError 统一错误枚举 (thiserror) + Axum IntoResponse
 - [x] FlatBuffer Scope：零拷贝 + memcpy clone
 - [x] TaskMeta + Snapshot + Progress/TaskStatus 状态机
 - [x] Operator trait + 12 个内置算子（见下）
 - [x] DAG：Kahn 拓扑排序 + 环检测 + 隐式依赖 (inputs refs + after)
 - [x] Executor：逐层并行 / 缓存 / 重试 / iterate 并行 / 错误传播
 - [x] TaskTracker：in-memory 运行时状态 + broadcast 实时推送
-- [x] weave daemon (Axum)：REST + WebSocket
-- [x] weave CLI：pipeline / run / task / system + `--watch` TUI + `--text-output`
+- [x] weaveflow daemon (Axum)：REST + WebSocket
+- [x] weaveflow CLI：pipeline / run / task / system + `--watch` TUI + `--text-output`
 - [x] QuickJS 运行时：rquickjs 内嵌，每次调用独立 Runtime，无 fs/net
 - [x] 集成测试 (27 个场景) + ETL benchmark
 - [x] `read_file` 算子：本地文件 + URL 读取 (`operator/builtin/file.rs`)
@@ -22,10 +22,10 @@
 - [x] `pipeline apply` upsert：同名幂等更新
 - [x] `pipeline delete` 按名删除
 - [x] `-i key=@/path/to/file` 文件输入
-- [x] `weave prune` 清理命令
+- [x] `weaveflow prune` 清理命令
 - [x] JS 算子错误栈 (`message` + `stack`)
 - [x] 快照二进制数据 base64 fallback 显示 (`daemon.rs:get_snapshot_by_seq`)
-- [x] `weave system operators` 算子列表
+- [x] `weaveflow system operators` 算子列表
 
 ## 内置算子总览
 
@@ -67,7 +67,7 @@
 | 项目 | 说明 |
 |------|------|
 | ~~JSON Schema 输入校验~~ | **已实现** |
-| ~~`weave check` 命令~~ | **已实现** |
+| ~~`weaveflow check` 命令~~ | **已实现** |
 | ~~Snapshot null 掩盖根因~~ | **已实现** |
 | ~~自举 validator~~ | **已实现** |
 | bytecode 缓存 | QuickJS 不支持跨 Runtime 字节码复用。若需优化，需升级 rquickjs。 |
@@ -154,7 +154,7 @@
 | M5 | ✅ | `engine/runner.rs` | **durable 快照归属不确定** | 从 pipeline.output 解析 |
 | M6 | ✅ | `vm/resolver.rs` | **inputs 键坍缩** | is_top 参数 |
 | M7 | ✅ | `vm/resolver.rs` | **数组下标路径静默 Null** | parse::<usize> 索引 |
-| M8 | ✅ | `vm/resolver.rs` | **env 机密落 snapshot** | redact + WEAVE_TEST_REDACT_SECRET |
+| M8 | ✅ | `vm/resolver.rs` | **env 机密落 snapshot** | redact + WEAVEFLOW_TEST_REDACT_SECRET |
 | M9 | ✅ | `dsl/validator.rs` | **validator 不检测 DAG 环** | Kahn 拓扑检测 |
 | M10 | ✅ | `dsl/validator.rs` | **未声明 slot 不报错** | slots.* 对照 |
 | M11 | ✅ | `dsl/validator.rs` | **self-reference 不检测** | prefix == step_id |
@@ -246,7 +246,7 @@
 | `engine/dag.rs:208` | 字符串值内嵌 `{step.output}` 产生幽灵依赖 | `collect_string_refs` 只认整串 `"{...}"`（`VariablePath::parse`），内嵌永不构成依赖，与 parser/resolver/validator 对齐 | ✅ |
 | `vm/resolver.rs` | 缺字段静默 Null、数组索引语义摇摆 | 对象缺字段/非标量取段 → `warn!` + Null；数组段非数字/越界 → 硬错误（`resolve_nested` 同步支持数组下标） | ✅ |
 | `vm/resolver.rs:43` | noop（无 inputs）输出被 `{"type":"noop"}` 污染 | 顶层 op 信封：无 `inputs` 键时移除 `type` 后以剩余 map 为 inputs；iterate 注入的 `data` 得以存活 | ✅ |
-| `quickjs/runtime.rs:28` | JS 异常/正常值共用一个 JSON 通道易混淆 | `__weave_ok__` 信封：`{__weave_ok__: true, value}` / `{__weave_ok__: false, message, stack}` | ✅ |
+| `quickjs/runtime.rs:28` | JS 异常/正常值共用一个 JSON 通道易混淆 | `__weaveflow_ok__` 信封：`{__weaveflow_ok__: true, value}` / `{__weaveflow_ok__: false, message, stack}` | ✅ |
 | `tracker/*` | tracker 状态清理 | `TaskStatus::Pending` 变体删除；`IterateProgress.errors/skip` 字段删除；`StepProgress.timeout_sec` 自 step 配置接线；`TaskTracker::subscribe` 公开方法删除（统一 `snapshot_and_subscribe`）；负时长一律 `.max(0)` | ✅ |
 | `vm/scope.rs:34` | env_values Mutex poison 后 panic | `unwrap_or_else(into_inner)` 恢复 | ✅ |
 
@@ -264,7 +264,7 @@
 | `builtin/mod.rs:18` | `resolve_nested` 不支持数组下标 | 数字路径段按索引取 Array 元素（与 resolver 语义一致） | ✅ |
 | `builtin/command.rs:54` | 子进程泄漏 + 输出超限挂起 | `kill_on_drop(true)`；stdout/stderr 超 10MB 后继续 drain 丢弃（子进程不阻塞），输出带 `truncated: bool` | ✅ |
 | `builtin/http_client.rs` | SSRF 预检可绕过 | 全 DNS 地址逐一检查（非只查首个）；`redirect::Policy::none()` 禁 302 跳板；`read_body_limited` 流式 64MB 限长；`reqwest::Url` 解析防 userinfo 伪造 host | ✅ |
-| `builtin/file.rs:52` | 白名单解析毛刺 | `WEAVE_FILE_ALLOW_ROOTS` 空段过滤 + 计数 warn；过滤后为空 → 拒绝所有路径；未配置 → `Once` 单次 warn 后放行 | ✅ |
+| `builtin/file.rs:52` | 白名单解析毛刺 | `WEAVEFLOW_FILE_ALLOW_ROOTS` 空段过滤 + 计数 warn；过滤后为空 → 拒绝所有路径；未配置 → `Once` 单次 warn 后放行 | ✅ |
 | `operator/registry.rs` | 死代码（HashMap 注册表未被使用） | 删除文件，`get_builtin` 直接 match | ✅ |
 | `dsl/validator.rs`、`builtin/llm.rs`、`builtin/command.rs`、`error.rs` | 死代码 | 删 `ValidateOptions`、llm `image_base64` 别名、command `cmd` 别名、`From<serde_json::Error>` | ✅ |
 | `dsl/parser.rs:29` | raw 层错误被包装丢失上下文 | `ParseError::Raw(#[from] raw::ParseError)` 变体透传 | ✅ |
@@ -287,7 +287,7 @@
 | `server/daemon.rs:950` | pidfile 竞态 | spawn 成功后立即写 pidfile；失败分支仅当 pidfile 内容是本次 PID 才删除；健康检查失败杀子进程；`is_daemon_running` 校验 `/proc/<pid>/exe` 二进制身份 | ✅ |
 | `server/logging.rs` | 日志 offset 相对值，trim 后错乱 | 绝对 offset（自启动起总字节数）；`X-Log-Offset` / `X-Log-Truncated` 响应头 | ✅ |
 | `store/database.rs:179` | `count_snapshots`/`list_snapshot_keys` 全量反序列化 | `SnapshotHeader` header-only 视图（同表同类型名），跳过 output 拷贝 | ✅ |
-| `store/database.rs:131` | Snapshot serde_json 序列化 Vec<u8> 4 倍膨胀 | 自定义二进制布局 v2：`seq(8B BE) | step_id_len(4B BE) | step_id | output`，类型名 `weave::Snapshot::v2` | ✅ |
+| `store/database.rs:131` | Snapshot serde_json 序列化 Vec<u8> 4 倍膨胀 | 自定义二进制布局 v2：`seq(8B BE) | step_id_len(4B BE) | step_id | output`，类型名 `weaveflow::Snapshot::v2` | ✅ |
 | `store/object.rs` | `ObjectValue.ref_count` 字段从不维护 | 删除 | ✅ |
 | `cli/client.rs:35` | daemon URL 尾随 `/` 产生双斜杠 | `trim_end_matches('/')` | ✅ |
 | `cli/client.rs:210` | prune 全表扫描 + compact 超默认 30s 超时 | prune 请求单独放宽到 300s | ✅ |
@@ -297,7 +297,7 @@
 | `main.rs:193` | daemon log 不支持 https/输出不 flush/出错 0 退出 | `parse_daemon_addr` 统一 scheme；`stdout().flush()`；`exit_on_err` 非零退出 | ✅ |
 | `cli/watch.rs:247` | `" (parallel)"` 文案 | 修复拼接 | ✅ |
 | `server/daemon.rs:85` | PruneResponse 缺 snapshots 计数 | 新增 `snapshots_removed` 字段 | ✅ |
-| `server/daemon.rs` | `weave serve` 参数透传脆弱 | 严格解析（白名单重组 argv） | ✅ |
+| `server/daemon.rs` | `weaveflow serve` 参数透传脆弱 | 严格解析（白名单重组 argv） | ✅ |
 | `build.rs` | 死代码 | 删除 | ✅ |
 | `cli/client.rs`、`store/mod.rs`、`server/daemon.rs` | 边界缺防护测试 | 新增 `encode_segment`、`mark_interrupted_tasks`、prune max_seq 防护（scan 后新 snapshot 不误删）、`wait_for_drain` 等测试 | ✅ |
 

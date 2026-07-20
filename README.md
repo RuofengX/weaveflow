@@ -1,10 +1,10 @@
-# weave
+# weaveflow
 
 DAG 批处理引擎——YAML 定义管道，Rust 执行，面向 AI Agent 和数据处理。v0.2.1
 
 ```mermaid
 graph LR
-    CLI["weave CLI"] --> Daemon["weave daemon"]
+    CLI["weaveflow CLI"] --> Daemon["weaveflow daemon"]
     Daemon --> Executor["DAG Executor"]
     Daemon --> Tracker["TaskTracker"]
     Executor --> Scope["FlexBuffer Scope"]
@@ -17,7 +17,7 @@ graph LR
 ```mermaid
 sequenceDiagram
     participant Client as Client/Agent
-    participant Daemon as weave daemon
+    participant Daemon as weaveflow daemon
     participant Tracker as TaskTracker
     participant Executor as DAG Executor
     participant Scope as Scope
@@ -117,25 +117,25 @@ sequenceDiagram
 cargo install --path .
 
 # 启动 daemon
-weave daemon start
+weaveflow daemon start
 
 # 注册 pipeline
-weave pipeline apply -f examples/demo.yaml
+weaveflow pipeline apply -f examples/demo.yaml
 
 # 运行
-weave run demo -i source_url=https://api.example.com/data
+weaveflow run demo -i source_url=https://api.example.com/data
 
 # 运行 + 实时进度
-weave run demo --watch
-weave run demo --text-output   # CI/Agent 友好
+weaveflow run demo --watch
+weaveflow run demo --text-output   # CI/Agent 友好
 
 # 查看结果
-weave task ls
-weave task snapshot list <task-id>
-weave task snapshot show <task-id> <seq>
+weaveflow task ls
+weaveflow task snapshot list <task-id>
+weaveflow task snapshot show <task-id> <seq>
 
 # 停止 daemon
-weave daemon stop
+weaveflow daemon stop
 ```
 
 ## 核心概念
@@ -212,23 +212,23 @@ steps:
 ## CLI
 
 ```bash
-weave daemon start [--bind 127.0.0.1:9928]
-weave daemon stop
-weave daemon restart [--bind 127.0.0.1:9928]
+weaveflow daemon start [--bind 127.0.0.1:9928]
+weaveflow daemon stop
+weaveflow daemon restart [--bind 127.0.0.1:9928]
 
-weave pipeline apply -f pipe.yaml
-weave pipeline ls|list
-weave pipeline inspect <name>
+weaveflow pipeline apply -f pipe.yaml
+weaveflow pipeline ls|list
+weaveflow pipeline inspect <name>
 
-weave run <name> [-i k=v] [-i k=@file.json]
-weave run <name> --watch           # ratatui 进度
-weave run <name> --text-output     # CI/Agent 纯文本流
+weaveflow run <name> [-i k=v] [-i k=@file.json]
+weaveflow run <name> --watch           # ratatui 进度
+weaveflow run <name> --text-output     # CI/Agent 纯文本流
 
-weave task ls|list
-weave task snapshot list <task-id>
-weave task snapshot show <task-id> <seq>
+weaveflow task ls|list
+weaveflow task snapshot list <task-id>
+weaveflow task snapshot show <task-id> <seq>
 
-weave system prune [--force] [--dry-run]
+weaveflow system prune [--force] [--dry-run]
 ```
 
 所有命令支持 `--daemon=HOST:PORT` 连接远程 daemon。

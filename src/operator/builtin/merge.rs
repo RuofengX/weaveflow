@@ -85,13 +85,13 @@ mod tests {
     async fn deep_merge_recurses_into_objects() {
         let op = MergeOperator;
         let inputs = json!({
-            "a": { "cfg": { "x": 1, "y": 2 }, "name": "weave" },
+            "a": { "cfg": { "x": 1, "y": 2 }, "name": "weaveflow" },
             "b": { "cfg": { "y": 3, "z": 4 } },
             "deep": true
         });
         let out = op.run(inputs).await.expect("run");
         assert_eq!(out["cfg"], json!({ "x": 1, "y": 3, "z": 4 }));
-        assert_eq!(out["name"], json!("weave"));
+        assert_eq!(out["name"], json!("weaveflow"));
     }
 
     #[tokio::test]

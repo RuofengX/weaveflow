@@ -4,17 +4,17 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use crate::dsl::{StepId, VariablePath};
-use crate::error::{WeaveError, WeaveResult};
+use crate::error::{WeaveflowError, WeaveflowResult};
 use crate::vm::Scope;
 
 pub fn resolve_inputs(
     scope: &Scope,
     step: &crate::dsl::StepDef,
-) -> WeaveResult<Value> {
+) -> WeaveflowResult<Value> {
     let as_name = step.iterate.as_ref().map(|c| c.as_name.as_str());
 
     let op_value = serde_json::to_value(&step.op)
-        .map_err(|e| WeaveError::Internal(format!("step op serialize: {e}")))?;
+        .map_err(|e| WeaveflowError::Internal(format!("step op serialize: {e}")))?;
 
     resolve_value_tree(scope, &op_value, as_name, true, false)
 }
@@ -25,7 +25,7 @@ fn resolve_value_tree(
     as_name: Option<&str>,
     is_top: bool,
     in_literal: bool,
-) -> WeaveResult<Value> {
+) -> WeaveflowResult<Value> {
     match val {
         Value::Object(map) => {
             if map.len() == 1 && map.contains_key("Ref") {
@@ -86,7 +86,7 @@ fn resolve_plain_map(
     map: &serde_json::Map<String, Value>,
     as_name: Option<&str>,
     in_literal: bool,
-) -> WeaveResult<Value> {
+) -> WeaveflowResult<Value> {
     let mut resolved_map = serde_json::Map::new();
     for (k, v) in map {
         resolved_map.insert(
@@ -97,7 +97,7 @@ fn resolve_plain_map(
     Ok(Value::Object(resolved_map))
 }
 
-pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Arc<Value>> {
+pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveflowResult<Arc<Value>> {
     if path.parts.is_empty() {
         return Ok(Arc::new(Value::Null));
     }
@@ -111,13 +111,13 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Arc<Value>
                     Value::Array(arr) => {
                         // 与 step output 分支一致：数组索引严格，越界/非数字 → 硬错误
                         let idx = part.parse::<usize>().map_err(|_| {
-                            WeaveError::Internal(format!(
+                            WeaveflowError::Internal(format!(
                                 "slot ref path {} segment '{part}' is not a valid array index",
                                 path.parts.join(".")
                             ))
                         })?;
                         current = arr.get(idx).ok_or_else(|| {
-                            WeaveError::Internal(format!(
+                            WeaveflowError::Internal(format!(
                                 "slot ref path {} array index {idx} out of bounds (len {})",
                                 path.parts.join("."),
                                 arr.len()
@@ -163,7 +163,7 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Arc<Value>
         _ => {
             let step_id = StepId::from(path.parts[0].clone());
             let value = scope.get_output(&step_id).ok_or_else(|| {
-                WeaveError::Internal(format!("step {step_id} not found in scope"))
+                WeaveflowError::Internal(format!("step {step_id} not found in scope"))
             })?;
 
             if path.parts.len() == 1 || (path.parts.len() == 2 && path.parts[1] == "output") {
@@ -180,13 +180,13 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveResult<Arc<Value>
                         Value::Array(arr) => {
                             // 数组索引保持严格：非数字/负数/越界 → 硬错误
                             let idx = part.parse::<usize>().map_err(|_| {
-                                WeaveError::Internal(format!(
+                                WeaveflowError::Internal(format!(
                                     "ref path {} segment '{part}' is not a valid array index",
                                     path.parts.join(".")
                                 ))
                             })?;
                             current = arr.get(idx).ok_or_else(|| {
-                                WeaveError::Internal(format!(
+                                WeaveflowError::Internal(format!(
                                     "ref path {} array index {idx} out of bounds (len {})",
                                     path.parts.join("."),
                                     arr.len()

@@ -23,7 +23,7 @@ fn bench_iterate_batch(c: &mut Criterion) {
     for &bs in &[Some(100), Some(200), Some(500), None] {
         let label = bs.map(|n| format!("batch_size_{n}")).unwrap_or_else(|| "batch_none".into());
         let yaml = build_iterate_pipeline(bs);
-        let def = weave::dsl::parser::parse(&yaml).expect("parse");
+        let def = weaveflow::dsl::parser::parse(&yaml).expect("parse");
 
         let counter = AtomicUsize::new(0);
         group.bench_function(format!("{label}_miss"), |b| {

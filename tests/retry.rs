@@ -5,7 +5,7 @@ mod common;
 fn run_yaml(
     yaml: &str,
     slots: HashMap<String, serde_json::Value>,
-) -> weave::error::WeaveResult<serde_json::Value> {
+) -> weaveflow::error::WeaveflowResult<serde_json::Value> {
     common::run_yaml(yaml, slots)
 }
 

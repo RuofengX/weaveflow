@@ -28,7 +28,7 @@ output: "{greet.output}"
 fn code_ref_from_file() {
     let mut f = tempfile::NamedTempFile::new().expect("temp file");
     f.write_all(
-        b"function greet(name) { return 'Hi, ' + name; }\n\nfunction run(data) {\n  return { msg: greet('Weave') };\n}",
+        b"function greet(name) { return 'Hi, ' + name; }\n\nfunction run(data) {\n  return { msg: greet('Weaveflow') };\n}",
     )
     .expect("write");
     let path = f.path().to_string_lossy().to_string();
@@ -53,7 +53,7 @@ output: "{use_util.output}"
 "#
     .replace("PATH_PLACEHOLDER", &path);
     let result = run_yaml(&yaml, HashMap::new()).expect("run");
-    assert_eq!(result["msg"], json!("Hi, Weave"));
+    assert_eq!(result["msg"], json!("Hi, Weaveflow"));
 }
 
 #[test]
@@ -125,7 +125,7 @@ output: "{check.output}"
 
 #[test]
 fn js_native_inflate() {
-    let raw = b"Hello, weave!";
+    let raw = b"Hello, weaveflow!";
     let compressed = {
         use std::io::Write;
         let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
@@ -161,7 +161,7 @@ output: "{inflate_test.output}"
 "#
     .replace("B64_PLACEHOLDER", &b64);
     let result = run_yaml(&yaml, HashMap::new()).expect("run");
-    assert_eq!(result["text"], json!("Hello, weave!"));
+    assert_eq!(result["text"], json!("Hello, weaveflow!"));
 }
 
 #[test]

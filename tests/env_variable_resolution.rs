@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 #[test]
 fn env_variable_resolution() {
-    unsafe { std::env::set_var("WEAVE_TEST_ENV", "env_val"); }
+    unsafe { std::env::set_var("WEAVEFLOW_TEST_ENV", "env_val"); }
     let yaml = r#"
 name: env_test
 steps:
@@ -17,7 +17,7 @@ steps:
     type: var
     inputs:
       value:
-        key: "{env.WEAVE_TEST_ENV}"
+        key: "{env.WEAVEFLOW_TEST_ENV}"
 output: "{s1.output.value}"
 "#;
     let result = run_yaml(yaml, HashMap::new()).expect("run");

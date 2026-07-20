@@ -15,7 +15,7 @@ steps:
   - id: enc
     type: base64
     inputs:
-      data: "hello weave"
+      data: "hello weaveflow"
   - id: dec
     type: base64
     inputs:
@@ -24,5 +24,5 @@ steps:
 output: "{dec.output}"
 "#;
     let result = run_yaml(yaml, HashMap::new()).expect("run");
-    assert_eq!(result, json!("hello weave"));
+    assert_eq!(result, json!("hello weaveflow"));
 }

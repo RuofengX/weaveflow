@@ -104,7 +104,7 @@ pub async fn block_private_ips(url_str: &str) -> Result<(), OperatorError> {
         return Err(OperatorError::Runtime(format!("no IP resolved for {host}")));
     }
 
-    let block_private = std::env::var("WEAVE_HTTP_BLOCK_PRIVATE")
+    let block_private = std::env::var("WEAVEFLOW_HTTP_BLOCK_PRIVATE")
         .map(|v| v == "1")
         .unwrap_or(false);
 

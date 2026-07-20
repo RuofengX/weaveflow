@@ -18,7 +18,7 @@ fn bench_parallel_layer(c: &mut Criterion) {
     let tmpdir = TempDir::new("par");
 
     let yaml = build_parallel_pipeline();
-    let def = weave::dsl::parser::parse(&yaml).expect("parse");
+    let def = weaveflow::dsl::parser::parse(&yaml).expect("parse");
 
     let counter = AtomicUsize::new(0);
     group.bench_function("parallel_filter_sort_merge", |b| {

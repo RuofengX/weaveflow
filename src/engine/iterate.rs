@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::dsl::{IterateConfig, StepDef};
 use crate::engine::step::{resolve_operator, retry_with_op};
-use crate::error::WeaveError;
+use crate::error::WeaveflowError;
 use crate::operator::Operator;
 use crate::tracker::{IterateProgress, StepState, TaskId, TaskTracker};
 use crate::vm::resolver::resolve_ref;
@@ -29,12 +29,12 @@ pub async fn execute_iterate(
     cfg: &IterateConfig,
     task_id: &TaskId,
     tracker: &TaskTracker,
-) -> Result<(Value, u32), (WeaveError, u32)> {
+) -> Result<(Value, u32), (WeaveflowError, u32)> {
     if let Some(ref batch) = cfg.batch
         && batch.size == 0
     {
         return Err((
-            WeaveError::BadRequest(format!(
+            WeaveflowError::BadRequest(format!(
                 "步骤 {} 的 iterate.batch.size 不能为 0",
                 step.id
             )),
@@ -124,8 +124,8 @@ pub async fn execute_iterate(
             batch_futures.push(async move {
                 let (output, attempts) = retry_with_op(op.as_ref(), item_inputs, step)
                     .await
-                    .map_err(|(e, a)| (WeaveError::from(e), a))?;
-                Ok::<_, (WeaveError, u32)>((idx, output, attempts))
+                    .map_err(|(e, a)| (WeaveflowError::from(e), a))?;
+                Ok::<_, (WeaveflowError, u32)>((idx, output, attempts))
             });
         }
 
@@ -150,7 +150,7 @@ pub async fn execute_iterate(
                 Value::Array(arr) => merged.extend(arr),
                 other => {
                     return Err((
-                        WeaveError::Internal(format!(
+                        WeaveflowError::Internal(format!(
                             "步骤 {} 的第 {idx} 个 batch chunk 返回了非数组结果: {}",
                             step.id,
                             serde_json::to_string(&other).unwrap_or_default()

@@ -1,5 +1,5 @@
 [package]
-name = "weave"
+name = "weaveflow"
 version = "1.0.0"
 edition = "2024"
 description = "DAG batch processing engine — YAML pipelines, Rust execution, single binary"

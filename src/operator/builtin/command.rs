@@ -90,10 +90,10 @@ impl Operator for CommandOperator {
         let mut stdout = String::from_utf8_lossy(&stdout_buf).into_owned();
         let mut stderr = String::from_utf8_lossy(&stderr_buf).into_owned();
         if stdout_truncated {
-            stdout.push_str("\n[weave: stdout truncated at 10MB]");
+            stdout.push_str("\n[weaveflow: stdout truncated at 10MB]");
         }
         if stderr_truncated {
-            stderr.push_str("\n[weave: stderr truncated at 10MB]");
+            stderr.push_str("\n[weaveflow: stderr truncated at 10MB]");
         }
 
         Ok(serde_json::json!({

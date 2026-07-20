@@ -12,13 +12,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use weave::dsl::{parser::parse, StepId};
-use weave::dsl::validator::validate;
-use weave::error::WeaveError;
-use weave::engine::dag::Dag;
-use weave::engine::runner::Runner;
-use weave::store::{Database, PruneOptions};
-use weave::tracker::{LayerInfo, TaskId, TaskSnapshot, TaskStatus, TaskTracker};
+use weaveflow::dsl::{parser::parse, StepId};
+use weaveflow::dsl::validator::validate;
+use weaveflow::error::WeaveflowError;
+use weaveflow::engine::dag::Dag;
+use weaveflow::engine::runner::Runner;
+use weaveflow::store::{Database, PruneOptions};
+use weaveflow::tracker::{LayerInfo, TaskId, TaskSnapshot, TaskStatus, TaskTracker};
 
 use super::logging::RingWriter;
 
@@ -94,7 +94,7 @@ struct PruneResponse {
 async fn create_pipeline(
     State(state): State<Arc<AppState>>,
     body: String,
-) -> Result<Json<Value>, WeaveError> {
+) -> Result<Json<Value>, WeaveflowError> {
     tracing::info!(len = body.len(), "POST /pipelines");
     let pipeline = parse(&body)?;
     tracing::info!(name = %pipeline.name, steps = pipeline.steps.len(), "pipeline parsed");
@@ -106,14 +106,14 @@ async fn create_pipeline(
             .map(|e| format!("[{}] {}", e.code, e.message))
             .collect();
         tracing::warn!(errors = %msgs.join("; "), "validation failed");
-        return Err(WeaveError::Validation(msgs.join("; ")));
+        return Err(WeaveflowError::Validation(msgs.join("; ")));
     }
 
-    let builtins = weave::operator::builtins();
+    let builtins = weaveflow::operator::builtins();
     for step in &pipeline.steps {
         let op_type = step.op.op_type();
         if op_type != "js" && !builtins.contains_key(op_type) {
-            return Err(WeaveError::Validation(format!(
+            return Err(WeaveflowError::Validation(format!(
                 "未注册的步骤类型: {}（步骤: {}）",
                 op_type, step.id
             )));
@@ -134,12 +134,12 @@ async fn create_pipeline(
 async fn delete_pipeline(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Result<Json<Value>, WeaveError> {
+) -> Result<Json<Value>, WeaveflowError> {
     tracing::info!(pipeline = %name, "DELETE /pipelines/:name");
     let (pid, _) = state
         .db
         .find_pipeline_by_name(&name)?
-        .ok_or_else(|| WeaveError::NotFound(format!("pipeline {name} not found")))?;
+        .ok_or_else(|| WeaveflowError::NotFound(format!("pipeline {name} not found")))?;
     state.db.delete_pipeline(&pid)?;
     tracing::info!(pipeline_id = %pid, "pipeline deleted");
     Ok(Json(serde_json::json!({"deleted": name})))
@@ -147,7 +147,7 @@ async fn delete_pipeline(
 
 async fn list_pipelines(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, WeaveError> {
+) -> Result<Json<Value>, WeaveflowError> {
     tracing::info!("GET /pipelines");
     let items = state.db.list_pipelines()?;
     let list: Vec<Value> = items
@@ -162,34 +162,34 @@ async fn list_pipelines(
 async fn get_pipeline(
     State(state): State<Arc<AppState>>,
     Path(name_or_id): Path<String>,
-) -> Result<Json<Value>, WeaveError> {
+) -> Result<Json<Value>, WeaveflowError> {
     tracing::info!(pipeline = %name_or_id, "GET /pipelines/:name");
     let pipeline = if let Some((_, p)) = state.db.find_pipeline_by_name(&name_or_id)? {
         p
     } else if let Ok(uuid) = uuid::Uuid::parse_str(&name_or_id) {
-        let pid = weave::tracker::PipelineId(uuid);
+        let pid = weaveflow::tracker::PipelineId(uuid);
         state
             .db
             .load_pipeline(&pid)?
-            .ok_or_else(|| WeaveError::NotFound(format!("pipeline {name_or_id} not found")))?
+            .ok_or_else(|| WeaveflowError::NotFound(format!("pipeline {name_or_id} not found")))?
     } else {
-        return Err(WeaveError::NotFound(format!("pipeline {name_or_id} not found")));
+        return Err(WeaveflowError::NotFound(format!("pipeline {name_or_id} not found")));
     };
     let val =
-        serde_json::to_value(&pipeline).map_err(|e| WeaveError::Internal(e.to_string()))?;
+        serde_json::to_value(&pipeline).map_err(|e| WeaveflowError::Internal(e.to_string()))?;
     Ok(Json(val))
 }
 
 async fn run_pipeline(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RunRequest>,
-) -> Result<Json<Value>, WeaveError> {
+) -> Result<Json<Value>, WeaveflowError> {
     // 先占 in_flight 计数再复查 draining（反向顺序存在 TOCTOU：
     // 检查通过后信号触发、wait_for_drain 读到 0 返回，任务才被计入）。
     state.in_flight.fetch_add(1, Ordering::SeqCst);
     if state.draining.load(Ordering::SeqCst) {
         state.in_flight.fetch_sub(1, Ordering::SeqCst);
-        return Err(WeaveError::Unavailable(
+        return Err(WeaveflowError::Unavailable(
             "daemon 正在停机，不再接受新任务".to_string(),
         ));
     }
@@ -199,7 +199,7 @@ async fn run_pipeline(
     let pipeline = match state.db.find_pipeline_by_name(&req.pipeline)? {
         Some((_pid, p)) => p,
         None => {
-            return Err(WeaveError::NotFound(format!(
+            return Err(WeaveflowError::NotFound(format!(
                 "pipeline {} not found",
                 req.pipeline
             )))
@@ -272,7 +272,7 @@ async fn run_pipeline(
                     .await;
                 if let Err(e) = state_clone
                     .db
-                    .set_task_status(&tid, weave::tracker::meta::TASK_STATUS_FAILED)
+                    .set_task_status(&tid, weaveflow::tracker::meta::TASK_STATUS_FAILED)
                 {
                     tracing::warn!(task_id = %tid, error = %e, "set_task_status(failed) failed");
                 }
@@ -311,7 +311,7 @@ async fn run_pipeline(
                         .await;
                     if let Err(db_err) = state_watcher
                         .db
-                        .set_task_status(&tid, weave::tracker::meta::TASK_STATUS_FAILED)
+                        .set_task_status(&tid, weaveflow::tracker::meta::TASK_STATUS_FAILED)
                     {
                         tracing::warn!(task_id = %tid, error = %db_err, "set_task_status(failed) after panic failed");
                     }
@@ -336,7 +336,7 @@ async fn run_pipeline(
 }
 
 /// 任务结果保留时长：pipeline 的 storage.result_ttl（下限 60s），缺省 3600s。
-fn result_ttl_secs(pipeline: &weave::dsl::PipelineDef) -> i64 {
+fn result_ttl_secs(pipeline: &weaveflow::dsl::PipelineDef) -> i64 {
     pipeline
         .storage
         .as_ref()
@@ -347,7 +347,7 @@ fn result_ttl_secs(pipeline: &weave::dsl::PipelineDef) -> i64 {
 
 async fn list_tasks(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Value>, WeaveError> {
+) -> Result<Json<Value>, WeaveflowError> {
     tracing::info!("GET /tasks");
     let tasks = state.db.list_tasks()?;
     let list: Vec<Value> = tasks
@@ -367,13 +367,13 @@ async fn list_tasks(
 async fn get_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
-) -> Result<Json<TaskResponse>, WeaveError> {
+) -> Result<Json<TaskResponse>, WeaveflowError> {
     tracing::info!(task_id = %task_id, "GET /runs/:task_id");
     let tid = parse_task_id(&task_id)?;
     let task = match state.db.load_task(&tid)? {
         Some(t) => t,
         None => {
-            return Err(WeaveError::NotFound(format!(
+            return Err(WeaveflowError::NotFound(format!(
                 "task {task_id} not found"
             )));
         }
@@ -399,7 +399,7 @@ async fn get_task(
 async fn list_snapshots(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
-) -> Result<Json<Vec<SnapshotMeta>>, WeaveError> {
+) -> Result<Json<Vec<SnapshotMeta>>, WeaveflowError> {
     tracing::info!(task_id = %task_id, "GET /runs/:task_id/snapshots");
     let tid = parse_task_id(&task_id)?;
     let keys = state.db.list_snapshot_keys(&tid)?;
@@ -413,7 +413,7 @@ async fn list_snapshots(
 async fn get_snapshot_by_seq(
     State(state): State<Arc<AppState>>,
     Path((task_id, seq)): Path<(String, u64)>,
-) -> Result<Json<SnapshotResponse>, WeaveError> {
+) -> Result<Json<SnapshotResponse>, WeaveflowError> {
     tracing::info!(task_id = %task_id, seq = seq, "GET /runs/:task_id/snapshots/:seq");
     let tid = parse_task_id(&task_id)?;
     let snap = state.db.load_snapshot_by_seq(&tid, seq)?;
@@ -448,7 +448,7 @@ async fn get_snapshot_by_seq(
                 output,
             }))
         }
-        None => Err(WeaveError::NotFound(format!(
+        None => Err(WeaveflowError::NotFound(format!(
             "snapshot {seq} for task {task_id} not found"
         ))),
     }
@@ -457,7 +457,7 @@ async fn get_snapshot_by_seq(
 async fn prune_tasks(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PruneRequest>,
-) -> Result<Json<PruneResponse>, WeaveError> {
+) -> Result<Json<PruneResponse>, WeaveflowError> {
     tracing::info!(pipeline = ?req.pipeline, force = req.force, dry_run = req.dry_run, "POST /prune");
     let options = PruneOptions {
         pipeline: req.pipeline,
@@ -479,9 +479,9 @@ async fn prune_tasks(
 }
 
 async fn list_operators(
-) -> Result<Json<Value>, WeaveError> {
+) -> Result<Json<Value>, WeaveflowError> {
     tracing::info!("GET /system/operators");
-    let builtins = weave::operator::builtins();
+    let builtins = weaveflow::operator::builtins();
     let list: Vec<Value> = builtins.values().map(|op| {
             let spec = op.spec();
             serde_json::json!({
@@ -527,14 +527,14 @@ async fn ws_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
     ws: WebSocketUpgrade,
-) -> Result<axum::response::Response, WeaveError> {
+) -> Result<axum::response::Response, WeaveflowError> {
     tracing::info!(task_id = %task_id, "GET /runs/:task_id/ws");
     let tid = parse_task_id(&task_id)?;
 
     let (initial, rx) = match state.tracker.snapshot_and_subscribe(&tid).await {
         Some((snap, rx)) => (Some(snap), rx),
         None => {
-            return Err(WeaveError::NotFound(format!(
+            return Err(WeaveflowError::NotFound(format!(
                 "task {task_id} not found"
             )));
         }
@@ -609,9 +609,9 @@ async fn handle_ws(
 
 // ── Operator ───────────────────────────────────────────────────────────────
 
-fn parse_task_id(s: &str) -> Result<TaskId, WeaveError> {
+fn parse_task_id(s: &str) -> Result<TaskId, WeaveflowError> {
     let uuid = uuid::Uuid::parse_str(s)
-        .map_err(|_| WeaveError::BadRequest(format!("invalid task id: {s}")))?;
+        .map_err(|_| WeaveflowError::BadRequest(format!("invalid task id: {s}")))?;
     Ok(TaskId(uuid))
 }
 
@@ -657,14 +657,14 @@ fn enforce_bind_safety(bind: &str, allow_remote: bool) {
     if !allow_remote {
         eprintln!(
             "error: refusing to bind to non-loopback address {bind} without --allow-remote.\n\
-             The weave daemon has NO authentication: anyone who can reach this port can create\n\
+             The weaveflow daemon has NO authentication: anyone who can reach this port can create\n\
              pipelines and execute arbitrary commands on this machine via the command/file operators.\n\
              Re-run with --allow-remote to acknowledge this risk, or bind to 127.0.0.1 (default)."
         );
         std::process::exit(1);
     }
     eprintln!(
-        "WARNING: weave daemon has NO authentication and is binding to non-loopback address {bind}.\n\
+        "WARNING: weaveflow daemon has NO authentication and is binding to non-loopback address {bind}.\n\
          Anyone who can reach this port can execute arbitrary commands on this machine.\n\
          Consider binding to 127.0.0.1 instead, or placing the daemon behind an authenticated\n\
          reverse proxy / firewall."
@@ -696,11 +696,11 @@ pub async fn serve(args: Vec<String>) {
                 std::process::exit(1);
             }
         },
-        None => match std::env::var("WEAVE_MAX_CONCURRENT_TASKS") {
+        None => match std::env::var("WEAVEFLOW_MAX_CONCURRENT_TASKS") {
             Ok(s) => match s.parse::<usize>() {
                 Ok(n) => Some(n),
                 Err(_) => {
-                    eprintln!("error: WEAVE_MAX_CONCURRENT_TASKS 非法值: {s:?}（需要非负整数）");
+                    eprintln!("error: WEAVEFLOW_MAX_CONCURRENT_TASKS 非法值: {s:?}（需要非负整数）");
                     std::process::exit(1);
                 }
             },
@@ -713,12 +713,12 @@ pub async fn serve(args: Vec<String>) {
     let data_dir = resolve_data_dir();
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         eprintln!(
-            "error: 无法创建数据目录 {}: {e}（检查权限或 WEAVE_DATA 设置）",
+            "error: 无法创建数据目录 {}: {e}（检查权限或 WEAVEFLOW_DATA 设置）",
             data_dir.display()
         );
         std::process::exit(1);
     }
-    let db_path = data_dir.join("weave.redb");
+    let db_path = data_dir.join("weaveflow.redb");
     let db = match Database::open(&db_path) {
         Ok(db) => db,
         Err(e) => {
@@ -754,7 +754,7 @@ pub async fn serve(args: Vec<String>) {
     }
 
     let app = build_app(state.clone());
-    tracing::info!("weave serve listening on {bind}");
+    tracing::info!("weaveflow serve listening on {bind}");
     let listener = match tokio::net::TcpListener::bind(&bind).await {
         Ok(l) => l,
         Err(e) => {
@@ -832,22 +832,22 @@ async fn wait_for_drain(
 }
 
 fn resolve_data_dir() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("WEAVE_DATA") {
+    if let Ok(dir) = std::env::var("WEAVEFLOW_DATA") {
         return std::path::PathBuf::from(dir);
     }
     dirs_next::home_dir()
-        .map(|h| h.join(".weave"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".weave"))
+        .map(|h| h.join(".weaveflow"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".weaveflow"))
 }
 
 // ── Daemon ────────────────────────────────────────────────────────────────
 
 fn pid_path() -> std::path::PathBuf {
-    resolve_data_dir().join("weave.pid")
+    resolve_data_dir().join("weaveflow.pid")
 }
 
 fn log_file_path() -> std::path::PathBuf {
-    resolve_data_dir().join("weave.log")
+    resolve_data_dir().join("weaveflow.log")
 }
 
 fn verify_pid_binary(pid: u32, expected_exe: &std::path::Path) -> bool {
@@ -894,7 +894,7 @@ fn is_daemon_running() -> bool {
 pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote: bool) {
     if is_daemon_running() {
         eprintln!(
-            "daemon is already running. Use `weave daemon restart` to restart."
+            "daemon is already running. Use `weaveflow daemon restart` to restart."
         );
         return;
     }
@@ -903,7 +903,7 @@ pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote
     let data_dir = resolve_data_dir();
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         eprintln!(
-            "error: 无法创建数据目录 {}: {e}（检查权限或 WEAVE_DATA 设置）",
+            "error: 无法创建数据目录 {}: {e}（检查权限或 WEAVEFLOW_DATA 设置）",
             data_dir.display()
         );
         std::process::exit(1);
@@ -1131,12 +1131,12 @@ mod tests {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "weave-server-test-{}-{n}",
+            "weaveflow-server-test-{}-{n}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).ok();
-        let db = Database::open(dir.join("weave.redb")).expect("open db");
+        let db = Database::open(dir.join("weaveflow.redb")).expect("open db");
         (db, dir)
     }
 
@@ -1295,7 +1295,7 @@ steps:
     type: noop
 output: "{s.output}"
 "#;
-        let def = weave::dsl::parser::parse(yaml).expect("parse");
+        let def = weaveflow::dsl::parser::parse(yaml).expect("parse");
         assert_eq!(result_ttl_secs(&def), 7200);
 
         // 未配置 storage → 默认 3600
@@ -1306,7 +1306,7 @@ steps:
     type: noop
 output: "{s.output}"
 "#;
-        let def = weave::dsl::parser::parse(yaml_no_storage).expect("parse");
+        let def = weaveflow::dsl::parser::parse(yaml_no_storage).expect("parse");
         assert_eq!(result_ttl_secs(&def), 3600);
 
         // 过小的 TTL → 下限 60s
@@ -1319,7 +1319,7 @@ steps:
     type: noop
 output: "{s.output}"
 "#;
-        let def = weave::dsl::parser::parse(yaml_tiny).expect("parse");
+        let def = weaveflow::dsl::parser::parse(yaml_tiny).expect("parse");
         assert_eq!(result_ttl_secs(&def), 60);
     }
 

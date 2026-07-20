@@ -1,6 +1,6 @@
 /target/
 .idea/
-weave-data/
+weaveflow-data/
 *.redb
 .DS_Store
 *.swp

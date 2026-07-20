@@ -1,4 +1,4 @@
-# weave 算子配置参考
+# weaveflow 算子配置参考
 
 ## http — HTTP 请求
 
@@ -11,7 +11,7 @@
 | `headers` | `{string: RefValue}` | — | — | 请求头键值对 |
 | `body` | RefValue | — | — | 请求体（字符串、对象或 `{...}` 引用；GET/DELETE 忽略 body） |
 
-共享 HTTP client 的固定行为：**不跟随 redirect**（3xx 响应原样返回 `status`/`body`，不会跳转）；SSRF 预检对 DNS 解析出的**全部** IP 逐一检查（169.254.169.254 始终拒绝，私网地址需 `WEAVE_HTTP_BLOCK_PRIVATE=1` 才拒绝）；响应体边读边累计，超过 **64MB** 即中断报错；总超时 60s、连接超时 10s。
+共享 HTTP client 的固定行为：**不跟随 redirect**（3xx 响应原样返回 `status`/`body`，不会跳转）；SSRF 预检对 DNS 解析出的**全部** IP 逐一检查（169.254.169.254 始终拒绝，私网地址需 `WEAVEFLOW_HTTP_BLOCK_PRIVATE=1` 才拒绝）；响应体边读边累计，超过 **64MB** 即中断报错；总超时 60s、连接超时 10s。
 
 ```yaml
 - id: fetch_data
@@ -217,7 +217,7 @@ JS 运行时规范：
 
 > 二选一：`path` 或 `url`，不可同时为空。
 
-本地路径经 canonicalize 后按 `WEAVE_FILE_ALLOW_ROOTS` 白名单（冒号分隔的根目录列表）校验：
+本地路径经 canonicalize 后按 `WEAVEFLOW_FILE_ALLOW_ROOTS` 白名单（冒号分隔的根目录列表）校验：
 
 - **未配置**：放行所有路径，且进程内只打一次 warn（`Once`）建议配置白名单
 - **含空段**（如 `/tmp::/var` 或首尾冒号）：空段被忽略并打 warn 计数
@@ -260,7 +260,7 @@ JS 运行时规范：
 | `shell` | string | — | `"sh"` | shell 解释器：`sh` / `bash` |
 | `stdin` | RefValue | — | — | 传入 stdin 的数据 |
 
-stdout / stderr 各有 10MB 上限：超过上限的输出会被截断（仅保留前 10MB，超出部分读取后丢弃，子进程可正常退出），对应流追加 `[weave: ... truncated at 10MB]` 标记，且输出 JSON 的 `truncated` 字段为 `true`。
+stdout / stderr 各有 10MB 上限：超过上限的输出会被截断（仅保留前 10MB，超出部分读取后丢弃，子进程可正常退出），对应流追加 `[weaveflow: ... truncated at 10MB]` 标记，且输出 JSON 的 `truncated` 字段为 `true`。
 
 子进程以 `env_clear` + 最小环境白名单（`PATH`/`HOME`/`LANG`/`LC_ALL`/`TZ`）启动，并启用 `kill_on_drop`：step 超时取消算子 future 时子进程会被回收。注意 `yes` 这类无限输出命令不会自行停止，会一直运行到 step `timeout_sec` 触发为止。
 

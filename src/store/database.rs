@@ -24,7 +24,7 @@ impl RedbValue for TaskId {
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
         value.0.as_bytes().to_vec()
     }
-    fn type_name() -> TypeName { TypeName::new("weave::TaskId") }
+    fn type_name() -> TypeName { TypeName::new("weaveflow::TaskId") }
 }
 
 impl RedbKey for TaskId {
@@ -44,7 +44,7 @@ impl RedbValue for PipelineId {
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
         value.0.as_bytes().to_vec()
     }
-    fn type_name() -> TypeName { TypeName::new("weave::PipelineId") }
+    fn type_name() -> TypeName { TypeName::new("weaveflow::PipelineId") }
 }
 
 impl RedbKey for PipelineId {
@@ -69,7 +69,7 @@ impl RedbValue for SnapshotKey {
         buf.extend_from_slice(&value.seq.to_be_bytes());
         buf
     }
-    fn type_name() -> TypeName { TypeName::new("weave::SnapshotKey") }
+    fn type_name() -> TypeName { TypeName::new("weaveflow::SnapshotKey") }
 }
 
 impl RedbKey for SnapshotKey {
@@ -91,7 +91,7 @@ impl RedbValue for ObjectDigest {
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
         value.as_bytes().to_vec()
     }
-    fn type_name() -> TypeName { TypeName::new("weave::ObjectDigest::v1") }
+    fn type_name() -> TypeName { TypeName::new("weaveflow::ObjectDigest::v1") }
 }
 
 impl RedbKey for ObjectDigest {
@@ -111,7 +111,7 @@ impl RedbValue for PipelineDef {
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
         serde_json::to_vec(value).expect("序列化 PipelineDef 失败")
     }
-    fn type_name() -> TypeName { TypeName::new("weave::PipelineDef::v1") }
+    fn type_name() -> TypeName { TypeName::new("weaveflow::PipelineDef::v1") }
 }
 
 impl RedbValue for TaskMeta {
@@ -125,7 +125,7 @@ impl RedbValue for TaskMeta {
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
         serde_json::to_vec(value).expect("序列化 TaskMeta 失败")
     }
-    fn type_name() -> TypeName { TypeName::new("weave::TaskMeta::v1") }
+    fn type_name() -> TypeName { TypeName::new("weaveflow::TaskMeta::v1") }
 }
 
 // ── Snapshot：自定义二进制布局（避免 serde_json 序列化 Vec<u8> 的 4 倍膨胀）──
@@ -171,7 +171,7 @@ impl RedbValue for Snapshot {
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
         snapshot_encode(value.seq, &value.step_id.0, &value.output)
     }
-    fn type_name() -> TypeName { TypeName::new("weave::Snapshot::v2") }
+    fn type_name() -> TypeName { TypeName::new("weaveflow::Snapshot::v2") }
 }
 
 /// 只读 header 的 Snapshot 视图（同表同类型名），用于列表/统计时跳过 output 拷贝。
@@ -192,7 +192,7 @@ impl RedbValue for SnapshotHeader {
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
         snapshot_encode(value.seq, &value.step_id.0, &[])
     }
-    fn type_name() -> TypeName { TypeName::new("weave::Snapshot::v2") }
+    fn type_name() -> TypeName { TypeName::new("weaveflow::Snapshot::v2") }
 }
 
 impl RedbValue for ObjectValue {
@@ -206,7 +206,7 @@ impl RedbValue for ObjectValue {
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
         serde_json::to_vec(value).expect("序列化 ObjectValue 失败")
     }
-    fn type_name() -> TypeName { TypeName::new("weave::Object::v1") }
+    fn type_name() -> TypeName { TypeName::new("weaveflow::Object::v1") }
 }
 
 pub const PIPELINE: TableDefinition<PipelineId, PipelineDef> = TableDefinition::new("pipeline");
@@ -232,7 +232,7 @@ impl RedbValue for CacheKey {
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> where Self: 'b {
         value.0.as_bytes().to_vec()
     }
-    fn type_name() -> TypeName { TypeName::new("weave::CacheKey") }
+    fn type_name() -> TypeName { TypeName::new("weaveflow::CacheKey") }
 }
 
 impl RedbKey for CacheKey {
@@ -268,10 +268,10 @@ macro_rules! v0_value {
     };
 }
 
-v0_value!(V0PipelineDef, "weave::PipelineDef");
-v0_value!(V0TaskMeta, "weave::TaskMeta");
-v0_value!(V1PipelineDef, "weave::PipelineDef::v1");
-v0_value!(V1TaskMeta, "weave::TaskMeta::v1");
+v0_value!(V0PipelineDef, "weaveflow::PipelineDef");
+v0_value!(V0TaskMeta, "weaveflow::TaskMeta");
+v0_value!(V1PipelineDef, "weaveflow::PipelineDef::v1");
+v0_value!(V1TaskMeta, "weaveflow::TaskMeta::v1");
 
 pub(crate) const V0_PIPELINE: TableDefinition<PipelineId, V0PipelineDef> =
     TableDefinition::new("pipeline");

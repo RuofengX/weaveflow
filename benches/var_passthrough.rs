@@ -20,7 +20,7 @@ fn bench_var_passthrough(c: &mut Criterion) {
     let tmpdir = TempDir::new("var");
 
     let yaml = build_var_passthrough_pipeline();
-    let def = weave::dsl::parser::parse(&yaml).expect("parse");
+    let def = weaveflow::dsl::parser::parse(&yaml).expect("parse");
     let counter = AtomicUsize::new(0);
 
     group.bench_function("var_json_roundtrip", |b| {

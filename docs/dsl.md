@@ -1,4 +1,4 @@
-# weave DSL 参考
+# weaveflow DSL 参考
 
 > YAML 声明式管道定义语言。一个 YAML 文件 = 一个可执行的 DAG。
 

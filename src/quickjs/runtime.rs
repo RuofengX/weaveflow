@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::error::WeaveResult;
+use crate::error::WeaveflowResult;
 
 /// __native__.inflate 解压输出上限（Rust 侧分配，不受 QuickJS memory_limit 约束）。
 const MAX_INFLATE_BYTES: u64 = 256 * 1024 * 1024;
@@ -18,14 +18,14 @@ impl Drop for InterruptGuard {
     }
 }
 
-pub async fn run_js(code: &str, func_name: &str, input: &Value) -> WeaveResult<Value> {
+pub async fn run_js(code: &str, func_name: &str, input: &Value) -> WeaveflowResult<Value> {
     let script = build_script(code, func_name, &serde_json::to_string(input)?);
     let interrupted = Arc::new(AtomicBool::new(false));
     let _guard = InterruptGuard(interrupted.clone());
 
     tokio::task::spawn_blocking(move || run_in_new_runtime(&script, interrupted))
         .await
-        .map_err(|e| crate::error::WeaveError::Internal(format!("spawn_blocking: {e}")))?
+        .map_err(|e| crate::error::WeaveflowError::Internal(format!("spawn_blocking: {e}")))?
 }
 
 fn build_script(code: &str, func_name: &str, input_json: &str) -> String {
@@ -33,22 +33,22 @@ fn build_script(code: &str, func_name: &str, input_json: &str) -> String {
         "{code}\n\
         try {{\n\
             var __result__ = {func_name}({input_json});\n\
-            JSON.stringify({{__weave_ok__: true, value: __result__}})\n\
+            JSON.stringify({{__weaveflow_ok__: true, value: __result__}})\n\
         }} catch(__e__) {{\n\
-            JSON.stringify({{__weave_ok__: false, message: __e__.message || String(__e__), stack: __e__.stack || ''}})\n\
+            JSON.stringify({{__weaveflow_ok__: false, message: __e__.message || String(__e__), stack: __e__.stack || ''}})\n\
         }}\n"
     )
 }
 
-fn run_in_new_runtime(script: &str, interrupted: Arc<AtomicBool>) -> WeaveResult<Value> {
+fn run_in_new_runtime(script: &str, interrupted: Arc<AtomicBool>) -> WeaveflowResult<Value> {
     let rt = rquickjs::Runtime::new()
-        .map_err(|e| crate::error::WeaveError::Internal(format!("create JS runtime: {e}")))?;
+        .map_err(|e| crate::error::WeaveflowError::Internal(format!("create JS runtime: {e}")))?;
     rt.set_memory_limit(256 * 1024 * 1024);
     rt.set_max_stack_size(1024 * 1024);
     rt.set_interrupt_handler(Some(Box::new(move || interrupted.load(Ordering::SeqCst))));
 
     let ctx = rquickjs::Context::full(&rt)
-        .map_err(|e| crate::error::WeaveError::Internal(format!("create JS context: {e}")))?;
+        .map_err(|e| crate::error::WeaveflowError::Internal(format!("create JS context: {e}")))?;
 
     ctx.with(|ctx| {
         {
@@ -90,27 +90,27 @@ fn run_in_new_runtime(script: &str, interrupted: Arc<AtomicBool>) -> WeaveResult
             });
 
             let native = rquickjs::Object::new(ctx.clone())
-                .map_err(|e| crate::error::WeaveError::Internal(format!("create __native__: {e}")))?;
+                .map_err(|e| crate::error::WeaveflowError::Internal(format!("create __native__: {e}")))?;
             native
                 .set("inflate", inflate_fn)
-                .map_err(|e| crate::error::WeaveError::Internal(format!("set inflate: {e}")))?;
+                .map_err(|e| crate::error::WeaveflowError::Internal(format!("set inflate: {e}")))?;
             native
                 .set("btoa", btoa_fn)
-                .map_err(|e| crate::error::WeaveError::Internal(format!("set btoa: {e}")))?;
+                .map_err(|e| crate::error::WeaveflowError::Internal(format!("set btoa: {e}")))?;
             native
                 .set("atob", atob_fn)
-                .map_err(|e| crate::error::WeaveError::Internal(format!("set atob: {e}")))?;
+                .map_err(|e| crate::error::WeaveflowError::Internal(format!("set atob: {e}")))?;
             globals.set("__native__", native).unwrap();
         }
 
         let json_str: String = ctx
             .eval(script)
-            .map_err(|e| crate::error::WeaveError::Internal(format!("JS runtime error: {e}")))?;
+            .map_err(|e| crate::error::WeaveflowError::Internal(format!("JS runtime error: {e}")))?;
         let val: Value = serde_json::from_str(&json_str)
-            .map_err(|e| crate::error::WeaveError::Internal(format!("parse JS output: {e}")))?;
+            .map_err(|e| crate::error::WeaveflowError::Internal(format!("parse JS output: {e}")))?;
         let obj = val.as_object();
         let ok = obj
-            .and_then(|o| o.get("__weave_ok__"))
+            .and_then(|o| o.get("__weaveflow_ok__"))
             .and_then(|v| v.as_bool());
         match ok {
             Some(true) => Ok(obj
@@ -125,7 +125,7 @@ fn run_in_new_runtime(script: &str, interrupted: Arc<AtomicBool>) -> WeaveResult
                     .and_then(|o| o.get("stack"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                Err(crate::error::WeaveError::Internal(
+                Err(crate::error::WeaveflowError::Internal(
                     if stack.is_empty() {
                         format!("JS: {msg}")
                     } else {

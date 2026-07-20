@@ -7,8 +7,8 @@ use common::{run_yaml_with_db, temp_db};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
-use weave::engine::cache::compute_cache_key;
-use weave::store::Database;
+use weaveflow::engine::cache::compute_cache_key;
+use weaveflow::store::Database;
 
 fn cache_lookup(db: &Arc<Database>, key: &[u8]) -> Option<Value> {
     db.check_cache_bytes(key).expect("check cache")

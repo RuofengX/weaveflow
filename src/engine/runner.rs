@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 use crate::dsl::{PipelineDef, RefValue, StepId};
 use crate::engine::dag::Dag;
 use crate::engine::step::execute_step;
-use crate::error::{WeaveError, WeaveResult};
+use crate::error::{WeaveflowError, WeaveflowResult};
 use crate::store::Database;
 use crate::tracker::{Snapshot, StepState, TaskId, TaskTracker};
 use crate::vm::{Scope, redact_env_values, resolve_ref};
@@ -32,7 +32,7 @@ impl Runner {
         &self,
         task_id: TaskId,
         slots: HashMap<String, Value>,
-    ) -> WeaveResult<Vec<u8>> {
+    ) -> WeaveflowResult<Vec<u8>> {
         let result = run_inner(
             &self.pipeline,
             self.db.clone(),
@@ -60,7 +60,7 @@ pub async fn run_inner(
     tracker: &TaskTracker,
     task_id: TaskId,
     slots: HashMap<String, Value>,
-) -> WeaveResult<Vec<u8>> {
+) -> WeaveflowResult<Vec<u8>> {
     let mut slots = slots;
 
     info!(
@@ -102,7 +102,7 @@ pub async fn run_inner(
                         let msgs: Vec<String> = errors
                             .map(|e| e.to_string())
                             .collect();
-                        return Err(WeaveError::BadRequest(format!(
+                        return Err(WeaveflowError::BadRequest(format!(
                             "slot '{}' validation failed: {}",
                             slot_def.name,
                             msgs.join("; ")
@@ -110,7 +110,7 @@ pub async fn run_inner(
                     }
                 }
                 Err(e) => {
-                    return Err(WeaveError::Internal(format!(
+                    return Err(WeaveflowError::Internal(format!(
                         "slot '{}' schema compile error: {}",
                         slot_def.name, e
                     )));
@@ -147,7 +147,7 @@ pub async fn run_inner(
             let sd = dag
                 .step(step_id)
                 .ok_or_else(|| {
-                    WeaveError::Internal(format!("step {step_id} not found in DAG"))
+                    WeaveflowError::Internal(format!("step {step_id} not found in DAG"))
                 })?
                 .clone();
             let mut sc = scope.clone();
@@ -175,7 +175,7 @@ pub async fn run_inner(
         }
 
         // 这里等待层中所有步骤完成后再处理错误，提高可观测性
-        type StepOutcome = (StepId, DateTime<Utc>, Result<(Value, u32, bool), (WeaveError, u32)>);
+        type StepOutcome = (StepId, DateTime<Utc>, Result<(Value, u32, bool), (WeaveflowError, u32)>);
         let results: Vec<StepOutcome> = futures::future::join_all(futures).await;
 
         let mut layer_failed = false;
@@ -243,7 +243,7 @@ pub async fn run_inner(
                         .await;
                 }
             }
-            return Err(WeaveError::Internal(first_error));
+            return Err(WeaveflowError::Internal(first_error));
         }
     }
 
@@ -254,16 +254,16 @@ pub async fn run_inner(
             RefValue::Literal(v) => {
                 output_val = v.clone();
                 final_output = serde_json::to_vec(&output_val)
-                    .map_err(|e| WeaveError::Internal(format!("output serialize: {e}")))?;
+                    .map_err(|e| WeaveflowError::Internal(format!("output serialize: {e}")))?;
             }
             RefValue::Ref(path) => {
                 if path.parts.is_empty() {
-                    return Err(WeaveError::Internal("empty output ref".into()));
+                    return Err(WeaveflowError::Internal("empty output ref".into()));
                 }
                 let value = resolve_ref(&scope, path)?;
                 output_val = (*value).clone();
                 final_output = serde_json::to_vec(&output_val)
-                    .map_err(|e| WeaveError::Internal(format!("output serialize: {e}")))?;
+                    .map_err(|e| WeaveflowError::Internal(format!("output serialize: {e}")))?;
             }
         }
     }

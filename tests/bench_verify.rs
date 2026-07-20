@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
-use weave::dsl::parser::parse;
-use weave::engine::dag::Dag;
-use weave::engine::runner::Runner;
-use weave::store::Database;
-use weave::tracker::{LayerInfo, TaskTracker};
+use weaveflow::dsl::parser::parse;
+use weaveflow::engine::dag::Dag;
+use weaveflow::engine::runner::Runner;
+use weaveflow::store::Database;
+use weaveflow::tracker::{LayerInfo, TaskTracker};
 
 #[test]
 fn verify_iterate_batch_pipeline() {

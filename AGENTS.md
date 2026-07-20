@@ -1,4 +1,4 @@
-# weave — DAG batch engine
+# weaveflow — DAG batch engine
 
 ## Quick reference
 
@@ -86,35 +86,35 @@ src/
 | Unknown YAML fields | `#[serde(deny_unknown_fields)]` on all Raw structs — misspelled keys are parse errors |
 | Scope | HashMap<StepId, Arc<Value>> — O(1) get/set, clone = refcount inc; env secret set behind poison-tolerant Mutex |
 | Storage | redb — all values inline, no external spill files; schema versioned via `::vN` type names; v0 DBs auto-migrate (`.v0.bak` backup, PIPELINE/TASK kept, SNAPSHOT/OBJECT/CACHE dropped) |
-| Snapshot encoding | Custom binary v2: `seq(8B BE) \| step_id_len(4B BE) \| step_id \| output` (type name `weave::Snapshot::v2`); `SnapshotHeader` view lists/counts without copying output |
+| Snapshot encoding | Custom binary v2: `seq(8B BE) \| step_id_len(4B BE) \| step_id \| output` (type name `weaveflow::Snapshot::v2`); `SnapshotHeader` view lists/counts without copying output |
 | Cache | `SHA256(op_type + ":" + inputs_json)`; iterate steps mix the resolved `over` array into the key |
 | Variables | `{slots.name}` / `{env.KEY}` / `{step_id.output}` / `{step_id.output.field}` / `{step_id.output.0.field}` (array indices supported, strict) |
 | Concurrency | DAG layer `join_all` + iterate chunk `join_all` (default workers = `available_parallelism`) + rayon inside operators |
-| Daemon concurrency | `--max-concurrent-tasks` flag or `WEAVE_MAX_CONCURRENT_TASKS` env (default unlimited), semaphore in daemon.rs; permit acquired inside the background task |
+| Daemon concurrency | `--max-concurrent-tasks` flag or `WEAVEFLOW_MAX_CONCURRENT_TASKS` env (default unlimited), semaphore in daemon.rs; permit acquired inside the background task |
 | Shutdown | Graceful drain: on signal, `/runs` → 503 and in-flight tasks drain up to 30s (`SHUTDOWN_DRAIN_SECS`) |
 
 ## Commands
 
 ```
-weave daemon start [--bind 127.0.0.1:9928] [--max-concurrent-tasks N] [--allow-remote]
-weave daemon stop|restart|log [-f]   # stop 等待优雅排空（最长 SHUTDOWN_DRAIN_SECS+5s）再 SIGKILL
-weave serve --bind ...         # hidden; foreground equivalent of daemon start
-weave pipeline apply -f <file.yml> | -d '<yaml string>'   # -f and -d are FLAGS, not positional
-weave pipeline ls              # alias: list
-weave pipeline inspect <name>
-weave pipeline delete <name>
-weave run <name> [-i k=v] [-i k=@file.json] [--watch|--text-output]  # mutually exclusive; task Failed → exit 1
-weave check -f <file.yml>      # local validation, no daemon needed
-weave task ls
-weave task snapshot list <task_id>
-weave task snapshot show <task_id> <seq>
-weave system prune [--force] [--dry-run]   # output includes snapshots_removed
-weave system operators
+weaveflow daemon start [--bind 127.0.0.1:9928] [--max-concurrent-tasks N] [--allow-remote]
+weaveflow daemon stop|restart|log [-f]   # stop 等待优雅排空（最长 SHUTDOWN_DRAIN_SECS+5s）再 SIGKILL
+weaveflow serve --bind ...         # hidden; foreground equivalent of daemon start
+weaveflow pipeline apply -f <file.yml> | -d '<yaml string>'   # -f and -d are FLAGS, not positional
+weaveflow pipeline ls              # alias: list
+weaveflow pipeline inspect <name>
+weaveflow pipeline delete <name>
+weaveflow run <name> [-i k=v] [-i k=@file.json] [--watch|--text-output]  # mutually exclusive; task Failed → exit 1
+weaveflow check -f <file.yml>      # local validation, no daemon needed
+weaveflow task ls
+weaveflow task snapshot list <task_id>
+weaveflow task snapshot show <task_id> <seq>
+weaveflow system prune [--force] [--dry-run]   # output includes snapshots_removed
+weaveflow system operators
 ```
 
 Global flag: `--daemon <host:port>` (default `127.0.0.1:9928`; `http://`/`https://` prefixes accepted, trailing `/` trimmed).
-Data dir: `WEAVE_DATA` env var only (default `~/.weave`). There is **no working `--data-dir` flag**.
-`weave run` on a non-TTY stdout automatically falls back to `--text-output`.
+Data dir: `WEAVEFLOW_DATA` env var only (default `~/.weaveflow`). There is **no working `--data-dir` flag**.
+`weaveflow run` on a non-TTY stdout automatically falls back to `--text-output`.
 
 ## StepOp: tagged enum with per-operator Inputs
 
@@ -166,7 +166,7 @@ All operator outputs are JSON `Value`; Scope stores `Arc<Value>`.
 
 | Operator | DSL type | Feature |
 |----------|----------|---------|
-| HTTP | `http` | GET/POST/PUT/DELETE via shared client: no redirects (3xx returned as-is), full-DNS SSRF check (metadata IP always blocked; private IPs with `WEAVE_HTTP_BLOCK_PRIVATE=1`), 64MB streamed body cap |
+| HTTP | `http` | GET/POST/PUT/DELETE via shared client: no redirects (3xx returned as-is), full-DNS SSRF check (metadata IP always blocked; private IPs with `WEAVEFLOW_HTTP_BLOCK_PRIVATE=1`), 64MB streamed body cap |
 | JS sandbox | `js` | Inline QuickJS, `code` field (RefValue: literal or `{step.output}` ref). **No `timeout` input field** — governed by step `timeout_sec`; on timeout the dropped future triggers the QuickJS interrupt handler via a drop-guard (real cancellation of `while(1){}`) |
 | Filter | `filter` | Array filter by field/operator/value (rayon); `operator` whitelisted (eq/ne/gt/gte/lt/lte/in/contains) at validator + runtime |
 | Sort | `sort` | Array sort by field/order (rayon); `order` whitelisted (asc/desc); integer-exact comparison shared with filter (`compare_json_numbers`) |
@@ -175,7 +175,7 @@ All operator outputs are JSON `Value`; Scope stores `Arc<Value>`.
 | Base64 | `base64` | Encode/decode base64; missing `data` → Config error |
 | Noop | `noop` | Passthrough (test helper); output is `{}` — not polluted by the `{"type":"noop"}` envelope |
 | Var | `var` | Variable placeholder |
-| File | `file` | Read local files (canonicalize + `WEAVE_FILE_ALLOW_ROOTS` allowlist, Once-warn when unset) or URLs (SSRF-checked); 64MB cap |
+| File | `file` | Read local files (canonicalize + `WEAVEFLOW_FILE_ALLOW_ROOTS` allowlist, Once-warn when unset) or URLs (SSRF-checked); 64MB cap |
 | Command | `command` | `sh -c` execution with `env_clear` + minimal env whitelist, `kill_on_drop`, 10MB stdout/stderr caps (keeps draining, sets `truncated: true`) |
 | LLM | `llm` | OpenAI-compatible API + images_b64 multimodal; dedicated client with 600s total timeout (shared client is 60s) |
 
@@ -210,8 +210,8 @@ Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field
 ## Security posture
 
 - **No auth on any endpoint (C6 still open).** `--allow-remote` is required to bind non-loopback addresses, but bearer-token auth is NOT implemented — binding `0.0.0.0` is unauthenticated RCE via `command`/`file`; even on localhost, browser CSRF (simple POST, no preflight) can create+run pipelines. Treat the daemon as localhost-only.
-- `command` runs `sh -c` with `env_clear` + a minimal whitelist (PATH/HOME/LANG/LC_ALL/TZ); `file` canonicalizes both the target and each `WEAVE_FILE_ALLOW_ROOTS` root before the prefix check (empty segments filtered with a warn; unset → one `Once` warn and allow-all); `{env.KEY}` values are recorded and redacted in persisted snapshots.
-- Shared HTTP client hardening: no redirects, per-DNS-result SSRF check (169.254.169.254 always blocked; IPv4-mapped IPv6 normalized before classification; `WEAVE_HTTP_BLOCK_PRIVATE=1` also covers 0.0.0.0, CGNAT 100.64/10, 198.18/15), 64MB streamed response cap, 60s total / 10s connect timeouts (llm uses a dedicated client with 600s total). **Known residual: DNS rebinding TOCTOU** — the pre-check and reqwest's connect each resolve DNS independently, so a low-TTL malicious domain can in principle pass the check and then resolve to a blocked IP (no resolve pinning with the shared client).
+- `command` runs `sh -c` with `env_clear` + a minimal whitelist (PATH/HOME/LANG/LC_ALL/TZ); `file` canonicalizes both the target and each `WEAVEFLOW_FILE_ALLOW_ROOTS` root before the prefix check (empty segments filtered with a warn; unset → one `Once` warn and allow-all); `{env.KEY}` values are recorded and redacted in persisted snapshots.
+- Shared HTTP client hardening: no redirects, per-DNS-result SSRF check (169.254.169.254 always blocked; IPv4-mapped IPv6 normalized before classification; `WEAVEFLOW_HTTP_BLOCK_PRIVATE=1` also covers 0.0.0.0, CGNAT 100.64/10, 198.18/15), 64MB streamed response cap, 60s total / 10s connect timeouts (llm uses a dedicated client with 600s total). **Known residual: DNS rebinding TOCTOU** — the pre-check and reqwest's connect each resolve DNS independently, so a low-TTL malicious domain can in principle pass the check and then resolve to a blocked IP (no resolve pinning with the shared client).
 - `js` sandbox: no fs/net, 256MB memory limit, 1MB stack; step timeout triggers real interruption via the drop-guard. `__native__.inflate` output is capped at 256MB on the Rust side (decompression bombs can't bypass the sandbox memory limit). **Without `step.timeout_sec`, a `while(1){}` still occupies a blocking thread indefinitely (design decision: timeouts live only at step layer).**
 
 ## Tracker / WS flow
@@ -245,7 +245,7 @@ Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field
 | POST | `/prune` | Prune tasks (response includes `snapshots_removed`) |
 | GET | `/system/operators` · `/system/logs` | Operators / daemon ring-buffer logs (absolute `offset`, `X-Log-Offset` / `X-Log-Truncated` headers) |
 
-Error mapping: `WeaveError::BadRequest`/`Parse` → 400, `NotFound` → 404, `Unavailable` (draining) → 503, other 5xx return a fixed message (no internal detail leak).
+Error mapping: `WeaveflowError::BadRequest`/`Parse` → 400, `NotFound` → 404, `Unavailable` (draining) → 503, other 5xx return a fixed message (no internal detail leak).
 
 ## Tests
 
