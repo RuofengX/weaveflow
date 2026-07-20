@@ -273,7 +273,7 @@ impl Database {
             }
             found
         };
-        let pid = existing.unwrap_or_else(PipelineId::new);
+        let pid = existing.unwrap_or_default();
         let mut table = txn.open_table(PIPELINE).map_err(|e| WeaveError::Database {
             operation: "save_pipeline_upsert open_table",
             source: Box::new(e.into()),
