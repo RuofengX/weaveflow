@@ -3,6 +3,19 @@ name = "weaveflow"
 version = "1.0.0"
 edition = "2024"
 description = "DAG batch processing engine — YAML pipelines, Rust execution, single binary"
+license = "AGPL-3.0-only"
+repository = "https://github.com/RuofengX/weaveflow"
+readme = "README.md"
+keywords = ["dag", "pipeline", "batch", "etl", "workflow"]
+categories = ["command-line-utilities", "web-programming"]
+exclude = [
+    ".vscode/",
+    "scripts/",
+    "skills/",
+    "package.json",
+    "package-lock.json",
+    "node_modules/",
+]
 
 [dependencies]
 axum = { version = "0.7", features = ["macros", "json", "ws"] }
