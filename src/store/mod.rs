@@ -337,7 +337,7 @@ impl Database {
         })?;
         let table = match txn.open_table(PIPELINE) {
             Ok(t) => t,
-            Err(_) => return Ok(Vec::new()), // table not created yet
+            Err(_) => return Ok(Vec::new()), // 表尚未创建
         };
         let mut items = Vec::new();
         for result in table.iter().map_err(|e| WeaveflowError::Database {
@@ -878,7 +878,7 @@ impl Database {
         }
     }
 
-    /// Value-based cache: store output Value with cache key.
+    /// 基于 Value 的缓存：以 cache key 存储输出的 Value。
     pub fn set_cache_bytes(&self, key: &[u8], output: &serde_json::Value) -> WeaveflowResult<()> {
         let output_digest = self.store_object(output)?;
         debug!(digest = %output_digest, "cache set");

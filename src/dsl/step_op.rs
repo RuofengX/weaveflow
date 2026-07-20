@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::variable::RefValue;
 
 // ---------------------------------------------------------------------------
-// StepOp — adjacently tagged enum dispatched by `type` + `inputs` fields
+// StepOp —— 相邻标签枚举，由 `type` + `inputs` 字段分发
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +45,7 @@ impl StepOp {
 }
 
 // ---------------------------------------------------------------------------
-// Per-operator Inputs structs — 零 HashMap catch-all
+// 各算子的 Inputs 结构体 —— 零 HashMap catch-all
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

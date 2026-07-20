@@ -142,7 +142,7 @@ pub async fn pipeline_delete(cfg: &CliConfig, name: &str) -> Result<(), String> 
     Ok(())
 }
 
-// ── Run ──────────────────────────────────────────────────────────────────
+// ── 运行 ──────────────────────────────────────────────────────────────────
 
 fn build_run_body(name: &str, inputs: &[(String, String)]) -> Result<Value, String> {
     let mut inputs_map = serde_json::Map::new();
@@ -175,7 +175,7 @@ fn resolve_input_value(v: &str) -> Result<Value, String> {
     }
 }
 
-// ── Task ─────────────────────────────────────────────────────────────────
+// ── 任务 ─────────────────────────────────────────────────────────────────
 
 pub async fn task_ls(cfg: &CliConfig) -> Result<(), String> {
     let result = get(cfg, "/tasks").await?;
@@ -195,7 +195,7 @@ pub async fn snapshot_show(cfg: &CliConfig, task_id: &str, seq: u64) -> Result<(
     Ok(())
 }
 
-// ── System ────────────────────────────────────────────────────────────────
+// ── 系统 ────────────────────────────────────────────────────────────────
 
 pub async fn system_operators(cfg: &CliConfig) -> Result<(), String> {
     let result = get(cfg, "/system/operators").await?;
@@ -251,7 +251,7 @@ pub async fn system_prune(cfg: &CliConfig, force: bool, dry_run: bool) -> Result
     Ok(())
 }
 
-// ── Daemon log ────────────────────────────────────────────────────────────
+// ── Daemon 日志 ────────────────────────────────────────────────────────────
 
 pub async fn daemon_log(cfg: &CliConfig, live: bool) -> Result<(), String> {
     use std::io::Write;
@@ -314,7 +314,7 @@ pub async fn run_pipeline_watch(
     inputs: &[(String, String)],
     text_mode: bool,
 ) -> Result<(), String> {
-    // 1. POST /runs → get task_id + pipeline_name
+    // 1. POST /runs → 获取 task_id + pipeline_name
     let run_resp = post(cfg, "/runs", build_run_body(name, inputs)?).await?;
     let task_id = run_resp["task_id"]
         .as_str()
@@ -325,7 +325,7 @@ pub async fn run_pipeline_watch(
         .unwrap_or(name)
         .to_string();
 
-    // 2. Connect WS
+    // 2. 连接 WS
     let (http_scheme, host) = parse_daemon_addr(&cfg.daemon);
     let ws_scheme = if http_scheme == "https://" {
         "wss://"
@@ -342,7 +342,7 @@ pub async fn run_pipeline_watch(
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
 
-    // Spawn reader
+    // 启动 reader 任务
     tokio::spawn(async move {
         while let Some(msg) = read.next().await {
             match msg {

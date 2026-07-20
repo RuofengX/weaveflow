@@ -11,7 +11,7 @@ use super::storage::StorageDef;
 use super::variable::{RefValue, VariablePath, parse_string_to_refvalue};
 
 // ---------------------------------------------------------------------------
-// Raw pipeline — no RefValue, no catch-all HashMap on steps
+// Raw pipeline —— 不含 RefValue，步骤上也没有兜底的 HashMap
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -58,7 +58,7 @@ pub struct RawIterateConfig {
     pub batch: Option<BatchConfig>,
 }
 // ---------------------------------------------------------------------------
-// Raw step operators — one struct per operator, plain types only
+// Raw 步骤算子 —— 每个算子一个结构体，仅使用普通类型
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -199,7 +199,7 @@ pub struct RawVarInputs {
 }
 
 // ---------------------------------------------------------------------------
-// Raw → PipelineDef / StepDef conversion
+// Raw → PipelineDef / StepDef 转换
 // ---------------------------------------------------------------------------
 
 impl TryFrom<RawPipelineDef> for PipelineDef {
@@ -327,13 +327,13 @@ impl TryFrom<RawIterateConfig> for IterateConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// 辅助函数
 // ---------------------------------------------------------------------------
 
-/// Convert a YAML `Value` to `RefValue`.
-/// String `"{slots.x}"` → `Ref`, other scalars → `Literal`.
-/// Objects/arrays are recursively walked: nested strings converted to
-/// `{"Ref": {"parts": [...]}}` inline tags.
+/// 将 YAML `Value` 转换为 `RefValue`。
+/// 字符串 `"{slots.x}"` → `Ref`，其他标量 → `Literal`。
+/// 对象/数组递归遍历：嵌套字符串转换为
+/// `{"Ref": {"parts": [...]}}` 内联标签。
 fn yaml_to_refvalue(v: &Value) -> RefValue {
     match v {
         Value::String(s) => {
@@ -355,8 +355,8 @@ fn yaml_to_refvalue(v: &Value) -> RefValue {
     }
 }
 
-/// Replace `"{...}"` strings in a Value tree with `{"Ref": {"parts": [...]}}`.
-/// Used for converting nested data inside a `RefValue::Literal`.
+/// 将 Value 树中的 `"{...}"` 字符串替换为 `{"Ref": {"parts": [...]}}`。
+/// 用于转换 `RefValue::Literal` 内部的嵌套数据。
 fn replace_template_strings(v: &Value) -> Value {
     match v {
         Value::String(s) => {
@@ -378,7 +378,7 @@ fn replace_template_strings(v: &Value) -> Value {
     }
 }
 // ---------------------------------------------------------------------------
-// Errors
+// 错误类型
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]

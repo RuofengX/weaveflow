@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dsl::StepId;
 
-/// Snapshot key = task_id + seq.
+/// Snapshot key = task_id + seq。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SnapshotKey {
     pub task_id: uuid::Uuid,

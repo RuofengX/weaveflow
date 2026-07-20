@@ -15,8 +15,7 @@ pub struct TaskSnapshot {
     pub pipeline_name: String,
     pub status: TaskStatus,
     pub layers: Vec<LayerInfo>,
-    /// Per-step progress — always present so TUI can render step states
-    /// even after the task has completed or failed.
+    /// 逐步进度 —— 始终存在，即使 task 已完成或失败，TUI 也能渲染步骤状态。
     pub steps: Vec<StepProgress>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -70,7 +69,7 @@ impl TaskTracker {
         let progress = Progress::from_step_ids(&steps);
         let (tx, rx) = tokio::sync::broadcast::channel(64);
 
-        // Set initial state as Running with Undefined progress
+        // 初始状态设为 Running，进度为 Undefined
         let state = RunState {
             task_id,
             pipeline_name: pipeline_name.clone(),
@@ -223,7 +222,7 @@ impl TaskTracker {
         count
     }
 
-    // ── internal ──
+    // ── 内部 ──
 
     fn broadcast(&self, run: &RunState) {
         let bytes = serde_json::to_vec(&self.build_snapshot(run)).unwrap_or_default();

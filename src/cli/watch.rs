@@ -14,7 +14,7 @@ use ratatui::{prelude::*, widgets::*};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-/// Run ratatui TUI mode.
+/// 运行 ratatui TUI 模式。
 pub fn run_tui(
     rx: &mut mpsc::UnboundedReceiver<Value>,
     task_id: &str,
@@ -110,7 +110,7 @@ pub fn run_tui(
     Ok(())
 }
 
-/// Run text output mode (for CI/CD, agents). Prints one line per layer on completion.
+/// 运行纯文本输出模式（面向 CI/CD、Agent）。每层完成时打印一行。
 pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), String> {
     let mut completed_layers: HashSet<usize> = HashSet::new();
     let mut finished = false;
@@ -222,8 +222,8 @@ pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), Str
     Ok(())
 }
 
-/// Run JSON stream mode (for agents): each TaskSnapshot is printed as one
-/// compact JSON line as it arrives. Task failure → Err (non-zero exit).
+/// 运行 JSON 流模式（面向 Agent）：每个 TaskSnapshot 到达时打印为一行
+/// 紧凑 JSON。任务失败 → 返回 Err（非零退出码）。
 pub async fn run_json_stream(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), String> {
     let mut finished = false;
     let mut task_error: Option<String> = None;
@@ -256,8 +256,8 @@ pub async fn run_json_stream(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<
     Ok(())
 }
 
-/// Print layer completion lines. Each layer is printed exactly once when all
-/// its steps reach a terminal state (Completed or Failed).
+/// 打印层完成行。当层内所有步骤都到达终态（Completed 或 Failed）时，
+/// 该层恰好打印一次。
 fn print_text_layer(data: &Value, completed: &mut HashSet<usize>) {
     let layers = data
         .get("layers")
@@ -323,7 +323,7 @@ fn print_text_layer(data: &Value, completed: &mut HashSet<usize>) {
     }
 }
 
-/// Extract step_id → (state_variant, detail_string) from snapshot Value.
+/// 从 snapshot Value 中提取 step_id → (state_variant, detail_string)。
 fn steps_detail_map(data: &Value) -> HashMap<String, (String, String)> {
     let mut map = HashMap::new();
     let Some(status_obj) = data.get("status").and_then(|s| s.as_object()) else {
@@ -377,7 +377,7 @@ fn steps_detail_map(data: &Value) -> HashMap<String, (String, String)> {
     map
 }
 
-// ── TUI State ────────────────────────────────────────────────────────────
+// ── TUI 状态 ────────────────────────────────────────────────────────────
 
 struct TuiState {
     task_id: String,
@@ -466,7 +466,7 @@ fn ui(f: &mut Frame, state: &TuiState) {
         .map(|a| a.to_vec())
         .unwrap_or_default();
 
-    // Build step state map: step_id → (state_variant, detail)
+    // 构建步骤状态映射：step_id → (state_variant, detail)
     let step_states = build_step_states(data);
 
     let mut lines: Vec<Line> = Vec::new();
@@ -546,7 +546,7 @@ fn ui(f: &mut Frame, state: &TuiState) {
         }
     }
 
-    // Footer
+    // 底部栏
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "══════════════════════════════════════════════",
@@ -595,12 +595,12 @@ struct Counts {
     skipped: u32,
 }
 
-/// Build step_id → (state_variant, detail_string).
+/// 构建 step_id → (state_variant, detail_string) 映射。
 fn build_step_states(data: &Value) -> HashMap<String, (String, String)> {
     let mut map = HashMap::new();
 
-    // Prefer top-level "steps" array (always present in TaskSnapshot).
-    // Fall back to "status.{variant}.steps" for backward compatibility.
+    // 优先使用顶层 "steps" 数组（TaskSnapshot 中始终存在）。
+    // 回退到 "status.{variant}.steps" 以兼容旧格式。
     let steps_arr = data.get("steps").and_then(|s| s.as_array()).or_else(|| {
         data.get("status")
             .and_then(|s| s.as_object())

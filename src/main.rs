@@ -1,10 +1,10 @@
-// weaveflow CLI — Docker-like CLI for DAG pipeline management.
+// weaveflow CLI —— 类似 Docker 的 DAG pipeline 管理命令行。
 //
 // 配置优先级：CLI 参数 > 环境变量（WEAVEFLOW_*）> 内置默认值。
 // clap 的 env 特性完成参数/环境变量合并，cli::config::CliConfig 是统一运行配置层。
 //
-// Subcommands:
-//   weaveflow serve --bind 127.0.0.1:9928     (hidden, daemon-internal)
+// 子命令：
+//   weaveflow serve --bind 127.0.0.1:9928     （隐藏，daemon 内部使用）
 //   weaveflow daemon start [--bind ADDR] [--max-concurrent-tasks N] [--shutdown-drain 30s]
 //   weaveflow daemon stop [--timeout 35s]
 //   weaveflow daemon restart [...start opts] [--stop-timeout 35s]
@@ -20,9 +20,9 @@
 //   weaveflow system prune [--force] [--dry-run]
 //   weaveflow system operators
 //
-// Global flags (all env-overridable, CLI wins):
-//   --daemon ADDR            [WEAVEFLOW_DAEMON]          default 127.0.0.1:9928
-//   --output text|json       [WEAVEFLOW_OUTPUT]          default text (json = 紧凑单行，面向 Agent)
+// 全局 flag（均可被环境变量覆盖，CLI 优先）：
+//   --daemon ADDR            [WEAVEFLOW_DAEMON]          默认 127.0.0.1:9928
+//   --output text|json       [WEAVEFLOW_OUTPUT]          默认 text（json = 紧凑单行，面向 Agent）
 //   --http-timeout 30s       [WEAVEFLOW_HTTP_TIMEOUT]
 //   --connect-timeout 5s     [WEAVEFLOW_CONNECT_TIMEOUT]
 //   --ws-timeout 10s         [WEAVEFLOW_WS_TIMEOUT]

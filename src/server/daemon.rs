@@ -37,7 +37,7 @@ pub struct ServeConfig {
     pub shutdown_drain: std::time::Duration,
 }
 
-// ── State ────────────────────────────────────────────────────────────────
+// ── 状态 ────────────────────────────────────────────────────────────────
 
 struct AppState {
     db: DbRef,
@@ -98,7 +98,7 @@ struct PruneResponse {
     dry_run: bool,
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────
+// ── 处理器 ──────────────────────────────────────────────────────────────
 
 async fn create_pipeline(
     State(state): State<Arc<AppState>>,
@@ -202,7 +202,7 @@ async fn run_pipeline(
     }
     tracing::info!(pipeline = %req.pipeline, "POST /runs");
 
-    // Load pipeline
+    // 加载 pipeline
     let pipeline = match state.db.find_pipeline_by_name(&req.pipeline)? {
         Some((_pid, p)) => p,
         None => {
@@ -216,7 +216,7 @@ async fn run_pipeline(
     let inputs = req.inputs.unwrap_or_default();
     tracing::info!(pipeline = %pipeline.name, input_keys = ?inputs.keys().collect::<Vec<_>>(), "run inputs resolved");
 
-    // Build DAG layers for progress display
+    // 构建用于进度展示的 DAG 层
     let dag = Dag::from_pipeline(&pipeline)?;
     let layers = dag.topological_sort()?;
     let steps_with_timeout: Vec<(StepId, Option<f64>)> = layers
@@ -233,14 +233,14 @@ async fn run_pipeline(
         })
         .collect();
 
-    // Create task in DB
+    // 在 DB 中创建任务
     let task_id = state.db.create_task(
         &pipeline.name,
         serde_json::json!(inputs),
         result_ttl_secs(&pipeline),
     )?;
 
-    // Register with tracker
+    // 注册到 tracker
     let (_rx, snapshot) = state
         .tracker
         .create(
@@ -251,7 +251,7 @@ async fn run_pipeline(
         )
         .await;
 
-    // Spawn executor in background; permit 在后台任务内获取，HTTP 立即返回，
+    // 后台 spawn executor；permit 在后台任务内获取，HTTP 立即返回，
     // 避免并发打满时请求挂起无界。in_flight 计数由外层 watcher 无条件回收
     // （runner panic 时 unwind 会跳过内层回收，导致 drain 永远等不到归零）。
     let state_clone = state.clone();
@@ -618,7 +618,7 @@ async fn handle_ws(
     }
 }
 
-// ── Operator ───────────────────────────────────────────────────────────────
+// ── 算子 ───────────────────────────────────────────────────────────────
 
 fn parse_task_id(s: &str) -> Result<TaskId, WeaveflowError> {
     let uuid = uuid::Uuid::parse_str(s)
@@ -1215,7 +1215,7 @@ output: "{greet.output}"
             .unwrap();
         assert_eq!(resp.status(), 200);
 
-        // POST /runs — now returns task_id immediately (async)
+        // POST /runs —— 现在立即返回 task_id（异步）
         let resp = client
             .post(format!("http://{addr}/runs"))
             .json(&serde_json::json!({"pipeline": "test_pipeline"}))
@@ -1226,10 +1226,10 @@ output: "{greet.output}"
         let run_body: Value = resp.json().await.unwrap();
         assert!(run_body.get("task_id").is_some());
 
-        // Wait for background task to complete
+        // 等待后台任务完成
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        // GET /runs/:task_id — should have progress
+        // GET /runs/:task_id —— 应带有 progress
         let task_id = run_body["task_id"].as_str().unwrap();
         let resp = client
             .get(format!("http://{addr}/runs/{task_id}"))
@@ -1240,7 +1240,7 @@ output: "{greet.output}"
         let task_body: Value = resp.json().await.unwrap();
         assert!(task_body.get("snapshot_count").is_some());
 
-        // Verify task completed (not stuck in Running)
+        // 验证任务已完成（未卡在 Running）
         let progress = task_body.get("progress").expect("progress field missing");
         let status = progress.get("status").expect("status field missing");
         let status_keys: Vec<&str> = status

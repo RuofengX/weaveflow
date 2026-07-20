@@ -363,7 +363,7 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
         }
     }
 
-    // orphan step check
+    // 孤立步骤检查
     let mut referenced_steps: HashSet<StepId> = HashSet::new();
     for step in &def.steps {
         let op_val = serde_json::to_value(&step.op).unwrap_or(Value::Null);
@@ -397,7 +397,7 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
         }
     }
 
-    // ---- 8. JS syntax check ----
+    // ---- 8. JS 语法检查 ----
     for step in &def.steps {
         if let StepOp::Js(ref inputs) = step.op {
             check_js_syntax(&step.id, &inputs.code, &mut report);
@@ -469,7 +469,7 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers — JSON-based ref extraction
+// 辅助函数 —— 基于 JSON 的 ref 提取
 // ---------------------------------------------------------------------------
 
 fn is_valid_pipeline_name(name: &str) -> bool {

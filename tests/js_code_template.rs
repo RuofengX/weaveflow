@@ -81,7 +81,7 @@ output: "{use_util.output}"
     assert_eq!(result["sum"], json!(3));
 }
 
-// ── binary data ───────────────────────────────────────────────────
+// ── 二进制数据 ────────────────────────────────────────────────────
 
 #[test]
 fn js_binary_from_file_has_base64() {
@@ -120,7 +120,7 @@ output: "{check.output}"
     assert_eq!(result["byte1"], json!(255));
 }
 
-// ── __native__ bindings ───────────────────────────────────────────
+// ── __native__ 绑定 ───────────────────────────────────────────────
 
 #[test]
 fn js_native_inflate() {

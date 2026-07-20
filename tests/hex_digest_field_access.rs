@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 #[test]
 fn hex_digest_field_access() {
-    // {s1.output.msg} should resolve through hex digest to nested field
+    // {s1.output.msg} 应通过 hex digest 解析到嵌套字段
     let yaml = r#"
 name: hex_digest_test
 steps:
