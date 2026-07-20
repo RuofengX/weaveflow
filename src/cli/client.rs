@@ -316,8 +316,16 @@ pub async fn run_pipeline_watch(
     if text_mode {
         crate::cli::watch::run_text(&mut rx).await?;
     } else {
-        crate::cli::watch::run_tui(&mut rx, &task_id, &pipeline_name)
-            .map_err(|e| format!("TUI 渲染失败: {e}"))?;
+        // run_tui 是同步阻塞事件循环 —— 放进 spawn_blocking，
+        // 否则单核 tokio runtime 下 WS reader 永远得不到调度。
+        let tid = task_id.clone();
+        let pname = pipeline_name.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::cli::watch::run_tui(&mut rx, &tid, &pname)
+        })
+        .await
+        .map_err(|e| format!("TUI 任务 panic: {e}"))?
+        .map_err(|e| format!("TUI 渲染失败: {e}"))?;
     }
     Ok(())
 }

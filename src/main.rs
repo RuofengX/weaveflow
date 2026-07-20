@@ -209,6 +209,15 @@ async fn daemon_log(addr: &str, live: bool) -> Result<(), String> {
                     .get("X-Log-Offset")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u64>().ok());
+                let truncated = resp
+                    .headers()
+                    .get("X-Log-Truncated")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s == "true" || s == "1")
+                    .unwrap_or(false);
+                if truncated {
+                    eprintln!("[weave] 日志缓冲已绕回，offset 之前的日志有缺口");
+                }
                 match resp.text().await {
                     Ok(body) => {
                         if !body.is_empty() {

@@ -24,6 +24,22 @@ pub fn http_client() -> reqwest::Client {
     reqwest_client().clone()
 }
 
+/// LLM 专用 client：长生成（大 max_tokens、慢推理后端）常超过共享 client
+/// 的 60s 总超时，这里放宽到 10 分钟；真正的上限仍由 step timeout_sec 控制。
+pub fn llm_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(600))
+                .connect_timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("build llm reqwest client")
+        })
+        .clone()
+}
+
 pub fn check_content_length(content_length: Option<u64>) -> Option<()> {
     match content_length {
         Some(len) if len as usize > MAX_RESPONSE_BYTES => None,
@@ -109,17 +125,44 @@ pub async fn block_private_ips(url_str: &str) -> Result<(), OperatorError> {
 }
 
 fn is_metadata_ip(ip: IpAddr) -> bool {
-    ip == IpAddr::from([169, 254, 169, 254])
+    match normalize_ip(ip) {
+        IpAddr::V4(v4) => v4 == std::net::Ipv4Addr::new(169, 254, 169, 254),
+        IpAddr::V6(_) => false,
+    }
+}
+
+/// IPv4-mapped/compatible IPv6（如 ::ffff:169.254.169.254）在 Linux 默认
+/// 双栈下实际到达映射的 IPv4 地址 —— 分类前统一归一化，否则绕过全部
+/// V4 检查。
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    }
 }
 
 fn is_private_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+    match normalize_ip(ip) {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                // 0.0.0.0 在本机协议栈上等同于 localhost
+                || v4.is_unspecified()
+                // 100.64.0.0/10 CGNAT（is_shared 尚不稳定，手动判段）
+                || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1]))
+                // 198.18.0.0/15 基准测试段
+                || (v4.octets()[0] == 198 && (18..=19).contains(&v4.octets()[1]))
+        }
         IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unique_local()
                 || v6.is_unicast_link_local()
                 || v6.is_multicast()
+                || v6.is_unspecified()
         }
     }
 }
@@ -133,6 +176,7 @@ mod tests {
     #[test]
     fn metadata_ip_detected() {
         assert!(is_metadata_ip(IpAddr::from([169, 254, 169, 254])));
+        assert!(is_metadata_ip("::ffff:169.254.169.254".parse().unwrap()));
         assert!(!is_metadata_ip(IpAddr::from([169, 254, 169, 253])));
         assert!(!is_metadata_ip(IpAddr::from([8, 8, 8, 8])));
     }
@@ -143,8 +187,15 @@ mod tests {
         assert!(is_private_ip(IpAddr::from([192, 168, 1, 1])));
         assert!(is_private_ip(IpAddr::from([127, 0, 0, 1])));
         assert!(is_private_ip(IpAddr::from([169, 254, 1, 1])));
+        assert!(is_private_ip(IpAddr::from([0, 0, 0, 0])));
+        assert!(is_private_ip(IpAddr::from([100, 64, 0, 1])));
+        assert!(is_private_ip(IpAddr::from([198, 18, 0, 1])));
         assert!(is_private_ip("::1".parse().unwrap()));
         assert!(is_private_ip("fc00::1".parse().unwrap()));
+        // v4-mapped v6 归一化后按 V4 分类
+        assert!(is_private_ip("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("::ffff:10.0.0.1".parse().unwrap()));
+        assert!(!is_private_ip("::ffff:8.8.8.8".parse().unwrap()));
         assert!(!is_private_ip(IpAddr::from([8, 8, 8, 8])));
     }
 

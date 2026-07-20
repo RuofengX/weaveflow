@@ -82,13 +82,24 @@ pub fn run_tui(
                 if let Some(dur) = data.get("total_duration_ms").and_then(|v| v.as_u64()) {
                     println!("Completed in {}ms", dur);
                 }
+                // 任务失败 → 非零退出码（与 text 模式一致）
+                if let Some(err) = data
+                    .get("status")
+                    .and_then(|s| s.get("Failed"))
+                    .and_then(|f| f.as_str())
+                {
+                    eprintln!("Error: task failed: {err}");
+                    return Err(io::Error::other(format!("task failed: {err}")));
+                }
             }
             if let Some(ref err) = state.error {
                 eprintln!("Error: {err}");
+                return Err(io::Error::other(err.clone()));
             }
         }
         Err(e) => {
             eprintln!("TUI error: {e}");
+            return Err(e);
         }
     }
 
@@ -99,6 +110,7 @@ pub fn run_tui(
 pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), String> {
     let mut completed_layers: HashSet<usize> = HashSet::new();
     let mut finished = false;
+    let mut task_error: Option<String> = None;
     while let Some(data) = rx.recv().await {
                 let status = data
                     .get("status")
@@ -174,6 +186,7 @@ pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), Str
                             .and_then(|f| f.as_str())
                             .unwrap_or("unknown error");
                         eprintln!("[weave] error: {err}");
+                        task_error = Some(err.to_string());
                     }
                     if let Some(dur) = data.get("total_duration_ms").and_then(|v| v.as_u64()) {
                         println!("[weave] completed in {}ms", dur);
@@ -184,6 +197,10 @@ pub async fn run_text(rx: &mut mpsc::UnboundedReceiver<Value>) -> Result<(), Str
     }
     if !finished {
         return Err("connection to daemon lost before task completion".to_string());
+    }
+    // CI/CD 场景：任务失败必须以非零退出码结束
+    if let Some(err) = task_error {
+        return Err(format!("task failed: {err}"));
     }
     Ok(())
 }

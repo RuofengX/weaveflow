@@ -92,7 +92,23 @@ fn is_allowed_path(canonical: &std::path::Path) -> bool {
         warn!("WEAVE_FILE_ALLOW_ROOTS 已设置但过滤空段后为空（配置疑似有误），所有路径将被拒绝");
         return false;
     }
-    kept.iter().any(|root| canonical.starts_with(root))
+    // root 也需 canonicalize：root 含符号链接或写成相对路径时，
+    // 与 canonical 目标路径的字符串前缀比较必然失效（误拒或误放）。
+    let roots: Vec<std::path::PathBuf> = kept
+        .iter()
+        .filter_map(|root| match std::fs::canonicalize(root) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                warn!(root, error = %e, "WEAVE_FILE_ALLOW_ROOTS 中的根目录无法 canonicalize，已忽略");
+                None
+            }
+        })
+        .collect();
+    if roots.is_empty() {
+        warn!("WEAVE_FILE_ALLOW_ROOTS 中的根目录全部无效，所有路径将被拒绝");
+        return false;
+    }
+    roots.iter().any(|root| canonical.starts_with(root))
 }
 
 #[async_trait]

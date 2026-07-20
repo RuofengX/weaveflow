@@ -5,6 +5,9 @@ use serde_json::Value;
 
 use crate::error::WeaveResult;
 
+/// __native__.inflate 解压输出上限（Rust 侧分配，不受 QuickJS memory_limit 约束）。
+const MAX_INFLATE_BYTES: u64 = 256 * 1024 * 1024;
+
 /// run_js future 被 drop（如 step 层 timeout 取消）时置位中断标志，
 /// QuickJS interrupt handler 随之触发，spawn_blocking 线程退出。
 struct InterruptGuard(Arc<AtomicBool>);
@@ -51,15 +54,28 @@ fn run_in_new_runtime(script: &str, interrupted: Arc<AtomicBool>) -> WeaveResult
         {
             let globals = ctx.globals();
 
-            let inflate_fn = rquickjs::Function::new(ctx.clone(), |data: Vec<u8>| -> Vec<u8> {
-                use std::io::Read;
-                let mut decoder = flate2::read::ZlibDecoder::new(&data[..]);
-                let mut out = Vec::new();
-                decoder
-                    .read_to_end(&mut out)
-                    .expect("zlib decompression failed");
-                out
-            });
+            let inflate_fn = rquickjs::Function::new(
+                ctx.clone(),
+                |data: Vec<u8>| -> rquickjs::Result<Vec<u8>> {
+                    use std::io::Read;
+                    // 解压炸弹防护：QuickJS 堆的 256MB memory_limit 管不到
+                    // Rust 侧分配，必须自行封顶；超限/损坏数据抛 JS 异常而非 panic。
+                    let mut decoder =
+                        flate2::read::ZlibDecoder::new(&data[..]).take(MAX_INFLATE_BYTES + 1);
+                    let mut out = Vec::new();
+                    decoder.read_to_end(&mut out).map_err(|e| {
+                        rquickjs::Error::new_from_js_message("inflate", "zlib", format!("{e}"))
+                    })?;
+                    if out.len() as u64 > MAX_INFLATE_BYTES {
+                        return Err(rquickjs::Error::new_from_js_message(
+                            "inflate",
+                            "limit",
+                            format!("decompressed data exceeds {} bytes", MAX_INFLATE_BYTES),
+                        ));
+                    }
+                    Ok(out)
+                },
+            );
 
             let btoa_fn = rquickjs::Function::new(ctx.clone(), |data: Vec<u8>| -> String {
                 use base64::Engine;
