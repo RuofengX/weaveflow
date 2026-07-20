@@ -252,6 +252,21 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
                         ),
                     });
                 }
+                if let Some(RefValue::Literal(v)) = &inputs.mime_type {
+                    let invalid = match v.as_str() {
+                        Some(m) => !is_valid_mime_type(m),
+                        None => true,
+                    };
+                    if invalid {
+                        report.errors.push(ValidationError {
+                            code: "invalid_operator_config".into(),
+                            message: format!(
+                                "步骤 {} 的 llm.mime_type 不是合法 MIME 类型: {}（应为 type/subtype 形式，如 image/png）",
+                                step.id, v
+                            ),
+                        });
+                    }
+                }
                 if let Some(RefValue::Literal(_)) = &inputs.api_key {
                     report.errors.push(ValidationError {
                         code: "insecure_api_key".into(),
@@ -493,6 +508,20 @@ fn is_valid_slot_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// RFC 2045 token: type/subtype，如 image/png、application/vnd.api+json。
+fn is_valid_mime_type(s: &str) -> bool {
+    fn is_token(part: &str) -> bool {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "!#$&^_.+-".contains(c))
+    }
+    match s.split_once('/') {
+        Some((t, sub)) => is_token(t) && is_token(sub),
+        None => false,
+    }
+}
+
 fn has_dependency_cycle(def: &PipelineDef, upstream_deps: &HashMap<StepId, Vec<StepId>>) -> bool {
     let mut unique_steps: Vec<&StepDef> = Vec::new();
     let mut seen: HashSet<&StepId> = HashSet::new();
@@ -567,18 +596,8 @@ fn collect_slots_used(def: &PipelineDef) -> HashSet<String> {
     set
 }
 
-fn output_refs(output: &RefValue) -> Vec<(String, String)> {
-    match output {
-        RefValue::Ref(path) => {
-            if path.parts.is_empty() {
-                return vec![];
-            }
-            let prefix = path.parts[0].clone();
-            let rest = path.parts[1..].join(".");
-            vec![(prefix, rest)]
-        }
-        RefValue::Literal(lit) => refs_in_json(lit),
-    }
+fn output_refs(output: &Value) -> Vec<(String, String)> {
+    refs_in_json(output)
 }
 
 fn refs_in_path(path: &VariablePath) -> Vec<(String, String)> {
@@ -681,29 +700,13 @@ fn check_ref_in_json(
     }
 }
 
-fn check_output_ref(output: &RefValue, all_ids: &HashSet<StepId>, report: &mut ValidationReport) {
-    match output {
-        RefValue::Ref(path) => {
-            if let Some(prefix) = path.parts.first()
-                && prefix != "slots"
-                && prefix != "env"
-                && !all_ids.contains(prefix.as_str())
-            {
-                report.errors.push(ValidationError {
-                    code: "output_ref_not_found".into(),
-                    message: format!("output 引用了不存在的步骤: {}", prefix),
-                });
-            }
-        }
-        RefValue::Literal(lit) => {
-            for (prefix, _) in refs_in_json(lit) {
-                if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
-                    report.errors.push(ValidationError {
-                        code: "output_ref_not_found".into(),
-                        message: format!("output 引用了不存在的步骤: {}", prefix),
-                    });
-                }
-            }
+fn check_output_ref(output: &Value, all_ids: &HashSet<StepId>, report: &mut ValidationReport) {
+    for (prefix, _) in refs_in_json(output) {
+        if prefix != "slots" && prefix != "env" && !all_ids.contains(prefix.as_str()) {
+            report.errors.push(ValidationError {
+                code: "output_ref_not_found".into(),
+                message: format!("output 引用了不存在的步骤: {}", prefix),
+            });
         }
     }
 }
@@ -932,6 +935,12 @@ mod tests {
         RefValue::Literal(v)
     }
 
+    /// PipelineDef.output 用的内联 Ref 标签形式。
+    fn output_ref(s: &str) -> Value {
+        let path = VariablePath::parse(s).unwrap();
+        serde_json::json!({"Ref": {"parts": path.parts}})
+    }
+
     fn valid_def() -> PipelineDef {
         PipelineDef {
             name: "test".into(),
@@ -942,7 +951,7 @@ mod tests {
                 schema: json!({"type": "string"}),
             }],
             steps: vec![step_http("{slots.url}")],
-            output: var_ref("{fetch.output}"),
+            output: output_ref("{fetch.output}"),
         }
     }
 
@@ -1084,7 +1093,7 @@ mod tests {
     #[test]
     fn output_ref_not_found() {
         let mut def = valid_def();
-        def.output = var_ref("{nonexistent.output}");
+        def.output = output_ref("{nonexistent.output}");
         let report = validate(&def);
         assert!(
             report
@@ -1293,7 +1302,7 @@ mod tests {
             prompt: literal(json!("hi")),
             system: None,
             images_b64: None,
-            image_type: None,
+            mime_type: None,
             max_tokens: 100,
             temperature: Some(f64::NAN),
             skip_vision_check: None,
@@ -1317,7 +1326,7 @@ mod tests {
             prompt: literal(json!("hi")),
             system: None,
             images_b64: None,
-            image_type: None,
+            mime_type: None,
             max_tokens: 100,
             temperature: None,
             skip_vision_check: None,
@@ -1325,13 +1334,79 @@ mod tests {
         });
         let report = validate(&def);
         assert!(
-            report
-                .errors
-                .iter()
-                .any(|e| e.code == "insecure_api_key"),
+            report.errors.iter().any(|e| e.code == "insecure_api_key"),
             "expected insecure_api_key error: {:?}",
             report.errors
         );
+    }
+
+    #[test]
+    fn llm_mime_type_invalid_rejected() {
+        for bad in ["png", "image", "image/", "/png", "image/png/x", ""] {
+            let mut def = valid_def();
+            def.steps[0].op = StepOp::Llm(LlmInputs {
+                url: var_ref("{slots.url}"),
+                model: "m".into(),
+                prompt: literal(json!("hi")),
+                system: None,
+                images_b64: None,
+                mime_type: Some(literal(json!(bad))),
+                max_tokens: 100,
+                temperature: None,
+                skip_vision_check: None,
+                api_key: None,
+            });
+            let report = validate(&def);
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .any(|e| e.code == "invalid_operator_config"),
+                "expected invalid_operator_config for mime_type {bad:?}: {:?}",
+                report.errors
+            );
+        }
+    }
+
+    #[test]
+    fn llm_mime_type_valid_and_ref_accepted() {
+        for good in ["image/png", "image/jpeg", "image/webp", "image/svg+xml"] {
+            let mut def = valid_def();
+            def.steps[0].op = StepOp::Llm(LlmInputs {
+                url: var_ref("{slots.url}"),
+                model: "m".into(),
+                prompt: literal(json!("hi")),
+                system: None,
+                images_b64: None,
+                mime_type: Some(literal(json!(good))),
+                max_tokens: 100,
+                temperature: None,
+                skip_vision_check: None,
+                api_key: None,
+            });
+            let report = validate(&def);
+            assert!(
+                report.is_ok(),
+                "expected no errors for mime_type {good:?}: {:?}",
+                report.errors
+            );
+        }
+        // 引用形式（如 {file.output.mimetype}）validator 不校验字面内容
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Llm(LlmInputs {
+            url: var_ref("{slots.url}"),
+            model: "m".into(),
+            prompt: literal(json!("hi")),
+            system: None,
+            images_b64: None,
+            mime_type: Some(var_ref("{slots.url}")),
+            max_tokens: 100,
+            temperature: None,
+            skip_vision_check: None,
+            api_key: None,
+        });
+        let report = validate(&def);
+        assert!(report.is_ok(), "ref mime_type: {:?}", report.errors);
     }
 
     #[test]
@@ -1343,7 +1418,7 @@ mod tests {
             prompt: literal(json!("hi")),
             system: None,
             images_b64: None,
-            image_type: None,
+            mime_type: None,
             max_tokens: 100,
             temperature: None,
             skip_vision_check: None,
@@ -1414,7 +1489,7 @@ mod tests {
         let mut def = valid_def();
         def.steps.push(def.steps[0].clone());
         def.steps[0].after = Some(vec!["ghost".into()]);
-        def.output = var_ref("{ghost.output}");
+        def.output = output_ref("{ghost.output}");
         let report = validate(&def);
         assert!(report.errors.len() >= 2);
     }
@@ -1486,7 +1561,7 @@ mod tests {
     #[test]
     fn embedded_ref_in_output_literal_not_flagged() {
         let mut def = valid_def();
-        def.output = literal(json!("prefix {ghost.output} suffix"));
+        def.output = json!("prefix {ghost.output} suffix");
         let report = validate(&def);
         assert!(
             report.is_ok(),
@@ -1513,7 +1588,7 @@ mod tests {
     fn cycle_via_after_detected() {
         let mut def = valid_def();
         def.steps = vec![step_noop("a", vec!["b"]), step_noop("b", vec!["a"])];
-        def.output = var_ref("{a.output}");
+        def.output = output_ref("{a.output}");
         let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "cycle_detected"));
     }
@@ -1525,7 +1600,7 @@ mod tests {
             step_var_ref("a", "{b.output}"),
             step_var_ref("b", "{a.output}"),
         ];
-        def.output = var_ref("{a.output}");
+        def.output = output_ref("{a.output}");
         let report = validate(&def);
         assert!(report.errors.iter().any(|e| e.code == "cycle_detected"));
     }
@@ -1534,7 +1609,7 @@ mod tests {
     fn acyclic_pipeline_not_flagged() {
         let mut def = valid_def();
         def.steps.push(step_var_ref("b", "{fetch.output}"));
-        def.output = var_ref("{b.output}");
+        def.output = output_ref("{b.output}");
         let report = validate(&def);
         assert!(!report.errors.iter().any(|e| e.code == "cycle_detected"));
     }
@@ -1616,7 +1691,7 @@ mod tests {
     fn invalid_step_id_charset() {
         let mut def = valid_def();
         def.steps[0].id = "bad.id".into();
-        def.output = var_ref("{bad.output}");
+        def.output = output_ref("{bad.output}");
         let report = validate(&def);
         assert!(
             report

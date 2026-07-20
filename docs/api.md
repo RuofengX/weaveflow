@@ -181,6 +181,14 @@ curl -X POST http://127.0.0.1:9928/prune -H 'Content-Type: application/json' \
 
 ## System
 
+### `GET /system/version` — 版本信息
+
+```json
+{ "version": "1.0.2", "build_code": "a1b2c3" }
+```
+
+`build_code` 是构建时的 git 提交短哈希（6 位，非 git 构建为 `"unknown"`）。CLI 每次访问 daemon 前会比对自身构建码，不一致时 stderr 告警（识别旧版本 daemon 残留）。
+
 ### `GET /system/operators` — 算子清单
 
 ```json

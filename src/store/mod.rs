@@ -1312,7 +1312,7 @@ mod tests {
                 timeout_sec: None,
                 op: crate::dsl::StepOp::Noop,
             }],
-            output: crate::dsl::RefValue::Literal(serde_json::json!(null)),
+            output: serde_json::json!(null),
         };
         let pid1 = db.save_pipeline_upsert(&def).unwrap();
         def.description = Some("v2".into());

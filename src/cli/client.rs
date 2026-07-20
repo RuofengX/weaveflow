@@ -189,8 +189,70 @@ pub async fn snapshot_list(cfg: &CliConfig, task_id: &str) -> Result<(), String>
     Ok(())
 }
 
-pub async fn snapshot_show(cfg: &CliConfig, task_id: &str, seq: u64) -> Result<(), String> {
-    let result = get(cfg, &format!("/runs/{task_id}/snapshots/{seq}")).await?;
+/// 超过该长度且字符全部落在 base64 字母表内的字符串视为内联二进制数据。
+const BASE64_MASK_MIN_LEN: usize = 512;
+
+fn looks_like_base64(s: &str) -> bool {
+    s.len() >= BASE64_MASK_MIN_LEN
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+}
+
+fn mask_base64_strings(v: &mut Value) {
+    match v {
+        Value::String(s) => {
+            if looks_like_base64(s) {
+                let b64_len = s.len();
+                let padding = s.bytes().rev().take_while(|&b| b == b'=').count();
+                let decoded_bytes = b64_len / 4 * 3 - padding.min(2);
+                *s = format!("<base64 hidden: {decoded_bytes} bytes — use --full to show>");
+            }
+        }
+        Value::Array(arr) => arr.iter_mut().for_each(mask_base64_strings),
+        Value::Object(map) => map.values_mut().for_each(mask_base64_strings),
+        _ => {}
+    }
+}
+
+/// Best-effort 构建码核对：daemon 与 CLI 不一致（如改名前旧版 weave 残留）时告警。
+/// 连接失败等情况静默——真正的请求会给出正式错误。
+pub async fn warn_if_build_mismatch(cfg: &CliConfig) {
+    let url = api_url(&cfg.daemon, "/system/version");
+    let Ok(resp) = cfg.http_client().get(&url).send().await else {
+        return;
+    };
+    if resp.status().as_u16() == 404 {
+        eprintln!(
+            "警告: daemon 不支持 /system/version，可能是旧版本 daemon（如改名前的 weave）残留，\
+             建议 `weaveflow daemon restart`"
+        );
+        return;
+    }
+    let Ok(v) = resp.json::<Value>().await else {
+        return;
+    };
+    let Some(daemon_code) = v.get("build_code").and_then(|x| x.as_str()) else {
+        return;
+    };
+    if weaveflow::build_code_mismatch(weaveflow::BUILD_CODE, daemon_code) {
+        eprintln!(
+            "警告: daemon 构建码 ({daemon_code}) 与 CLI ({}) 不一致，可能是旧版本 daemon 残留，\
+             建议 `weaveflow daemon restart`",
+            weaveflow::BUILD_CODE
+        );
+    }
+}
+
+pub async fn snapshot_show(
+    cfg: &CliConfig,
+    task_id: &str,
+    seq: u64,
+    full: bool,
+) -> Result<(), String> {
+    let mut result = get(cfg, &format!("/runs/{task_id}/snapshots/{seq}")).await?;
+    if !full {
+        mask_base64_strings(&mut result);
+    }
     cfg.print_json(&result);
     Ok(())
 }
@@ -470,5 +532,36 @@ mod tests {
         let arg = format!("@{}", path.display());
         let val = resolve_input_value(&arg).unwrap();
         assert_eq!(val, serde_json::json!({"k": 1}));
+    }
+
+    #[test]
+    fn mask_base64_strings_hides_long_base64_with_byte_length() {
+        // 766 个 base64 字符（含 2 个 padding）= 571 字节原始数据
+        let b64 = format!("{}==", "QUJD".repeat(191));
+        let mut v = serde_json::json!({"output": {"content": b64, "size": 571}});
+        mask_base64_strings(&mut v);
+        let masked = v["output"]["content"].as_str().unwrap();
+        assert!(masked.contains("571 bytes"), "masked: {masked}");
+        assert!(masked.contains("--full"), "masked: {masked}");
+        assert_eq!(v["output"]["size"], serde_json::json!(571));
+    }
+
+    #[test]
+    fn mask_base64_strings_recurses_into_arrays() {
+        let b64 = "QUJD".repeat(200);
+        let mut v = serde_json::json!([{"items": [b64]}]);
+        mask_base64_strings(&mut v);
+        let masked = v[0]["items"][0].as_str().unwrap();
+        assert!(masked.starts_with("<base64 hidden:"), "masked: {masked}");
+    }
+
+    #[test]
+    fn mask_base64_strings_keeps_short_and_non_base64_strings() {
+        let long_text = "这是一段普通中文文本。".repeat(100);
+        let short_b64 = "QUJD".repeat(50); // 200 chars < 512 阈值
+        let mut v = serde_json::json!({"text": long_text, "short": short_b64});
+        mask_base64_strings(&mut v);
+        assert!(v["text"].as_str().unwrap().starts_with("这是一段"));
+        assert_eq!(v["short"].as_str().unwrap().len(), 200);
     }
 }

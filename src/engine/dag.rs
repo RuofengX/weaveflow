@@ -234,7 +234,7 @@ mod tests {
             storage: None,
             slots: vec![],
             steps,
-            output: RefValue::Literal(serde_json::json!("ok")),
+            output: serde_json::json!("ok"),
         }
     }
 

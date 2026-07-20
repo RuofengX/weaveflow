@@ -5,13 +5,13 @@ use std::sync::Arc;
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
-use crate::dsl::{PipelineDef, RefValue, StepId};
+use crate::dsl::{PipelineDef, StepId};
 use crate::engine::dag::Dag;
 use crate::engine::step::execute_step;
 use crate::error::{WeaveflowError, WeaveflowResult};
 use crate::store::Database;
 use crate::tracker::{Snapshot, StepState, TaskId, TaskTracker};
-use crate::vm::{Scope, redact_env_values, resolve_ref};
+use crate::vm::{Scope, redact_env_values, resolve_value_tree};
 
 pub struct Runner {
     pub pipeline: PipelineDef,
@@ -128,15 +128,9 @@ pub async fn run_inner(
             .await;
     }
 
-    let last_step_id = match &pipeline.output {
-        RefValue::Ref(path) => path
-            .parts
-            .first()
-            .map(|p| StepId::from(p.clone()))
-            .filter(|id| dag.step(id).is_some()),
-        RefValue::Literal(_) => None,
-    }
-    .or_else(|| layers.last().and_then(|l| l.last()).cloned());
+    let last_step_id = single_output_ref(&pipeline.output)
+        .filter(|id| dag.step(id).is_some())
+        .or_else(|| layers.last().and_then(|l| l.last()).cloned());
 
     for (layer_idx, layer) in layers.iter().enumerate() {
         let mut futures = Vec::new();
@@ -250,22 +244,11 @@ pub async fn run_inner(
     let final_output;
     let output_val: Value;
     {
-        match &pipeline.output {
-            RefValue::Literal(v) => {
-                output_val = v.clone();
-                final_output = serde_json::to_vec(&output_val)
-                    .map_err(|e| WeaveflowError::Internal(format!("output serialize: {e}")))?;
-            }
-            RefValue::Ref(path) => {
-                if path.parts.is_empty() {
-                    return Err(WeaveflowError::Internal("empty output ref".into()));
-                }
-                let value = resolve_ref(&scope, path)?;
-                output_val = (*value).clone();
-                final_output = serde_json::to_vec(&output_val)
-                    .map_err(|e| WeaveflowError::Internal(format!("output serialize: {e}")))?;
-            }
-        }
+        // output 是任意 JSON + 内联 Ref 标签；in_literal=true 避免把用户数据里的
+        // 单键 "Literal" 对象误当 RefValue serde 标签拆包（该约定只属于算子字段位）。
+        output_val = resolve_value_tree(&scope, &pipeline.output, None, false, true)?;
+        final_output = serde_json::to_vec(&output_val)
+            .map_err(|e| WeaveflowError::Internal(format!("output serialize: {e}")))?;
     }
 
     info!(task_id = %task_id, pipeline = %pipeline.name, "pipeline run completed");
@@ -275,6 +258,16 @@ pub async fn run_inner(
     }
 
     Ok(final_output)
+}
+
+/// output 恰好是单个内联 Ref 标签时，取其首段作为“末步”候选（用于 durable 快照判定）。
+fn single_output_ref(output: &Value) -> Option<StepId> {
+    let map = output.as_object()?;
+    if map.len() != 1 || !map.contains_key("Ref") {
+        return None;
+    }
+    let path: crate::dsl::VariablePath = serde_json::from_value(map.get("Ref")?.clone()).ok()?;
+    path.parts.first().map(|p| StepId::from(p.clone()))
 }
 
 fn save_step_snapshot(

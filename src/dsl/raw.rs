@@ -8,7 +8,7 @@ use super::retry::RetryDef;
 use super::step::{BatchConfig, IterateConfig, StepDef, StepId};
 use super::step_op::{self, StepOp};
 use super::storage::StorageDef;
-use super::variable::{RefValue, VariablePath, parse_string_to_refvalue};
+use super::variable::{RefValue, VariablePath};
 
 // ---------------------------------------------------------------------------
 // Raw pipeline —— 不含 RefValue，步骤上也没有兜底的 HashMap
@@ -26,7 +26,8 @@ pub struct RawPipelineDef {
     pub slots: Vec<super::pipeline::SlotDef>,
     #[serde(default)]
     pub steps: Vec<RawStepDef>,
-    pub output: String,
+    /// 任意 JSON；字符串/嵌套字符串中的整串 `"{...}"` 会转换为内联 Ref 标签。
+    pub output: Value,
 }
 
 #[derive(Deserialize)]
@@ -180,7 +181,7 @@ pub struct RawLlmInputs {
     #[serde(default)]
     pub images_b64: Option<Value>,
     #[serde(default)]
-    pub image_type: Option<String>,
+    pub mime_type: Option<Value>,
     #[serde(default)]
     pub max_tokens: Option<u64>,
     #[serde(default)]
@@ -216,7 +217,7 @@ impl TryFrom<RawPipelineDef> for PipelineDef {
                 .into_iter()
                 .map(StepDef::try_from)
                 .collect::<Result<Vec<_>, _>>()?,
-            output: parse_string_to_refvalue(&raw.output),
+            output: refvalue_to_json(yaml_to_refvalue(&raw.output)),
         })
     }
 }
@@ -302,7 +303,7 @@ impl From<RawStepOp> for StepOp {
                 prompt: yaml_to_refvalue(&r.prompt),
                 system: r.system.as_ref().map(yaml_to_refvalue),
                 images_b64: r.images_b64.as_ref().map(yaml_to_refvalue),
-                image_type: r.image_type,
+                mime_type: r.mime_type.as_ref().map(yaml_to_refvalue),
                 max_tokens: r.max_tokens.unwrap_or(4096),
                 temperature: r.temperature,
                 skip_vision_check: r.skip_vision_check,
@@ -352,6 +353,19 @@ fn yaml_to_refvalue(v: &Value) -> RefValue {
             arr.iter().map(replace_template_strings).collect(),
         )),
         _ => RefValue::Literal(v.clone()),
+    }
+}
+
+/// RefValue → 带内联标签的 JSON 树：`Ref` → `{"Ref": {"parts": [...]}}`。
+/// 用于 PipelineDef.output（不再是 RefValue，而是任意 JSON + 内联标签）。
+fn refvalue_to_json(rv: RefValue) -> Value {
+    match rv {
+        RefValue::Literal(v) => v,
+        RefValue::Ref(path) => {
+            let mut map = serde_json::Map::new();
+            map.insert("Ref".into(), serde_json::json!({"parts": path.parts}));
+            Value::Object(map)
+        }
     }
 }
 

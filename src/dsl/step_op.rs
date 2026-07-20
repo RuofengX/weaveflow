@@ -151,7 +151,7 @@ pub struct LlmInputs {
     #[serde(default)]
     pub images_b64: Option<RefValue>,
     #[serde(default)]
-    pub image_type: Option<String>,
+    pub mime_type: Option<RefValue>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u64,
     #[serde(default)]

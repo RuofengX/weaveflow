@@ -33,7 +33,7 @@ steps:                      # 必填，至少 1 步
       delay_ms: 1000
     timeout_sec: 60
 
-output: "{step_id.output}"  # 必填
+output: "{step_id.output}"  # 必填；支持任意 JSON —— 对象/数组字面量中的整串 "{...}" 字符串会深解析为引用
 ```
 
 ### storage

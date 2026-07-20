@@ -3,7 +3,6 @@ use serde_json::Value;
 
 use super::step::StepDef;
 use super::storage::StorageDef;
-use super::variable::RefValue;
 
 /// Pipeline 顶层定义，由 YAML 反序列化而来。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,7 +14,8 @@ pub struct PipelineDef {
     pub slots: Vec<SlotDef>,
     #[serde(default)]
     pub steps: Vec<StepDef>,
-    pub output: RefValue,
+    /// 管线输出：任意 JSON；整串 `"{...}"` 引用已在 raw 层转换为内联 `{"Ref": ...}` 标签。
+    pub output: Value,
 }
 
 /// Pipeline 输入槽位声明。

@@ -59,7 +59,10 @@ output: "{fetch.output}"
         assert_eq!(def.steps.len(), 1);
         assert_eq!(def.steps[0].id, StepId::from("fetch"));
         assert_eq!(def.steps[0].op.op_type(), "http");
-        assert!(matches!(def.output, RefValue::Ref(_)));
+        assert_eq!(
+            def.output,
+            serde_json::json!({"Ref": {"parts": ["fetch", "output"]}})
+        );
         let StepOp::Http(ref inputs) = def.steps[0].op else {
             panic!("expected http")
         };
@@ -186,6 +189,6 @@ output: done
             panic!("expected var")
         };
         assert!(matches!(v.value, Some(RefValue::Literal(_))));
-        assert!(matches!(def.output, RefValue::Literal(_)));
+        assert_eq!(def.output, serde_json::json!("done"));
     }
 }

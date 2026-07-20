@@ -56,15 +56,6 @@ impl VariablePath {
     }
 }
 
-/// 把 YAML 字符串解析为 `RefValue`：模板字符串 `{...}` → `Ref`，其他 → `Literal`。
-pub fn parse_string_to_refvalue(s: &str) -> RefValue {
-    if let Some(path) = VariablePath::parse(s) {
-        RefValue::Ref(path)
-    } else {
-        RefValue::Literal(Value::String(s.to_owned()))
-    }
-}
-
 impl RefValue {
     /// 将 `RefValue` 转回普通 `serde_json::Value`。
     pub fn to_value(&self) -> Value {

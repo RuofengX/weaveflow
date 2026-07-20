@@ -16,7 +16,7 @@ pub fn resolve_inputs(scope: &Scope, step: &crate::dsl::StepDef) -> WeaveflowRes
     resolve_value_tree(scope, &op_value, as_name, true, false)
 }
 
-fn resolve_value_tree(
+pub fn resolve_value_tree(
     scope: &Scope,
     val: &Value,
     as_name: Option<&str>,

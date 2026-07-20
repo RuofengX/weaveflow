@@ -486,6 +486,13 @@ async fn prune_tasks(
     }))
 }
 
+async fn system_version() -> Json<Value> {
+    Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "build_code": weaveflow::BUILD_CODE,
+    }))
+}
+
 async fn list_operators() -> Result<Json<Value>, WeaveflowError> {
     tracing::info!("GET /system/operators");
     let builtins = weaveflow::operator::builtins();
@@ -642,6 +649,7 @@ fn build_app(state: Arc<AppState>) -> Router {
         .route("/prune", post(prune_tasks))
         .route("/system/operators", get(list_operators))
         .route("/system/logs", get(get_logs))
+        .route("/system/version", get(system_version))
         .with_state(state)
 }
 
@@ -732,7 +740,11 @@ pub async fn serve(cfg: ServeConfig) {
     }
 
     let app = build_app(state.clone());
-    tracing::info!("weaveflow serve listening on {bind}");
+    tracing::info!(
+        "weaveflow serve listening on {bind} (version {}, build {})",
+        env!("CARGO_PKG_VERSION"),
+        weaveflow::BUILD_CODE
+    );
     let listener = match tokio::net::TcpListener::bind(&bind).await {
         Ok(l) => l,
         Err(e) => {
@@ -1162,6 +1174,29 @@ mod tests {
         assert!("".parse::<u32>().is_err());
         assert!("123xyz".parse::<u32>().is_err());
         assert_eq!("12345".parse::<u32>().unwrap(), 12345);
+    }
+
+    #[tokio::test]
+    async fn system_version_returns_build_code() {
+        let (db, _dir) = temp_db();
+        let state = test_state(Arc::new(db));
+        let app = build_app(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let resp = reqwest::get(format!("http://{addr}/system/version"))
+            .await
+            .expect("get version");
+        assert_eq!(resp.status(), 200);
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["build_code"], weaveflow::BUILD_CODE);
+
+        handle.abort();
     }
 
     #[tokio::test]

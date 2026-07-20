@@ -248,7 +248,13 @@ enum SnapshotCmd {
     /// List snapshots for a task
     List { task_id: String },
     /// Show a specific snapshot
-    Show { task_id: String, seq: u64 },
+    Show {
+        task_id: String,
+        seq: u64,
+        /// Print超长 base64 字段的完整内容（默认隐藏，仅显示字节长度）
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -340,6 +346,17 @@ fn check_pipeline(file: &str, output: OutputFormat) -> Result<(), String> {
 async fn main() {
     let cli = Cli::parse();
     let cfg = CliConfig::from(&cli.global);
+    let talks_to_daemon = matches!(
+        cli.command,
+        Commands::Pipeline(_)
+            | Commands::Run { .. }
+            | Commands::Task(_)
+            | Commands::System(_)
+            | Commands::Daemon(DaemonCmd::Log { .. })
+    );
+    if talks_to_daemon {
+        cli::client::warn_if_build_mismatch(&cfg).await;
+    }
     match cli.command {
         Commands::Serve { opts } => {
             server::daemon::serve((&opts).into()).await;
@@ -391,8 +408,8 @@ async fn main() {
         Commands::Task(TaskCmd::Snapshot(SnapshotCmd::List { task_id })) => {
             exit_on_err(cli::client::snapshot_list(&cfg, &task_id).await);
         }
-        Commands::Task(TaskCmd::Snapshot(SnapshotCmd::Show { task_id, seq })) => {
-            exit_on_err(cli::client::snapshot_show(&cfg, &task_id, seq).await);
+        Commands::Task(TaskCmd::Snapshot(SnapshotCmd::Show { task_id, seq, full })) => {
+            exit_on_err(cli::client::snapshot_show(&cfg, &task_id, seq, full).await);
         }
         Commands::System(SystemCmd::Prune { force, dry_run }) => {
             exit_on_err(cli::client::system_prune(&cfg, force, dry_run).await);

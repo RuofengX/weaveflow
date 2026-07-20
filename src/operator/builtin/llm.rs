@@ -70,9 +70,14 @@ impl Operator for LlmOperator {
             );
         }
         let mime_type = inputs
-            .get("image_type")
+            .get("mime_type")
             .and_then(|v| v.as_str())
-            .unwrap_or("image/jpeg");
+            .unwrap_or("image/png");
+        if !mime_type.contains('/') {
+            return Err(OperatorError::Config(format!(
+                "llm.mime_type 不是合法 MIME 类型: {mime_type}（应为 image/png 形式）"
+            )));
+        }
         let max_tokens = inputs
             .get("max_tokens")
             .and_then(|v| v.as_u64())

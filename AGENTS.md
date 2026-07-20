@@ -207,7 +207,7 @@ YAML → serde_yaml → RawPipelineDef (Raw*Inputs with plain types)
 
 Top-level `Value::Object`/`Value::Array` literals have nested `"{...}"` strings replaced with `{"Ref": {"parts": [...]}}` **inline tags**, so the resolver finds refs deep inside literal JSON. Resolver, validator (`parse_ref_tag`) and DAG (`collect_refs`) all require the object to have **exactly one key** (`len == 1`) before treating `"Ref"` as a tag — user data containing a `"Ref"` key alongside other keys passes through untouched. A single-key `"Ref"` object whose value is NOT a valid VariablePath (e.g. `{"Ref": 123}`, CloudFormation-style `{"Ref": "MyResource"}`) is user data: all three consumers fall back to treating it as a plain object (resolver recurses, validator skips, DAG recurses). Single-key `"Literal"` objects are RefValue serde tags **only at operator-field positions** — inside a Literal payload they are user data and pass through unwrapped.
 
-Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field/order`, `dedup.field`, `base64.mode`, `command.shell`, `llm.model/image_type`) are **always literal** — a whole-string `"{...}"` there is NOT a ref: resolver never parses bare strings, and validator/DAG symmetrically ignore them (no false cycle, no false variable_ref_not_found).
+Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field/order`, `dedup.field`, `base64.mode`, `command.shell`, `llm.model`) are **always literal** — a whole-string `"{...}"` there is NOT a ref: resolver never parses bare strings, and validator/DAG symmetrically ignore them (no false cycle, no false variable_ref_not_found). (`llm.mime_type` is a RefValue, so `{file.output.mimetype}` refs DO resolve.)
 
 ## Resolver
 
@@ -258,7 +258,7 @@ Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field
 | GET/DELETE | `/pipelines/:name` | Inspect/delete pipeline |
 | GET | `/tasks` | List tasks |
 | POST | `/prune` | Prune tasks (response includes `snapshots_removed`) |
-| GET | `/system/operators` · `/system/logs` | Operators / daemon ring-buffer logs (absolute `offset`, `X-Log-Offset` / `X-Log-Truncated` headers) |
+| GET | `/system/operators` · `/system/logs` · `/system/version` | Operators / daemon ring-buffer logs (absolute `offset`, `X-Log-Offset` / `X-Log-Truncated` headers) / `{version, build_code}` (CLI warns on build_code mismatch — stale daemon detection) |
 
 Error mapping: `WeaveflowError::BadRequest`/`Parse` → 400, `NotFound` → 404, `Unavailable` (draining) → 503, other 5xx return a fixed message (no internal detail leak).
 
