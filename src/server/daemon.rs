@@ -184,7 +184,11 @@ async fn run_pipeline(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<Value>, WeaveError> {
+    // 先占 in_flight 计数再复查 draining（反向顺序存在 TOCTOU：
+    // 检查通过后信号触发、wait_for_drain 读到 0 返回，任务才被计入）。
+    state.in_flight.fetch_add(1, Ordering::SeqCst);
     if state.draining.load(Ordering::SeqCst) {
+        state.in_flight.fetch_sub(1, Ordering::SeqCst);
         return Err(WeaveError::Unavailable(
             "daemon 正在停机，不再接受新任务".to_string(),
         ));
@@ -241,13 +245,11 @@ async fn run_pipeline(
         .await;
 
     // Spawn executor in background; permit 在后台任务内获取，HTTP 立即返回，
-    // 避免并发打满时请求挂起无界。in_flight 计数用于优雅停机排空。
+    // 避免并发打满时请求挂起无界。in_flight 计数由外层 watcher 无条件回收
+    // （runner panic 时 unwind 会跳过内层回收，导致 drain 永远等不到归零）。
     let state_clone = state.clone();
     let pipeline_clone = pipeline.clone();
     let tid = task_id;
-    state.in_flight.fetch_add(1, Ordering::SeqCst);
-    let in_flight = state.in_flight.clone();
-    let drain_notify = state.drain_notify.clone();
     let handle = tokio::spawn(async move {
         match state_clone.semaphore.clone().acquire_owned().await {
             Ok(_permit) => {
@@ -276,9 +278,6 @@ async fn run_pipeline(
                 }
             }
         }
-        if in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
-            drain_notify.notify_waiters();
-        }
     });
 
     let state_watcher = state.clone();
@@ -299,6 +298,13 @@ async fn run_pipeline(
                         })
                         .unwrap_or_else(|_| "internal panic (cancelled)".to_string());
                     tracing::error!(task_id = %tid, error = %msg, "runner panicked");
+                    // panic 路径下同层 in-flight 步骤的 future 被 drop，状态会
+                    // 永远停留在 Running —— 统一收口为 Failed。
+                    let step_err = format!("task panicked: {msg}");
+                    state_watcher
+                        .tracker
+                        .fail_non_terminal_steps(&tid, &step_err)
+                        .await;
                     state_watcher
                         .tracker
                         .fail(&tid, format!("internal panic: {msg}"))
@@ -311,6 +317,10 @@ async fn run_pipeline(
                     }
                 }
             }
+        }
+        // in_flight 无条件回收（含 runner panic 路径），保证 wait_for_drain 可归零。
+        if state_watcher.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+            state_watcher.drain_notify.notify_waiters();
         }
     });
 
@@ -864,7 +874,10 @@ fn is_daemon_running() -> bool {
             return false;
         }
     };
-    let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+    // kill(pid, 0) 返回 EPERM 表示进程存在但属于其他用户 —— 视为存活，
+    // 不得删除有效 pidfile（否则 start 会再拉起一个导致 bind 冲突/孤儿）。
+    let alive = unsafe { libc::kill(pid as i32, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
     if !alive {
         let _ = std::fs::remove_file(&path);
         return false;
@@ -932,7 +945,7 @@ pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote
     if allow_remote {
         cmd.arg("--allow-remote");
     }
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: 无法启动 daemon 子进程: {e}");
@@ -972,6 +985,19 @@ pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote
 
     let healthy = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
+            // 子进程已退出（如 bind 冲突）时立即判失败 —— 否则健康检查可能
+            // 打到端口上另一个返回 200 的进程而误报成功（pidfile 指向死 PID）。
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    eprintln!("daemon 子进程提前退出: {status}");
+                    return false;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("daemon 子进程状态检查失败: {e}");
+                    return false;
+                }
+            }
             match client.get(&check_url).send().await {
                 Ok(resp) if resp.status().is_success() => return true,
                 _ => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
@@ -995,7 +1021,7 @@ pub async fn start(bind: &str, max_concurrent_tasks: Option<usize>, allow_remote
         if ours {
             let _ = std::fs::remove_file(&path);
         }
-        return;
+        std::process::exit(1);
     }
 
     println!("daemon started (PID {pid}) on {bind}");
@@ -1061,7 +1087,9 @@ pub async fn stop() {
     }
 
     let exited = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        // 必须 ≥ serve 端 drain 上限（SHUTDOWN_DRAIN_SECS），否则长任务
+        // 会被 SIGKILL 强杀于执行中途，优雅停机形同虚设。
+        std::time::Duration::from_secs(SHUTDOWN_DRAIN_SECS + 5),
         async {
             loop {
                 if unsafe { libc::kill(pid as i32, 0) } != 0 {

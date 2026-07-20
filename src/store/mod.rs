@@ -15,6 +15,7 @@ use crate::store::database::{
     CACHE, OBJECT, PIPELINE, SNAPSHOT, SNAPSHOT_HEADER, TASK, V0_PIPELINE, V0_TASK, V1_PIPELINE,
     V1_TASK,
 };
+use crate::tracker::meta::TASK_STATUS_RUNNING;
 use crate::tracker::snapshot::{Snapshot, SnapshotKey};
 use crate::tracker::{PipelineId, TaskId, TaskMeta};
 
@@ -243,48 +244,50 @@ impl Database {
 
     pub fn save_pipeline_upsert(&self, def: &PipelineDef) -> WeaveResult<PipelineId> {
         debug!(name = %def.name, steps = def.steps.len(), "save_pipeline_upsert");
-        if let Some((pid, _)) = self.find_pipeline_by_name(&def.name)? {
-            let g = self.db.read().unwrap_or_else(|e| e.into_inner());
-            let txn = g.begin_write().map_err(|e| WeaveError::Database {
-                operation: "save_pipeline_upsert begin_write",
-                source: Box::new(e.into()),
-            })?;
-            let mut table = txn.open_table(PIPELINE).map_err(|e| WeaveError::Database {
+        // 名称查找与插入必须在同一写事务内完成（redb 写事务全局串行），
+        // 否则并发 apply 同名 pipeline 会出现 check-then-act 双插。
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveError::Database {
+            operation: "save_pipeline_upsert begin_write",
+            source: Box::new(e.into()),
+        })?;
+        let existing: Option<PipelineId> = {
+            let table = txn.open_table(PIPELINE).map_err(|e| WeaveError::Database {
                 operation: "save_pipeline_upsert open_table",
                 source: Box::new(e.into()),
             })?;
-            table.insert(pid, def).map_err(|e| WeaveError::Database {
-                operation: "save_pipeline_upsert insert",
+            let mut found = None;
+            for result in table.iter().map_err(|e| WeaveError::Database {
+                operation: "save_pipeline_upsert iter",
                 source: Box::new(e.into()),
-            })?;
-            drop(table);
-            txn.commit().map_err(|e| WeaveError::Database {
-                operation: "save_pipeline_upsert commit",
-                source: Box::new(e.into()),
-            })?;
-            Ok(pid)
-        } else {
-            let pid = PipelineId::new();
-            let g = self.db.read().unwrap_or_else(|e| e.into_inner());
-            let txn = g.begin_write().map_err(|e| WeaveError::Database {
-                operation: "save_pipeline begin_write",
-                source: Box::new(e.into()),
-            })?;
-            let mut table = txn.open_table(PIPELINE).map_err(|e| WeaveError::Database {
-                operation: "save_pipeline open_table",
-                source: Box::new(e.into()),
-            })?;
-            table.insert(pid, def).map_err(|e| WeaveError::Database {
-                operation: "save_pipeline insert",
-                source: Box::new(e.into()),
-            })?;
-            drop(table);
-            txn.commit().map_err(|e| WeaveError::Database {
-                operation: "save_pipeline commit",
-                source: Box::new(e.into()),
-            })?;
-            Ok(pid)
-        }
+            })? {
+                let (k, v) = result.map_err(|e| WeaveError::Database {
+                    operation: "save_pipeline_upsert read_row",
+                    source: Box::new(e.into()),
+                })?;
+                let stored: PipelineDef = v.value();
+                if stored.name == def.name {
+                    found = Some(k.value());
+                    break;
+                }
+            }
+            found
+        };
+        let pid = existing.unwrap_or_else(PipelineId::new);
+        let mut table = txn.open_table(PIPELINE).map_err(|e| WeaveError::Database {
+            operation: "save_pipeline_upsert open_table",
+            source: Box::new(e.into()),
+        })?;
+        table.insert(pid, def).map_err(|e| WeaveError::Database {
+            operation: "save_pipeline_upsert insert",
+            source: Box::new(e.into()),
+        })?;
+        drop(table);
+        txn.commit().map_err(|e| WeaveError::Database {
+            operation: "save_pipeline_upsert commit",
+            source: Box::new(e.into()),
+        })?;
+        Ok(pid)
     }
 
     pub fn load_pipeline(&self, pid: &PipelineId) -> WeaveResult<Option<PipelineDef>> {
@@ -858,10 +861,13 @@ impl Database {
             if options.skip_tasks.contains(&task.task_id) {
                 continue;
             }
-            // 跳过没有 snapshot 的 task（尚在运行或新建）
+            // 无 snapshot 的 task：status 仍为 running 的可能是新建/在跑任务，
+            // 跳过；非 running（启动即失败、interrupted）且无 snapshot 的允许
+            // 清理（max_seq=0 → 不删任何 snapshot），否则这类 TASK 行永久累积。
             let max_seq = match max_snapshot_seq(&read_txn, &task.task_id)? {
                 Some(seq) => seq,
-                None => continue,
+                None if task.status == TASK_STATUS_RUNNING => continue,
+                None => 0,
             };
             if let Some(ref name) = options.pipeline
                 && &task.pipeline_name != name { continue; }
@@ -1132,6 +1138,52 @@ mod tests {
         assert_eq!(report.tasks_removed, 0);
         assert_eq!(report.objects_removed, 0);
         assert_eq!(report.cache_entries_removed, 0);
+    }
+
+    #[test]
+    fn save_pipeline_upsert_same_name_keeps_pid_and_overwrites() {
+        let (db, _dir) = temp_db();
+        let mut def = PipelineDef {
+            name: "p".into(),
+            description: None,
+            storage: None,
+            slots: vec![],
+            steps: vec![crate::dsl::StepDef {
+                id: StepId("s".into()),
+                after: None,
+                iterate: None,
+                retry: None,
+                cache: None,
+                timeout_sec: None,
+                op: crate::dsl::StepOp::Noop,
+            }],
+            output: crate::dsl::RefValue::Literal(serde_json::json!(null)),
+        };
+        let pid1 = db.save_pipeline_upsert(&def).unwrap();
+        def.description = Some("v2".into());
+        let pid2 = db.save_pipeline_upsert(&def).unwrap();
+        assert_eq!(pid1, pid2, "同名 upsert 必须复用同一 PipelineId");
+        let loaded = db.load_pipeline(&pid1).unwrap().unwrap();
+        assert_eq!(loaded.description.as_deref(), Some("v2"));
+        let all = db.list_pipelines().unwrap();
+        assert_eq!(all.iter().filter(|(_, d)| d.name == "p").count(), 1);
+    }
+
+    #[test]
+    fn prune_removes_terminal_task_without_snapshots() {
+        let (db, _dir) = temp_db();
+        let failed = db.create_task("p", serde_json::json!({}), 0).unwrap();
+        db.set_task_status(&failed, crate::tracker::meta::TASK_STATUS_FAILED)
+            .unwrap();
+        let running = db.create_task("p", serde_json::json!({}), 0).unwrap();
+
+        let report = db
+            .prune(&PruneOptions { force: true, ..Default::default() })
+            .unwrap();
+
+        assert_eq!(report.tasks_removed, 1);
+        assert!(db.load_task(&failed).unwrap().is_none());
+        assert!(db.load_task(&running).unwrap().is_some());
     }
 
     #[test]

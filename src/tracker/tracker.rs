@@ -144,6 +144,35 @@ impl TaskTracker {
         }
     }
 
+    /// 把所有非终态步骤统一标记为 Failed（runner panic 等任务级异常路径）。
+    pub async fn fail_non_terminal_steps(&self, task_id: &TaskId, error: &str) {
+        let mut runs = self.runs.lock().unwrap();
+        if let Some(run) = runs.get_mut(task_id) {
+            for step in &mut run.progress.steps {
+                let terminal = matches!(
+                    step.state,
+                    StepState::Completed { .. } | StepState::Failed { .. } | StepState::Skipped
+                );
+                if !terminal {
+                    let (started_at, attempts) = match &step.state {
+                        StepState::Running { started_at, attempts } => {
+                            (Some(*started_at), *attempts)
+                        }
+                        StepState::Iterating { started_at, .. } => (Some(*started_at), 1),
+                        _ => (None, 0),
+                    };
+                    step.state = StepState::Failed {
+                        started_at,
+                        completed_at: Utc::now(),
+                        error: error.to_string(),
+                        attempts,
+                    };
+                }
+            }
+            self.broadcast(run);
+        }
+    }
+
     /// 查询当前快照。
     pub async fn get(&self, task_id: &TaskId) -> Option<TaskSnapshot> {
         let runs = self.runs.lock().unwrap();
@@ -237,6 +266,53 @@ mod tests {
         match &snapshot.status {
             TaskStatus::Running(progress) => progress,
             other => panic!("expected Running status, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fail_non_terminal_steps_marks_running_and_pending() {
+        let tracker = TaskTracker::new();
+        let task_id = TaskId::new();
+        let (_rx, _) = tracker
+            .create(task_id, "p".to_string(), vec![(step_id("a"), None), (step_id("b"), None), (step_id("c"), None)], vec![])
+            .await;
+        tracker
+            .update_step(
+                &task_id,
+                &step_id("a"),
+                StepState::Completed {
+                    started_at: Utc::now(),
+                    completed_at: Utc::now(),
+                    attempts: 1,
+                    cached: false,
+                    duration_ms: 1,
+                },
+            )
+            .await;
+        tracker
+            .update_step(
+                &task_id,
+                &step_id("b"),
+                StepState::Running {
+                    started_at: Utc::now(),
+                    attempts: 1,
+                },
+            )
+            .await;
+
+        tracker.fail_non_terminal_steps(&task_id, "task panicked").await;
+
+        let snapshot = tracker.get(&task_id).await.unwrap();
+        let progress = running_progress(&snapshot);
+        assert!(matches!(
+            progress.step(&step_id("a")).unwrap().state,
+            StepState::Completed { .. }
+        ));
+        for id in ["b", "c"] {
+            match &progress.step(&step_id(id)).unwrap().state {
+                StepState::Failed { error, .. } => assert_eq!(error, "task panicked"),
+                other => panic!("step {id} must be Failed, got {other:?}"),
+            }
         }
     }
 
