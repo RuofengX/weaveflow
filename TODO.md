@@ -440,3 +440,12 @@ engine 层 `run_with_timeout` 用 `tokio::time::timeout` 包裹 `op.run(inputs)`
 | — | VariablePath::parse 的 trim() 使带空格字面量被意外当 ref | 设计取舍，待文档化 |
 
 本轮修复由模型 **kimi-for-coding/k3** 执行。测试：186 lib + 51 集成全绿，clippy 0 警告。
+
+### 追加（2026-07-20，用户决策）
+
+批次 C 的 O5 修法（llm 专用 client 600s 总超时）被否决：**任何隐式超时都不得截断
+step 执行**。共享 client 的 60s 总超时与 llm 的 600s 总超时一并移除 —— 超时只在
+step 层（`timeout_sec`）显式配置；未配置时请求可无限等待（与 JS 算子无 timeout 时
+的设计决策一致）。connect_timeout 10s 保留为建连失败的快速失败门槛。
+
+Model: kimi-for-coding/k3

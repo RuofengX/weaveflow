@@ -10,7 +10,9 @@ fn reqwest_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+            // 不设总超时：执行超时只在 step 层（timeout_sec）显式配置，
+            // client 不得隐式截断长耗时请求（慢 LLM 后端、大响应体）。
+            // connect_timeout 仅是建连失败的快速失败门槛，不截断已建连的传输。
             .connect_timeout(Duration::from_secs(10))
             // 禁 redirect：防止 302 跳到 169.254.169.254 绕过 block_private_ips 预检。
             // redirect 响应作为正常 3xx 响应返回给调用方。
@@ -22,22 +24,6 @@ fn reqwest_client() -> &'static reqwest::Client {
 
 pub fn http_client() -> reqwest::Client {
     reqwest_client().clone()
-}
-
-/// LLM 专用 client：长生成（大 max_tokens、慢推理后端）常超过共享 client
-/// 的 60s 总超时，这里放宽到 10 分钟；真正的上限仍由 step timeout_sec 控制。
-pub fn llm_client() -> reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .timeout(Duration::from_secs(600))
-                .connect_timeout(Duration::from_secs(10))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("build llm reqwest client")
-        })
-        .clone()
 }
 
 pub fn check_content_length(content_length: Option<u64>) -> Option<()> {

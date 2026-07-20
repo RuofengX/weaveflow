@@ -118,7 +118,7 @@ impl Operator for LlmOperator {
 
         http_client::block_private_ips(url).await?;
 
-        let client = http_client::llm_client();
+        let client = http_client::http_client();
         let resp = client
             .post(url)
             .header("Content-Type", "application/json")

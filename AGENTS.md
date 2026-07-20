@@ -177,7 +177,7 @@ All operator outputs are JSON `Value`; Scope stores `Arc<Value>`.
 | Var | `var` | Variable placeholder |
 | File | `file` | Read local files (canonicalize + `WEAVEFLOW_FILE_ALLOW_ROOTS` allowlist, Once-warn when unset) or URLs (SSRF-checked); 64MB cap |
 | Command | `command` | `sh -c` execution with `env_clear` + minimal env whitelist, `kill_on_drop`, 10MB stdout/stderr caps (keeps draining, sets `truncated: true`) |
-| LLM | `llm` | OpenAI-compatible API + images_b64 multimodal; dedicated client with 600s total timeout (shared client is 60s) |
+| LLM | `llm` | OpenAI-compatible API + images_b64 multimodal |
 
 Detailed input fields: [docs/operators.md](docs/operators.md).
 
@@ -211,7 +211,7 @@ Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field
 
 - **No auth on any endpoint (C6 still open).** `--allow-remote` is required to bind non-loopback addresses, but bearer-token auth is NOT implemented — binding `0.0.0.0` is unauthenticated RCE via `command`/`file`; even on localhost, browser CSRF (simple POST, no preflight) can create+run pipelines. Treat the daemon as localhost-only.
 - `command` runs `sh -c` with `env_clear` + a minimal whitelist (PATH/HOME/LANG/LC_ALL/TZ); `file` canonicalizes both the target and each `WEAVEFLOW_FILE_ALLOW_ROOTS` root before the prefix check (empty segments filtered with a warn; unset → one `Once` warn and allow-all); `{env.KEY}` values are recorded and redacted in persisted snapshots.
-- Shared HTTP client hardening: no redirects, per-DNS-result SSRF check (169.254.169.254 always blocked; IPv4-mapped IPv6 normalized before classification; `WEAVEFLOW_HTTP_BLOCK_PRIVATE=1` also covers 0.0.0.0, CGNAT 100.64/10, 198.18/15), 64MB streamed response cap, 60s total / 10s connect timeouts (llm uses a dedicated client with 600s total). **Known residual: DNS rebinding TOCTOU** — the pre-check and reqwest's connect each resolve DNS independently, so a low-TTL malicious domain can in principle pass the check and then resolve to a blocked IP (no resolve pinning with the shared client).
+- Shared HTTP client hardening: no redirects, per-DNS-result SSRF check (169.254.169.254 always blocked; IPv4-mapped IPv6 normalized before classification; `WEAVEFLOW_HTTP_BLOCK_PRIVATE=1` also covers 0.0.0.0, CGNAT 100.64/10, 198.18/15), 64MB streamed response cap. **No total/read timeout anywhere — execution timeouts exist ONLY at step level (`timeout_sec`, engine wraps `op.run`); the client never implicitly truncates long-running requests.** 10s connect_timeout is kept as a fast-fail floor for connection establishment only. **Known residual: DNS rebinding TOCTOU** — the pre-check and reqwest's connect each resolve DNS independently, so a low-TTL malicious domain can in principle pass the check and then resolve to a blocked IP (no resolve pinning with the shared client).
 - `js` sandbox: no fs/net, 256MB memory limit, 1MB stack; step timeout triggers real interruption via the drop-guard. `__native__.inflate` output is capped at 256MB on the Rust side (decompression bombs can't bypass the sandbox memory limit). **Without `step.timeout_sec`, a `while(1){}` still occupies a blocking thread indefinitely (design decision: timeouts live only at step layer).**
 
 ## Tracker / WS flow
