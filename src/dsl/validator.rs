@@ -584,6 +584,16 @@ fn collect_slots_used(def: &PipelineDef) -> HashSet<String> {
                 set.insert(name.to_string());
             }
         }
+        if let Some(iter) = &step.iterate {
+            for (prefix, rest) in refs_in_path(&iter.over) {
+                if prefix == "slots"
+                    && let Some(name) = rest.split('.').next()
+                    && !name.is_empty()
+                {
+                    set.insert(name.to_string());
+                }
+            }
+        }
     }
     for (prefix, rest) in output_refs(&def.output) {
         if prefix == "slots"
@@ -1136,6 +1146,40 @@ mod tests {
         });
         let report = validate(&def);
         assert!(report.is_ok());
+    }
+
+    #[test]
+    fn slot_used_only_in_iterate_over_is_not_unused() {
+        let mut def = valid_def();
+        def.slots = vec![SlotDef {
+            name: "items".into(),
+            schema: json!({"type": "array"}),
+        }];
+        def.steps = vec![StepDef {
+            id: "transform".into(),
+            after: None,
+            iterate: Some(IterateConfig {
+                over: VariablePath::parse("{slots.items}").unwrap(),
+                as_name: "item".into(),
+                max_workers: None,
+                batch: None,
+            }),
+            cache: None,
+            retry: None,
+            timeout_sec: None,
+            op: StepOp::Js(JsInputs {
+                code: literal(Value::String("function run(data) { return data; }".into())),
+                data: None,
+            }),
+        }];
+        def.output = output_ref("{transform.output}");
+        let report = validate(&def);
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+        assert!(
+            !report.warnings.iter().any(|w| w.code == "unused_slot"),
+            "warnings: {:?}",
+            report.warnings
+        );
     }
 
     #[test]
