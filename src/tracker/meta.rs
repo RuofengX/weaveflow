@@ -70,9 +70,10 @@ pub struct TaskMeta {
     pub inputs: serde_json::Value,
     #[serde(default = "default_task_status")]
     pub status: String,
-    /// 触发来源："manual"（HTTP /runs）或 "trigger:<name>"。旧行缺省为 None。
-    #[serde(default)]
-    pub trigger_source: Option<String>,
+    /// 触发来源："manual"（HTTP /runs）或 "routine:<name>"。旧行缺省为 None
+    /// （alias 兼容旧字段名 trigger_source）。
+    #[serde(default, alias = "trigger_source")]
+    pub routine_source: Option<String>,
 }
 
 fn default_task_status() -> String {

@@ -12,13 +12,13 @@ use tracing::debug;
 use crate::dsl::{PipelineDef, StepId};
 use crate::error::{WeaveflowError, WeaveflowResult};
 use crate::store::database::{
-    CACHE, OBJECT, PIPELINE, SNAPSHOT, SNAPSHOT_HEADER, TASK, TRIGGER, V0_PIPELINE, V0_TASK,
-    V1_PIPELINE, V1_TASK,
+    CACHE, EventKey, LEGACY_TRIGGER, OBJECT, PIPELINE, ROUTINE, ROUTINE_EVENT, SNAPSHOT,
+    SNAPSHOT_HEADER, TASK, V0_PIPELINE, V0_TASK, V1_PIPELINE, V1_TASK,
 };
 use crate::tracker::meta::TASK_STATUS_RUNNING;
 use crate::tracker::snapshot::{Snapshot, SnapshotKey};
 use crate::tracker::{PipelineId, TaskId, TaskMeta};
-use crate::trigger::TriggerRow;
+use crate::routine::{EVENT_INBOX_CAP, RoutineEventRecord, RoutineRow};
 
 /// weaveflow 数据层入口。封装 redb。
 #[derive(Debug)]
@@ -83,16 +83,86 @@ impl Database {
         init_table(&txn, SNAPSHOT, "init_tables snapshot")?;
         init_table(&txn, OBJECT, "init_tables object")?;
         init_table(&txn, CACHE, "init_tables cache")?;
-        init_table(&txn, TRIGGER, "init_tables trigger")?;
+        init_table(&txn, ROUTINE, "init_tables routine")?;
+        init_table(&txn, ROUTINE_EVENT, "init_tables routine_event")?;
         txn.commit().map_err(|e| {
             OpenFailure::Other(WeaveflowError::Database {
                 operation: "init_tables commit",
                 source: Box::new(e.into()),
             })
         })?;
-        Ok(Database {
+        let db = Database {
             db: std::sync::RwLock::new(db),
-        })
+        };
+        db.migrate_legacy_triggers().map_err(OpenFailure::Other)?;
+        Ok(db)
+    }
+
+    /// 2.0 之前的 trigger 表 → routine 表迁移（行格式兼容：RoutineRow 是
+    /// RoutineRow 的超集，新增字段均有 serde default）。迁移后删除旧表。
+    fn migrate_legacy_triggers(&self) -> WeaveflowResult<()> {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveflowError::Database {
+            operation: "migrate_legacy_triggers begin_write",
+            source: Box::new(e.into()),
+        })?;
+        let legacy = match txn.open_table(LEGACY_TRIGGER) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(()),
+            Err(e) => {
+                return Err(WeaveflowError::Database {
+                    operation: "migrate_legacy_triggers open legacy",
+                    source: Box::new(e.into()),
+                })
+            }
+        };
+        let mut rows: Vec<(String, RoutineRow)> = Vec::new();
+        for r in legacy.iter().map_err(|e| WeaveflowError::Database {
+            operation: "migrate_legacy_triggers iter",
+            source: Box::new(e.into()),
+        })? {
+            let (k, v) = r.map_err(|e| WeaveflowError::Database {
+                operation: "migrate_legacy_triggers row",
+                source: Box::new(e.into()),
+            })?;
+            let row: RoutineRow = serde_json::from_value(v.value().0).map_err(|e| {
+                WeaveflowError::Internal(format!("legacy trigger 行反序列化失败: {e}"))
+            })?;
+            rows.push((k.value().to_string(), row));
+        }
+        drop(legacy);
+        {
+            let mut table = txn.open_table(ROUTINE).map_err(|e| WeaveflowError::Database {
+                operation: "migrate_legacy_triggers open routine",
+                source: Box::new(e.into()),
+            })?;
+            for (name, row) in &rows {
+                table
+                    .insert(name.as_str(), row)
+                    .map_err(|e| WeaveflowError::Database {
+                        operation: "migrate_legacy_triggers insert",
+                        source: Box::new(e.into()),
+                    })?;
+            }
+        }
+        if !rows.is_empty() {
+            txn.delete_table(LEGACY_TRIGGER)
+                .map_err(|e| WeaveflowError::Database {
+                    operation: "migrate_legacy_triggers delete_table",
+                    source: Box::new(e.into()),
+                })?;
+        }
+        txn.commit().map_err(|e| WeaveflowError::Database {
+            operation: "migrate_legacy_triggers commit",
+            source: Box::new(e.into()),
+        })?;
+        if !rows.is_empty() {
+            tracing::warn!(
+                migrated = rows.len(),
+                "旧版 trigger 表已迁移为 routine 表（trigger → routine 重命名）"
+            );
+        }
+        Ok(())
     }
 
     /// v0 → 当前 schema 自动迁移：旧文件改名备份，PIPELINE/TASK 逐条拷贝，
@@ -394,50 +464,50 @@ impl Database {
         Ok(None)
     }
 
-    // ── Trigger ───────────────────────────────────────────────────────
+    // ── Routine ───────────────────────────────────────────────────────
 
     /// upsert：存在则覆盖（保留 created_at/运行时状态由调用方决定——
     /// 本函数整行写入）。
-    pub fn save_trigger(&self, row: &TriggerRow) -> WeaveflowResult<()> {
-        debug!(name = %row.def.name, "save_trigger");
+    pub fn save_routine(&self, row: &RoutineRow) -> WeaveflowResult<()> {
+        debug!(name = %row.def.name, "save_routine");
         let g = self.db.read().unwrap_or_else(|e| e.into_inner());
         let txn = g.begin_write().map_err(|e| WeaveflowError::Database {
-            operation: "save_trigger begin_write",
+            operation: "save_routine begin_write",
             source: Box::new(e.into()),
         })?;
         {
             let mut table = txn
-                .open_table(TRIGGER)
+                .open_table(ROUTINE)
                 .map_err(|e| WeaveflowError::Database {
-                    operation: "save_trigger open_table",
+                    operation: "save_routine open_table",
                     source: Box::new(e.into()),
                 })?;
             table
                 .insert(row.def.name.as_str(), row)
                 .map_err(|e| WeaveflowError::Database {
-                    operation: "save_trigger insert",
+                    operation: "save_routine insert",
                     source: Box::new(e.into()),
                 })?;
         }
         txn.commit().map_err(|e| WeaveflowError::Database {
-            operation: "save_trigger commit",
+            operation: "save_routine commit",
             source: Box::new(e.into()),
         })?;
         Ok(())
     }
 
-    pub fn load_trigger(&self, name: &str) -> WeaveflowResult<Option<TriggerRow>> {
+    pub fn load_routine(&self, name: &str) -> WeaveflowResult<Option<RoutineRow>> {
         let g = self.db.read().unwrap_or_else(|e| e.into_inner());
         let txn = g.begin_read().map_err(|e| WeaveflowError::Database {
-            operation: "load_trigger begin_read",
+            operation: "load_routine begin_read",
             source: Box::new(e.into()),
         })?;
-        let table = match txn.open_table(TRIGGER) {
+        let table = match txn.open_table(ROUTINE) {
             Ok(t) => t,
             Err(_) => return Ok(None),
         };
         let result = match table.get(name).map_err(|e| WeaveflowError::Database {
-            operation: "load_trigger get",
+            operation: "load_routine get",
             source: Box::new(e.into()),
         })? {
             Some(guard) => Ok(Some(guard.value())),
@@ -447,23 +517,23 @@ impl Database {
         result
     }
 
-    pub fn list_triggers(&self) -> WeaveflowResult<Vec<TriggerRow>> {
+    pub fn list_routines(&self) -> WeaveflowResult<Vec<RoutineRow>> {
         let g = self.db.read().unwrap_or_else(|e| e.into_inner());
         let txn = g.begin_read().map_err(|e| WeaveflowError::Database {
-            operation: "list_triggers begin_read",
+            operation: "list_routines begin_read",
             source: Box::new(e.into()),
         })?;
-        let table = match txn.open_table(TRIGGER) {
+        let table = match txn.open_table(ROUTINE) {
             Ok(t) => t,
             Err(_) => return Ok(Vec::new()),
         };
         let mut items = Vec::new();
         for result in table.iter().map_err(|e| WeaveflowError::Database {
-            operation: "list_triggers iter",
+            operation: "list_routines iter",
             source: Box::new(e.into()),
         })? {
             let (_, v) = result.map_err(|e| WeaveflowError::Database {
-                operation: "list_triggers read_row",
+                operation: "list_routines read_row",
                 source: Box::new(e.into()),
             })?;
             items.push(v.value());
@@ -471,56 +541,56 @@ impl Database {
         Ok(items)
     }
 
-    pub fn delete_trigger(&self, name: &str) -> WeaveflowResult<bool> {
+    pub fn delete_routine(&self, name: &str) -> WeaveflowResult<bool> {
         let g = self.db.read().unwrap_or_else(|e| e.into_inner());
         let txn = g.begin_write().map_err(|e| WeaveflowError::Database {
-            operation: "delete_trigger begin_write",
+            operation: "delete_routine begin_write",
             source: Box::new(e.into()),
         })?;
         let removed = {
             let mut table = txn
-                .open_table(TRIGGER)
+                .open_table(ROUTINE)
                 .map_err(|e| WeaveflowError::Database {
-                    operation: "delete_trigger open_table",
+                    operation: "delete_routine open_table",
                     source: Box::new(e.into()),
                 })?;
             table
                 .remove(name)
                 .map_err(|e| WeaveflowError::Database {
-                    operation: "delete_trigger remove",
+                    operation: "delete_routine remove",
                     source: Box::new(e.into()),
                 })?
                 .is_some()
         };
         txn.commit().map_err(|e| WeaveflowError::Database {
-            operation: "delete_trigger commit",
+            operation: "delete_routine commit",
             source: Box::new(e.into()),
         })?;
         Ok(removed)
     }
 
     /// 原子地修改一行 trigger 的运行时状态（读-改-写单事务）。
-    pub fn update_trigger(
+    pub fn update_routine(
         &self,
         name: &str,
-        f: impl FnOnce(&mut TriggerRow),
+        f: impl FnOnce(&mut RoutineRow),
     ) -> WeaveflowResult<bool> {
         let g = self.db.read().unwrap_or_else(|e| e.into_inner());
         let txn = g.begin_write().map_err(|e| WeaveflowError::Database {
-            operation: "update_trigger begin_write",
+            operation: "update_routine begin_write",
             source: Box::new(e.into()),
         })?;
         let updated = {
             let mut table = txn
-                .open_table(TRIGGER)
+                .open_table(ROUTINE)
                 .map_err(|e| WeaveflowError::Database {
-                    operation: "update_trigger open_table",
+                    operation: "update_routine open_table",
                     source: Box::new(e.into()),
                 })?;
-            let existing: Option<TriggerRow> = table
+            let existing: Option<RoutineRow> = table
                 .get(name)
                 .map_err(|e| WeaveflowError::Database {
-                    operation: "update_trigger get",
+                    operation: "update_routine get",
                     source: Box::new(e.into()),
                 })?
                 .map(|g| g.value());
@@ -530,7 +600,7 @@ impl Database {
                     table
                         .insert(name, &row)
                         .map_err(|e| WeaveflowError::Database {
-                            operation: "update_trigger insert",
+                            operation: "update_routine insert",
                             source: Box::new(e.into()),
                         })?;
                     true
@@ -539,10 +609,191 @@ impl Database {
             }
         };
         txn.commit().map_err(|e| WeaveflowError::Database {
-            operation: "update_trigger commit",
+            operation: "update_routine commit",
             source: Box::new(e.into()),
         })?;
         Ok(updated)
+    }
+
+    // ── Routine 事件收件箱 ─────────────────────────────────────────────
+
+    /// 追加一条事件：单写事务内分配 seq（RoutineRow.event_seq +1）、写入事件、
+    /// 按 EVENT_INBOX_CAP 淘汰最旧事件。返回分配的 seq；routine 不存在时返回 None。
+    pub fn append_routine_event(
+        &self,
+        mut record: RoutineEventRecord,
+    ) -> WeaveflowResult<Option<u64>> {
+        let name = record.routine.clone();
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveflowError::Database {
+            operation: "append_routine_event begin_write",
+            source: Box::new(e.into()),
+        })?;
+        let seq = {
+            let mut routine_table = txn.open_table(ROUTINE).map_err(|e| {
+                WeaveflowError::Database {
+                    operation: "append_routine_event open routine",
+                    source: Box::new(e.into()),
+                }
+            })?;
+            let existing: Option<RoutineRow> = routine_table
+                .get(name.as_str())
+                .map_err(|e| WeaveflowError::Database {
+                    operation: "append_routine_event get routine",
+                    source: Box::new(e.into()),
+                })?
+                .map(|g| g.value());
+            let Some(mut row) = existing else {
+                return Ok(None); // routine 已删除：事件无处归属，丢弃
+            };
+            row.event_seq += 1;
+            let seq = row.event_seq;
+            routine_table
+                .insert(name.as_str(), &row)
+                .map_err(|e| WeaveflowError::Database {
+                    operation: "append_routine_event update routine",
+                    source: Box::new(e.into()),
+                })?;
+            record.seq = seq;
+            let mut event_table = txn.open_table(ROUTINE_EVENT).map_err(|e| {
+                WeaveflowError::Database {
+                    operation: "append_routine_event open events",
+                    source: Box::new(e.into()),
+                }
+            })?;
+            event_table
+                .insert(
+                    EventKey {
+                        routine: name.clone(),
+                        seq,
+                    },
+                    &record,
+                )
+                .map_err(|e| WeaveflowError::Database {
+                    operation: "append_routine_event insert event",
+                    source: Box::new(e.into()),
+                })?;
+            // 淘汰最旧事件：seq <= seq - CAP 的全部删除
+            if seq > EVENT_INBOX_CAP {
+                let stale_end = EventKey {
+                    routine: name.clone(),
+                    seq: seq - EVENT_INBOX_CAP,
+                };
+                let stale: Vec<EventKey> = event_table
+                    .range(
+                        EventKey {
+                            routine: name.clone(),
+                            seq: 0,
+                        }..=stale_end,
+                    )
+                    .map_err(|e| WeaveflowError::Database {
+                        operation: "append_routine_event evict range",
+                        source: Box::new(e.into()),
+                    })?
+                    .filter_map(|r| r.ok())
+                    .map(|(k, _)| k.value())
+                    .collect();
+                for k in stale {
+                    event_table.remove(k).map_err(|e| WeaveflowError::Database {
+                        operation: "append_routine_event evict remove",
+                        source: Box::new(e.into()),
+                    })?;
+                }
+            }
+            seq
+        };
+        txn.commit().map_err(|e| WeaveflowError::Database {
+            operation: "append_routine_event commit",
+            source: Box::new(e.into()),
+        })?;
+        Ok(Some(seq))
+    }
+
+    /// 增量读取收件箱：seq > after 的事件按升序返回，最多 limit 条（0 = 全部）。
+    pub fn list_routine_events(
+        &self,
+        name: &str,
+        after: u64,
+        limit: usize,
+    ) -> WeaveflowResult<Vec<RoutineEventRecord>> {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveflowError::Database {
+            operation: "list_routine_events begin_read",
+            source: Box::new(e.into()),
+        })?;
+        let table = match txn.open_table(ROUTINE_EVENT) {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let mut items = Vec::new();
+        for result in table
+            .range(
+                EventKey {
+                    routine: name.to_string(),
+                    seq: after.saturating_add(1),
+                }..=EventKey {
+                    routine: name.to_string(),
+                    seq: u64::MAX,
+                },
+            )
+            .map_err(|e| WeaveflowError::Database {
+                operation: "list_routine_events range",
+                source: Box::new(e.into()),
+            })?
+        {
+            let (_, v) = result.map_err(|e| WeaveflowError::Database {
+                operation: "list_routine_events read_row",
+                source: Box::new(e.into()),
+            })?;
+            items.push(v.value());
+            if limit > 0 && items.len() >= limit {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
+    /// 删除 routine 的全部收件箱事件（routine 删除时调用）。
+    pub fn delete_routine_events(&self, name: &str) -> WeaveflowResult<()> {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveflowError::Database {
+            operation: "delete_routine_events begin_write",
+            source: Box::new(e.into()),
+        })?;
+        {
+            let mut table = match txn.open_table(ROUTINE_EVENT) {
+                Ok(t) => t,
+                Err(_) => return Ok(()),
+            };
+            let keys: Vec<EventKey> = table
+                .range(
+                    EventKey {
+                        routine: name.to_string(),
+                        seq: 0,
+                    }..=EventKey {
+                        routine: name.to_string(),
+                        seq: u64::MAX,
+                    },
+                )
+                .map_err(|e| WeaveflowError::Database {
+                    operation: "delete_routine_events range",
+                    source: Box::new(e.into()),
+                })?
+                .filter_map(|r| r.ok())
+                .map(|(k, _)| k.value())
+                .collect();
+            for k in keys {
+                table.remove(k).map_err(|e| WeaveflowError::Database {
+                    operation: "delete_routine_events remove",
+                    source: Box::new(e.into()),
+                })?;
+            }
+        }
+        txn.commit().map_err(|e| WeaveflowError::Database {
+            operation: "delete_routine_events commit",
+            source: Box::new(e.into()),
+        })?;
+        Ok(())
     }
 
     // ── Task ────────────────────────────────────────────────────────────
@@ -582,13 +833,13 @@ impl Database {
         self.create_task_with_source(pipeline_name, inputs, result_ttl_secs, None)
     }
 
-    /// 创建新 Task 并记录触发来源（"manual" 或 "trigger:<name>"）。
+    /// 创建新 Task 并记录触发来源（"manual" 或 "routine:<name>"）。
     pub fn create_task_with_source(
         &self,
         pipeline_name: &str,
         inputs: serde_json::Value,
         result_ttl_secs: i64,
-        trigger_source: Option<String>,
+        routine_source: Option<String>,
     ) -> WeaveflowResult<TaskId> {
         debug!(pipeline = %pipeline_name, "create_task");
         let task_id = TaskId::new();
@@ -599,7 +850,7 @@ impl Database {
             result_ttl_secs,
             inputs,
             status: crate::tracker::meta::TASK_STATUS_RUNNING.to_string(),
-            trigger_source,
+            routine_source,
         };
         let g = self.db.read().unwrap_or_else(|e| e.into_inner());
         let txn = g.begin_write().map_err(|e| WeaveflowError::Database {
@@ -1686,7 +1937,7 @@ output: "{s.output}"
             result_ttl_secs: 3600,
             inputs: serde_json::json!({}),
             status: crate::tracker::meta::TASK_STATUS_RUNNING.to_string(),
-            trigger_source: None,
+            routine_source: None,
         };
         let mut task_json = serde_json::to_value(&meta).expect("task json");
         // v0 TaskMeta 可能没有 status 字段（serde default 应兜底为 "unknown"）

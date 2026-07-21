@@ -8,7 +8,7 @@ use crate::store::object::ObjectDigest;
 use crate::store::object::ObjectValue;
 use crate::tracker::snapshot::{Snapshot, SnapshotKey};
 use crate::tracker::{PipelineId, TaskId, TaskMeta};
-use crate::trigger::TriggerRow;
+use crate::routine::{RoutineEventRecord, RoutineRow};
 use uuid::Uuid;
 
 // ── TaskId（UUID v4，定长 16 字节） ───────────────────────────────────
@@ -416,9 +416,9 @@ pub const CACHE: TableDefinition<CacheKey, ObjectDigest> = TableDefinition::new(
 pub(crate) const SNAPSHOT_HEADER: TableDefinition<SnapshotKey, SnapshotHeader> =
     TableDefinition::new("snapshot");
 
-impl RedbValue for TriggerRow {
+impl RedbValue for RoutineRow {
     type SelfType<'a>
-        = TriggerRow
+        = RoutineRow
     where
         Self: 'a;
     type AsBytes<'a>
@@ -432,20 +432,112 @@ impl RedbValue for TriggerRow {
     where
         Self: 'a,
     {
-        serde_json::from_slice(data).expect("反序列化 TriggerRow 失败")
+        serde_json::from_slice(data).expect("反序列化 RoutineRow 失败")
     }
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
         Self: 'b,
     {
-        serde_json::to_vec(value).expect("序列化 TriggerRow 失败")
+        serde_json::to_vec(value).expect("序列化 RoutineRow 失败")
     }
     fn type_name() -> TypeName {
-        TypeName::new("weaveflow::TriggerRow::v1")
+        TypeName::new("weaveflow::RoutineRow::v1")
     }
 }
 
-pub const TRIGGER: TableDefinition<&str, TriggerRow> = TableDefinition::new("trigger");
+pub const ROUTINE: TableDefinition<&str, RoutineRow> = TableDefinition::new("routine");
+
+impl RedbValue for RoutineEventRecord {
+    type SelfType<'a>
+        = RoutineEventRecord
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        serde_json::from_slice(data).expect("反序列化 RoutineEventRecord 失败")
+    }
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        serde_json::to_vec(value).expect("序列化 RoutineEventRecord 失败")
+    }
+    fn type_name() -> TypeName {
+        TypeName::new("weaveflow::RoutineEventRecord::v1")
+    }
+}
+
+/// routine_event 表 key：[name_len u32 BE][name bytes][seq u64 BE]，
+/// 字节序比较即 (routine, seq) 字典序 —— 同一 routine 的事件连续且按 seq 排序。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventKey {
+    pub routine: String,
+    pub seq: u64,
+}
+
+impl RedbValue for EventKey {
+    type SelfType<'a>
+        = EventKey
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        let name_len = u32::from_be_bytes(data[..4].try_into().expect("EventKey: 需要 4 字节长度前缀"))
+            as usize;
+        let name_end = 4 + name_len;
+        let name =
+            String::from_utf8(data[4..name_end].to_vec()).expect("EventKey: routine 名不是 UTF-8");
+        let seq = u64::from_be_bytes(
+            data[name_end..name_end + 8]
+                .try_into()
+                .expect("EventKey: 需要 8 字节 seq"),
+        );
+        EventKey {
+            routine: name,
+            seq,
+        }
+    }
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        let mut buf = Vec::with_capacity(12 + value.routine.len());
+        buf.extend_from_slice(&(value.routine.len() as u32).to_be_bytes());
+        buf.extend_from_slice(value.routine.as_bytes());
+        buf.extend_from_slice(&value.seq.to_be_bytes());
+        buf
+    }
+    fn type_name() -> TypeName {
+        TypeName::new("weaveflow::EventKey")
+    }
+}
+
+impl RedbKey for EventKey {
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        data1.cmp(data2)
+    }
+}
+
+pub const ROUTINE_EVENT: TableDefinition<EventKey, RoutineEventRecord> =
+    TableDefinition::new("routine_event");
 
 // ── v0 schema（自动迁移用）：类型名不带 ::vN 后缀 ─────────────────────
 // v0 行的序列化格式同为 serde_json，这里以 Value 暂存，由迁移代码做字段兼容处理。
@@ -490,6 +582,8 @@ v0_value!(V0PipelineDef, "weaveflow::PipelineDef");
 v0_value!(V0TaskMeta, "weaveflow::TaskMeta");
 v0_value!(V1PipelineDef, "weaveflow::PipelineDef::v1");
 v0_value!(V1TaskMeta, "weaveflow::TaskMeta::v1");
+// 2.0 之前的 trigger 表行（serde_json 格式；RoutineRow 是其超集，缺失字段有 default）。
+v0_value!(LegacyTriggerRowJson, "weaveflow::TriggerRow::v1");
 
 pub(crate) const V0_PIPELINE: TableDefinition<PipelineId, V0PipelineDef> =
     TableDefinition::new("pipeline");
@@ -497,6 +591,8 @@ pub(crate) const V0_TASK: TableDefinition<TaskId, V0TaskMeta> = TableDefinition:
 pub(crate) const V1_PIPELINE: TableDefinition<PipelineId, V1PipelineDef> =
     TableDefinition::new("pipeline");
 pub(crate) const V1_TASK: TableDefinition<TaskId, V1TaskMeta> = TableDefinition::new("task");
+pub(crate) const LEGACY_TRIGGER: TableDefinition<&str, LegacyTriggerRowJson> =
+    TableDefinition::new("trigger");
 
 #[cfg(test)]
 mod tests {

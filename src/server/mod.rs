@@ -1,3 +1,3 @@
 pub mod daemon;
 pub mod logging;
-pub mod trigger;
+pub mod routine;

@@ -153,9 +153,9 @@ enum Commands {
     #[command(subcommand)]
     Pipeline(PipelineCmd),
 
-    /// Manage triggers (compose-style orchestration over pipelines)
+    /// Manage routines (long-lived duties delegated to the daemon)
     #[command(subcommand)]
-    Trigger(TriggerCmd),
+    Routine(RoutineCmd),
 
     /// Run a pipeline
     Run {
@@ -238,26 +238,33 @@ enum PipelineCmd {
 }
 
 #[derive(Subcommand)]
-enum TriggerCmd {
-    /// Create or update a trigger from a TOML file (idempotent upsert)
+enum RoutineCmd {
+    /// Create or update a routine from a TOML file (idempotent upsert)
     Apply {
         /// TOML file path
         #[arg(short = 'f', long = "file")]
         file: String,
     },
-    /// List all triggers with runtime state (alias: list)
+    /// List all routines with runtime state (alias: list)
     #[command(alias = "list")]
     Ls,
-    /// Show trigger definition and runtime state
+    /// Show routine definition and runtime state
     Inspect { name: String },
-    /// Delete a trigger and stop its worker
+    /// Delete a routine and stop its worker
     Delete { name: String },
-    /// Push elements into a stream trigger's buffer (JSON array or single value)
+    /// Push elements into a stream routine buffer (JSON array or single value)
     Push {
         name: String,
         /// JSON string literal (array or single value)
         #[arg(short = 'd', long = "data")]
         data: String,
+    },
+    /// Read the routine's event inbox (incremental: pass --after <seq> to resume)
+    Events {
+        name: String,
+        /// Only return events with seq > N (agent checkpoint resumption)
+        #[arg(long, default_value = "0")]
+        after: u64,
     },
 }
 
@@ -377,7 +384,7 @@ async fn main() {
     let talks_to_daemon = matches!(
         cli.command,
         Commands::Pipeline(_)
-            | Commands::Trigger(_)
+            | Commands::Routine(_)
             | Commands::Run { .. }
             | Commands::Task(_)
             | Commands::System(_)
@@ -414,20 +421,23 @@ async fn main() {
         Commands::Pipeline(PipelineCmd::Delete { name }) => {
             exit_on_err(cli::client::pipeline_delete(&cfg, &name).await);
         }
-        Commands::Trigger(TriggerCmd::Apply { file }) => {
-            exit_on_err(cli::client::trigger_apply(&cfg, &file).await);
+        Commands::Routine(RoutineCmd::Apply { file }) => {
+            exit_on_err(cli::client::routine_apply(&cfg, &file).await);
         }
-        Commands::Trigger(TriggerCmd::Ls) => {
-            exit_on_err(cli::client::trigger_ls(&cfg).await);
+        Commands::Routine(RoutineCmd::Ls) => {
+            exit_on_err(cli::client::routine_ls(&cfg).await);
         }
-        Commands::Trigger(TriggerCmd::Inspect { name }) => {
-            exit_on_err(cli::client::trigger_inspect(&cfg, &name).await);
+        Commands::Routine(RoutineCmd::Inspect { name }) => {
+            exit_on_err(cli::client::routine_inspect(&cfg, &name).await);
         }
-        Commands::Trigger(TriggerCmd::Delete { name }) => {
-            exit_on_err(cli::client::trigger_delete(&cfg, &name).await);
+        Commands::Routine(RoutineCmd::Delete { name }) => {
+            exit_on_err(cli::client::routine_delete(&cfg, &name).await);
         }
-        Commands::Trigger(TriggerCmd::Push { name, data }) => {
-            exit_on_err(cli::client::trigger_push(&cfg, &name, &data).await);
+        Commands::Routine(RoutineCmd::Push { name, data }) => {
+            exit_on_err(cli::client::routine_push(&cfg, &name, &data).await);
+        }
+        Commands::Routine(RoutineCmd::Events { name, after }) => {
+            exit_on_err(cli::client::routine_events(&cfg, &name, after).await);
         }
         Commands::Run {
             name,

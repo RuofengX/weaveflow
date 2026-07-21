@@ -49,7 +49,7 @@ pub(crate) struct AppState {
     /// 运行中的后台 pipeline 任务数。
     pub(crate) in_flight: Arc<AtomicUsize>,
     pub(crate) drain_notify: Arc<tokio::sync::Notify>,
-    pub(crate) trigger_mgr: Arc<super::trigger::TriggerManager>,
+    pub(crate) routine_mgr: Arc<super::routine::RoutineManager>,
 }
 
 #[derive(Deserialize)]
@@ -215,9 +215,9 @@ pub(crate) struct SubmitOutcome {
     pub(crate) snapshot: TaskSnapshot,
 }
 
-/// 统一任务提交路径：HTTP /runs 与 trigger worker 共用。
+/// 统一任务提交路径：HTTP /runs 与 routine worker 共用。
 /// 自带 in_flight/draining 协议（先占计数再复查，watcher 无条件回收）。
-/// `source` 记录到 TaskMeta.trigger_source（"manual" 或 "trigger:<name>"）。
+/// `source` 记录到 TaskMeta.routine_source（"manual" 或 "routine:<name>"）。
 pub(crate) async fn submit_run(
     state: &Arc<AppState>,
     pipeline_name: &str,
@@ -303,6 +303,9 @@ pub(crate) async fn submit_run(
                     Ok(_) => tracing::info!(task_id = %tid, "pipeline run completed"),
                     Err(e) => tracing::error!(task_id = %tid, error = %e, "pipeline run failed"),
                 }
+                // routine 来源的 task：终态事件入收件箱 + 可选 webhook（幂等——
+                // 非 routine 来源直接返回）。
+                super::routine::on_task_terminal(&state_clone, &tid).await;
             }
             Err(_) => {
                 state_clone
@@ -315,6 +318,7 @@ pub(crate) async fn submit_run(
                 {
                     tracing::warn!(task_id = %tid, error = %e, "set_task_status(failed) failed");
                 }
+                super::routine::on_task_terminal(&state_clone, &tid).await;
             }
         }
     });
@@ -352,6 +356,7 @@ pub(crate) async fn submit_run(
                     {
                         tracing::warn!(task_id = %tid, error = %db_err, "set_task_status(failed) after panic failed");
                     }
+                    super::routine::on_task_terminal(&state_watcher, &tid).await;
                 }
             }
         }
@@ -677,15 +682,19 @@ pub(crate) fn build_app(state: Arc<AppState>) -> Router {
         .route("/runs/:task_id/snapshots", get(list_snapshots))
         .route("/runs/:task_id/snapshots/:seq", get(get_snapshot_by_seq))
         .route("/prune", post(prune_tasks))
-        .route("/triggers", get(super::trigger::list_triggers))
+        .route("/routines", get(super::routine::list_routines))
         .route(
-            "/triggers/:name",
-            axum::routing::put(super::trigger::upsert_trigger)
-                .get(super::trigger::get_trigger)
-                .delete(super::trigger::delete_trigger),
+            "/routines/:name",
+            axum::routing::put(super::routine::upsert_routine)
+                .get(super::routine::get_routine)
+                .delete(super::routine::delete_routine),
         )
-        .route("/triggers/:name/push", post(super::trigger::push_trigger))
-        .route("/triggers/:name/ws", get(super::trigger::ws_trigger))
+        .route("/routines/:name/push", post(super::routine::push_routine))
+        .route("/routines/:name/ws", get(super::routine::ws_routine))
+        .route(
+            "/routines/:name/events",
+            get(super::routine::list_routine_events),
+        )
         .route("/system/operators", get(list_operators))
         .route("/system/logs", get(get_logs))
         .route("/system/version", get(system_version))
@@ -763,11 +772,11 @@ pub async fn serve(cfg: ServeConfig) {
         draining: Arc::new(AtomicBool::new(false)),
         in_flight: Arc::new(AtomicUsize::new(0)),
         drain_notify: Arc::new(tokio::sync::Notify::new()),
-        trigger_mgr: Arc::new(super::trigger::TriggerManager::new()),
+        routine_mgr: Arc::new(super::routine::RoutineManager::new()),
     });
 
-    // 从 redb 恢复全部 trigger worker（cron 调度 + stream 缓冲）。
-    super::trigger::start_all(&state);
+    // 从 redb 恢复全部 routine worker（cron 调度 + stream 缓冲）。
+    super::routine::start_all(&state);
 
     {
         let tracker = state.tracker.clone();
@@ -1173,7 +1182,7 @@ mod tests {
             draining: Arc::new(AtomicBool::new(false)),
             in_flight: Arc::new(AtomicUsize::new(0)),
             drain_notify: Arc::new(tokio::sync::Notify::new()),
-            trigger_mgr: Arc::new(crate::server::trigger::TriggerManager::new()),
+            routine_mgr: Arc::new(crate::server::routine::RoutineManager::new()),
         })
     }
 

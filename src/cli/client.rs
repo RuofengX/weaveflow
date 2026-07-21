@@ -142,7 +142,7 @@ pub async fn pipeline_delete(cfg: &CliConfig, name: &str) -> Result<(), String> 
     Ok(())
 }
 
-// ── Trigger ─────────────────────────────────────────────────────────────
+// ── Routine ─────────────────────────────────────────────────────────────
 
 async fn put(cfg: &CliConfig, path: &str, body: Value) -> Result<Value, String> {
     let url = api_url(&cfg.daemon, path);
@@ -156,25 +156,25 @@ async fn put(cfg: &CliConfig, path: &str, body: Value) -> Result<Value, String> 
     parse_response(resp, &url).await
 }
 
-/// trigger apply：本地解析 TOML（业务侧载体）→ 校验 → PUT JSON 到 daemon。
+/// routine apply：本地解析 TOML（业务侧载体）→ 校验 → PUT JSON 到 daemon。
 /// daemon 只接收 JSON，从不接触 TOML。
-pub async fn trigger_apply(cfg: &CliConfig, file: &str) -> Result<(), String> {
+pub async fn routine_apply(cfg: &CliConfig, file: &str) -> Result<(), String> {
     let src = std::fs::read_to_string(file).map_err(|e| format!("读取文件 {file}: {e}"))?;
-    let def: weaveflow::trigger::TriggerDef =
+    let def: weaveflow::routine::RoutineDef =
         toml::from_str(&src).map_err(|e| format!("TOML 解析失败 ({file}): {e}"))?;
-    let errors = weaveflow::trigger::validate_trigger(&def);
+    let errors = weaveflow::routine::validate_routine(&def);
     if !errors.is_empty() {
-        return Err(format!("trigger 校验失败:\n  {}", errors.join("\n  ")));
+        return Err(format!("routine 校验失败:\n  {}", errors.join("\n  ")));
     }
     let name = def.name.clone();
-    let body = serde_json::to_value(&def).map_err(|e| format!("序列化 trigger 失败: {e}"))?;
-    let result = put(cfg, &format!("/triggers/{}", encode_segment(&name)), body).await?;
+    let body = serde_json::to_value(&def).map_err(|e| format!("序列化 routine 失败: {e}"))?;
+    let result = put(cfg, &format!("/routines/{}", encode_segment(&name)), body).await?;
     cfg.print_json(&result);
     Ok(())
 }
 
-pub async fn trigger_ls(cfg: &CliConfig) -> Result<(), String> {
-    let result = get(cfg, "/triggers").await?;
+pub async fn routine_ls(cfg: &CliConfig) -> Result<(), String> {
+    let result = get(cfg, "/routines").await?;
     if cfg.is_json() {
         cfg.print_json(&result);
         return Ok(());
@@ -195,24 +195,34 @@ pub async fn trigger_ls(cfg: &CliConfig) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn trigger_inspect(cfg: &CliConfig, name: &str) -> Result<(), String> {
-    let result = get(cfg, &format!("/triggers/{}", encode_segment(name))).await?;
+pub async fn routine_inspect(cfg: &CliConfig, name: &str) -> Result<(), String> {
+    let result = get(cfg, &format!("/routines/{}", encode_segment(name))).await?;
     cfg.print_json(&result);
     Ok(())
 }
 
-pub async fn trigger_delete(cfg: &CliConfig, name: &str) -> Result<(), String> {
-    let result = delete(cfg, &format!("/triggers/{}", encode_segment(name))).await?;
+pub async fn routine_delete(cfg: &CliConfig, name: &str) -> Result<(), String> {
+    let result = delete(cfg, &format!("/routines/{}", encode_segment(name))).await?;
     cfg.print_json(&result);
     Ok(())
 }
 
-pub async fn trigger_push(cfg: &CliConfig, name: &str, data: &str) -> Result<(), String> {
+pub async fn routine_push(cfg: &CliConfig, name: &str, data: &str) -> Result<(), String> {
     let value: Value = serde_json::from_str(data).map_err(|e| format!("解析 JSON 失败: {e}"))?;
     let result = post(
         cfg,
-        &format!("/triggers/{}/push", encode_segment(name)),
+        &format!("/routines/{}/push", encode_segment(name)),
         value,
+    )
+    .await?;
+    cfg.print_json(&result);
+    Ok(())
+}
+
+pub async fn routine_events(cfg: &CliConfig, name: &str, after: u64) -> Result<(), String> {
+    let result = get(
+        cfg,
+        &format!("/routines/{}/events?after={after}", encode_segment(name)),
     )
     .await?;
     cfg.print_json(&result);

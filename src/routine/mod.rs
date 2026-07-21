@@ -1,7 +1,8 @@
-//! Trigger（触发器）：daemon 层的 pipeline 编排资源。
+//! Routine（例程）：智能体委托给 daemon 的长驻任务岗。
 //!
-//! 定位类似 docker-compose 之于 docker：trigger 引用已注册的 pipeline，
-//! 把「定时」与「流式微批」两类触发转化为普通的 pipeline run。
+//! 定位：智能体把「反复做/盯着做」的事注册为 routine —— 引用已注册的
+//! pipeline，把「定时」与「流式微批」两类触发转化为普通的 pipeline run，
+//! 任务终态后通过持久化事件收件箱（+ 可选 webhook）反馈给委托方。
 //! 本模块只包含纯数据类型与校验/调度计算，不含任何运行时组件
 //! （worker、HTTP handler 在 server 层）。daemon 只接收 JSON 配置；
 //! TOML/YAML 等文件格式是 CLI 侧的本地实现细节。
@@ -19,16 +20,16 @@ use crate::tracker::TaskId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum TriggerType {
+pub enum RoutineType {
     Stream,
     Cron,
 }
 
-impl std::fmt::Display for TriggerType {
+impl std::fmt::Display for RoutineType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TriggerType::Stream => write!(f, "stream"),
-            TriggerType::Cron => write!(f, "cron"),
+            RoutineType::Stream => write!(f, "stream"),
+            RoutineType::Cron => write!(f, "cron"),
         }
     }
 }
@@ -55,7 +56,7 @@ pub struct StreamConfig {
     /// 距上一条元素到达超过该时长即 flush（"5s"；缺省 = 不按时间 flush）。
     #[serde(default)]
     pub flush_interval: Option<String>,
-    /// 该 trigger 最多同时运行多少个微批 task。
+    /// 该 routine 最多同时运行多少个微批 task。
     #[serde(default = "default_max_in_flight")]
     pub max_in_flight: u32,
     /// 微批数组写入的 slot 名。
@@ -109,27 +110,77 @@ pub struct CronConfig {
     pub inputs: HashMap<String, Value>,
 }
 
-/// 触发器定义（daemon API 的 JSON 载体；CLI 侧可由 TOML 反序列化得到）。
+/// 反馈配置：routine 产生的 task 到达终态（或触发失败/丢弃）时如何通知委托方。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TriggerDef {
+pub struct NotifyDef {
+    /// 终态事件 POST 到该 URL（可选；走共享加固 HTTP client，SSRF 检查同样生效）。
+    /// 面向「智能体值班」范式：harness 类软件接收 webhook 后唤醒对应智能体。
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    /// 事件载荷 output_preview 的最大字节数。
+    #[serde(default = "default_preview_bytes")]
+    pub preview_bytes: u32,
+}
+
+fn default_preview_bytes() -> u32 {
+    2048
+}
+
+/// 事件载荷 output_preview 字节数上限（防止把大结果塞进事件/ webhook）。
+pub const MAX_PREVIEW_BYTES: u32 = 64 * 1024;
+
+/// Routine 定义（daemon API 的 JSON 载体；CLI 侧可由 TOML 反序列化得到）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutineDef {
     pub name: String,
     /// 引用的已注册 pipeline 名（PUT 时校验存在，之后为弱引用）。
     pub pipeline: String,
     #[serde(rename = "type")]
-    pub trigger_type: TriggerType,
+    pub routine_type: RoutineType,
     #[serde(default)]
     pub stream: Option<StreamConfig>,
     #[serde(default)]
     pub cron: Option<CronConfig>,
+    /// 终态反馈配置；缺省 = 仅写入持久化事件收件箱，不主动推送。
+    #[serde(default)]
+    pub notify: Option<NotifyDef>,
 }
 
-// ── 持久化行（配置 + 运行时状态） ────────────────────────────────────────
+// ── 事件收件箱 ──────────────────────────────────────────────────────────
 
-/// redb trigger 表的一行：定义 + 跨重启保留的运行时状态。
+/// routine 事件（持久化到 redb routine_event 表，同时经内存 broadcast 推送 WS）。
+///
+/// 面向「智能体值班」范式：智能体注册 routine 后无需长连接守候，
+/// 下次会话用 `GET /routines/:name/events?after=<seq>` 增量回查历史；
+/// 配了 notify.webhook_url 的 routine 还会主动 POST 终态事件唤醒 harness。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TriggerRow {
-    pub def: TriggerDef,
+pub struct RoutineEventRecord {
+    /// 每个 routine 内单调递增的序号（重启不重复，由 RoutineRow.event_seq 分配）。
+    pub seq: u64,
+    pub routine: String,
+    /// fired（产生 task）/ failed（提交失败）/ dropped（draining 或缓冲满丢弃）/
+    /// task_completed / task_failed / notify_failed（webhook 投递失败）
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// 终态事件附带的 pipeline 最终输出截断预览（字节数由 notify.preview_bytes 控制）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<Value>,
+    pub at: DateTime<Utc>,
+}
+
+/// 每个 routine 收件箱最多保留的事件条数（超出即删最旧）。
+pub const EVENT_INBOX_CAP: u64 = 100;
+
+// ── 持久化行（配置 + 运行时状态） ────────────────────────────────────────
+/// redb routine 表的一行：定义 + 跨重启保留的运行时状态。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutineRow {
+    pub def: RoutineDef,
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub last_fired_at: Option<DateTime<Utc>>,
@@ -142,12 +193,15 @@ pub struct TriggerRow {
     /// 近期触发产生的 task_id（新在前，上限 RECENT_TASKS_CAP 条）。
     #[serde(default)]
     pub recent_tasks: Vec<String>,
+    /// 事件收件箱的单调递增序号分配器（持久化，重启不重复）。
+    #[serde(default)]
+    pub event_seq: u64,
 }
 
 pub const RECENT_TASKS_CAP: usize = 20;
 
-impl TriggerRow {
-    pub fn new(def: TriggerDef) -> Self {
+impl RoutineRow {
+    pub fn new(def: RoutineDef) -> Self {
         Self {
             def,
             created_at: Utc::now(),
@@ -156,6 +210,7 @@ impl TriggerRow {
             total_fired: 0,
             total_failed: 0,
             recent_tasks: Vec::new(),
+            event_seq: 0,
         }
     }
 
@@ -216,17 +271,29 @@ impl CronConfig {
 
 // ── 校验 ────────────────────────────────────────────────────────────────
 
-/// 校验 trigger 定义。错误为 "[code] message" 格式字符串（与 daemon 校验风格一致）。
-pub fn validate_trigger(def: &TriggerDef) -> Vec<String> {
+/// 校验 routine 定义。错误为 "[code] message" 格式字符串（与 daemon 校验风格一致）。
+pub fn validate_routine(def: &RoutineDef) -> Vec<String> {
     let mut errors = Vec::new();
     if def.name.trim().is_empty() {
-        errors.push("[invalid_name] trigger name 不能为空".to_string());
+        errors.push("[invalid_name] routine name 不能为空".to_string());
     }
     if def.pipeline.trim().is_empty() {
         errors.push("[invalid_pipeline] pipeline 不能为空".to_string());
     }
-    match def.trigger_type {
-        TriggerType::Stream => {
+    if let Some(n) = &def.notify {
+        if let Some(url) = &n.webhook_url
+            && !(url.starts_with("http://") || url.starts_with("https://"))
+        {
+            errors.push("[invalid_webhook_url] webhook_url 必须是 http(s) URL".to_string());
+        }
+        if n.preview_bytes == 0 || n.preview_bytes > MAX_PREVIEW_BYTES {
+            errors.push(format!(
+                "[invalid_preview_bytes] preview_bytes 必须在 1..={MAX_PREVIEW_BYTES} 之间"
+            ));
+        }
+    }
+    match def.routine_type {
+        RoutineType::Stream => {
             if def.cron.is_some() {
                 errors
                     .push("[section_mismatch] type 为 stream 时不允许出现 cron 配置段".to_string());
@@ -259,7 +326,7 @@ pub fn validate_trigger(def: &TriggerDef) -> Vec<String> {
                 }
             }
         }
-        TriggerType::Cron => {
+        RoutineType::Cron => {
             if def.stream.is_some() {
                 errors
                     .push("[section_mismatch] type 为 cron 时不允许出现 stream 配置段".to_string());
@@ -333,8 +400,8 @@ pub fn next_fire_after(
 
 /// 判断启动（或重新加载）时是否存在错过的触发点。
 /// 存在时返回错过的触发时间（最近一次）。
-pub fn missed_fire(row: &TriggerRow, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let TriggerType::Cron = row.def.trigger_type else {
+pub fn missed_fire(row: &RoutineRow, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let RoutineType::Cron = row.def.routine_type else {
         return None;
     };
     let c = row.def.cron.as_ref()?;
@@ -358,21 +425,22 @@ pub fn missed_fire(row: &TriggerRow, now: DateTime<Utc>) -> Option<DateTime<Utc>
 mod tests {
     use super::*;
 
-    fn stream_def() -> TriggerDef {
-        TriggerDef {
+    fn stream_def() -> RoutineDef {
+        RoutineDef {
             name: "s".into(),
             pipeline: "p".into(),
-            trigger_type: TriggerType::Stream,
+            routine_type: RoutineType::Stream,
             stream: Some(StreamConfig::default()),
             cron: None,
+            notify: None,
         }
     }
 
-    fn cron_def() -> TriggerDef {
-        TriggerDef {
+    fn cron_def() -> RoutineDef {
+        RoutineDef {
             name: "c".into(),
             pipeline: "p".into(),
-            trigger_type: TriggerType::Cron,
+            routine_type: RoutineType::Cron,
             stream: None,
             cron: Some(CronConfig {
                 schedule: None,
@@ -380,13 +448,57 @@ mod tests {
                 misfire: MisfirePolicy::Skip,
                 inputs: HashMap::new(),
             }),
+            notify: None,
         }
     }
 
     #[test]
+    fn validate_notify_rules() {
+        let mut d = stream_def();
+        d.notify = Some(NotifyDef {
+            webhook_url: Some("https://harness.local/hook".into()),
+            preview_bytes: 2048,
+        });
+        assert!(validate_routine(&d).is_empty());
+
+        let mut d = stream_def();
+        d.notify = Some(NotifyDef {
+            webhook_url: Some("ftp://x".into()),
+            preview_bytes: 2048,
+        });
+        assert!(
+            validate_routine(&d)
+                .iter()
+                .any(|e| e.contains("invalid_webhook_url"))
+        );
+
+        let mut d = stream_def();
+        d.notify = Some(NotifyDef {
+            webhook_url: None,
+            preview_bytes: 0,
+        });
+        assert!(
+            validate_routine(&d)
+                .iter()
+                .any(|e| e.contains("invalid_preview_bytes"))
+        );
+
+        let mut d = stream_def();
+        d.notify = Some(NotifyDef {
+            webhook_url: None,
+            preview_bytes: MAX_PREVIEW_BYTES + 1,
+        });
+        assert!(
+            validate_routine(&d)
+                .iter()
+                .any(|e| e.contains("invalid_preview_bytes"))
+        );
+    }
+
+    #[test]
     fn validate_accepts_minimal_defs() {
-        assert!(validate_trigger(&stream_def()).is_empty());
-        assert!(validate_trigger(&cron_def()).is_empty());
+        assert!(validate_routine(&stream_def()).is_empty());
+        assert!(validate_routine(&cron_def()).is_empty());
     }
 
     #[test]
@@ -394,7 +506,7 @@ mod tests {
         let mut d = stream_def();
         d.cron = Some(CronConfig::default());
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("section_mismatch"))
         );
@@ -402,7 +514,7 @@ mod tests {
         let mut d = stream_def();
         d.stream = None;
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("section_mismatch"))
         );
@@ -410,7 +522,7 @@ mod tests {
         let mut d = cron_def();
         d.stream = Some(StreamConfig::default());
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("section_mismatch"))
         );
@@ -421,7 +533,7 @@ mod tests {
         let mut d = stream_def();
         d.stream.as_mut().unwrap().batch_size = 0;
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("invalid_batch_size"))
         );
@@ -429,7 +541,7 @@ mod tests {
         let mut d = stream_def();
         d.stream.as_mut().unwrap().max_in_flight = 0;
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("invalid_max_in_flight"))
         );
@@ -437,7 +549,7 @@ mod tests {
         let mut d = stream_def();
         d.stream.as_mut().unwrap().buffer_cap = 1; // < batch_size(100)
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("invalid_buffer_cap"))
         );
@@ -445,7 +557,7 @@ mod tests {
         let mut d = stream_def();
         d.stream.as_mut().unwrap().flush_interval = Some("0s".into());
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("invalid_flush_interval"))
         );
@@ -453,14 +565,14 @@ mod tests {
         let mut d = stream_def();
         d.stream.as_mut().unwrap().flush_interval = Some("abc".into());
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("invalid_flush_interval"))
         );
 
         let mut d = stream_def();
         d.stream.as_mut().unwrap().flush_interval = Some("5s".into());
-        assert!(validate_trigger(&d).is_empty());
+        assert!(validate_routine(&d).is_empty());
     }
 
     #[test]
@@ -468,13 +580,13 @@ mod tests {
         let mut d = cron_def();
         d.cron.as_mut().unwrap().schedule = Some("0 3 * * *".into());
         d.cron.as_mut().unwrap().interval = None;
-        assert!(validate_trigger(&d).is_empty());
+        assert!(validate_routine(&d).is_empty());
 
         let mut d = cron_def();
         d.cron.as_mut().unwrap().schedule = Some("0 3 * * *".into());
         // schedule + interval 同时存在
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("invalid_schedule"))
         );
@@ -483,7 +595,7 @@ mod tests {
         d.cron.as_mut().unwrap().interval = None;
         // 两者都缺
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("invalid_schedule"))
         );
@@ -492,7 +604,7 @@ mod tests {
         d.cron.as_mut().unwrap().interval = None;
         d.cron.as_mut().unwrap().schedule = Some("not a cron".into());
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("invalid_schedule"))
         );
@@ -500,7 +612,7 @@ mod tests {
         let mut d = cron_def();
         d.cron.as_mut().unwrap().interval = Some("500ms".into());
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("invalid_interval"))
         );
@@ -511,14 +623,14 @@ mod tests {
         let mut d = stream_def();
         d.name = "  ".into();
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("invalid_name"))
         );
         let mut d = stream_def();
         d.pipeline = String::new();
         assert!(
-            validate_trigger(&d)
+            validate_routine(&d)
                 .iter()
                 .any(|e| e.contains("invalid_pipeline"))
         );
@@ -574,7 +686,7 @@ mod tests {
 
     #[test]
     fn missed_fire_detects_overdue_interval() {
-        let mut row = TriggerRow::new(cron_def());
+        let mut row = RoutineRow::new(cron_def());
         // created_at 是 now，interval 5m → 此刻不应有 missed
         assert!(missed_fire(&row, Utc::now()).is_none());
         // 模拟 created_at 在 10 分钟前
@@ -587,13 +699,13 @@ mod tests {
 
     #[test]
     fn missed_fire_none_for_stream() {
-        let row = TriggerRow::new(stream_def());
+        let row = RoutineRow::new(stream_def());
         assert!(missed_fire(&row, Utc::now()).is_none());
     }
 
     #[test]
-    fn trigger_row_recent_tasks_capped() {
-        let mut row = TriggerRow::new(stream_def());
+    fn routine_row_recent_tasks_capped() {
+        let mut row = RoutineRow::new(stream_def());
         for _ in 0..30 {
             row.record_fired(Utc::now(), &TaskId::new());
         }
@@ -605,11 +717,11 @@ mod tests {
     fn def_json_roundtrip_and_unknown_fields_rejected() {
         let d = stream_def();
         let json = serde_json::to_string(&d).unwrap();
-        let back: TriggerDef = serde_json::from_str(&json).unwrap();
+        let back: RoutineDef = serde_json::from_str(&json).unwrap();
         assert_eq!(d, back);
 
         let with_unknown = r#"{"name":"x","pipeline":"p","type":"stream","nope":1}"#;
-        assert!(serde_json::from_str::<TriggerDef>(with_unknown).is_err());
+        assert!(serde_json::from_str::<RoutineDef>(with_unknown).is_err());
     }
 
     #[test]
@@ -624,9 +736,9 @@ batch_size = 50
 flush_interval = "5s"
 max_in_flight = 2
 "#;
-        let d: TriggerDef = toml::from_str(toml_src).unwrap();
+        let d: RoutineDef = toml::from_str(toml_src).unwrap();
         assert_eq!(d.name, "ingest");
-        assert!(validate_trigger(&d).is_empty());
+        assert!(validate_routine(&d).is_empty());
         let s = d.stream.unwrap();
         assert_eq!(s.batch_size, 50);
         assert_eq!(
@@ -646,8 +758,8 @@ misfire = "catch_up"
 [cron.inputs]
 date = "latest"
 "#;
-        let d: TriggerDef = toml::from_str(toml_cron).unwrap();
-        assert!(validate_trigger(&d).is_empty());
+        let d: RoutineDef = toml::from_str(toml_cron).unwrap();
+        assert!(validate_routine(&d).is_empty());
         let c = d.cron.unwrap();
         assert_eq!(c.misfire, MisfirePolicy::CatchUp);
         assert_eq!(c.inputs.get("date").unwrap(), &serde_json::json!("latest"));
