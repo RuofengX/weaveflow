@@ -56,7 +56,7 @@ output: "{adults.output}"
 ```
 
 - **steps 组成 DAG**：`{step_id.output}` 引用即依赖，同层并行执行
-- **iterate**：数组逐元素并行展开（`over: "{...}"`，元素注入 inputs 的 `data` 键）
+- **iterate**：数组逐元素并行展开（`over: "{...}"`，当前元素绑定 `as` 名，`{item...}` 在 inputs 任意字段解析）
 - **retry / timeout_sec / cache**：step 根级声明，逐次尝试生效
 - **12 个内置算子**：http / js / filter / sort / dedup / merge / base64 / noop / var / file / command / llm
 - **js 算子**：`inputs.code` 内联 QuickJS 沙箱，无 fs/net，`timeout_sec` 可真中断死循环

@@ -132,6 +132,7 @@ steps:
       as: "item"
     inputs:
       mode: "encode"
+      data: "{item}"
 output: "{p.output}"
 "#;
 

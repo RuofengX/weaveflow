@@ -73,7 +73,7 @@ GET /runs/:task_id/snapshots/:seq           → 任意 step 的输出
 |----|---------|
 | 引用没包整串 | `url: "{slots.u}"` 整串才是引用；`"prefix {slots.u}"` 是字面量 |
 | 给纯 String 字段写引用 | `method`/`field`/`operator`/`mode`/`shell`/`model` 永远字面量，不支持 `{...}` |
-| iterate 取元素 | 元素固定注入 inputs 的 `data` 键；`as` 的名字**不会绑定**，`{item}` 是字面量 |
+| iterate 取元素 | 当前元素绑定 `as` 名：`{item}` / `{item.field}` 在 inputs 任意字段解析 |
 | iterate `over` 没花括号 | `over: "{slots.items}"`，少了 `{}` 直接解析错误 |
 | js 死循环 | js/command/http step 一律配 `timeout_sec`，引擎没有兜底超时 |
 | 拼错 YAML key | 所有字段 deny_unknown_fields——报错信息会指出非法 key，照改即可 |

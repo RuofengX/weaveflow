@@ -1,5 +1,4 @@
-// noop_output: 顶层 op 信封处理 — noop（无 inputs）输出不被 {"type":"noop"} 污染；
-// iterate 场景注入的 "data" 必须存活
+// noop_output: 顶层 op 信封处理 — noop（无 inputs）输出不被 {"type":"noop"} 污染
 
 #[path = "common/mod.rs"]
 mod common;
@@ -21,7 +20,9 @@ output: "{n.output}"
 }
 
 #[test]
-fn iterate_noop_output_contains_injected_data() {
+fn iterate_noop_output_is_empty_object_per_chunk() {
+    // noop 没有 inputs 字段，iterate 不再注入 "data" 键：
+    // 每个 chunk 的 inputs 都是 {}，输出数组逐元素为 {}。
     let yaml = r#"
 name: noop_iterate
 slots:
@@ -40,5 +41,5 @@ output: "{n.output}"
     let mut slots = HashMap::new();
     slots.insert("items".into(), json!([1, 2]));
     let result = run_yaml(yaml, slots).expect("run");
-    assert_eq!(result, json!([{ "data": 1 }, { "data": 2 }]));
+    assert_eq!(result, json!([{}, {}]));
 }

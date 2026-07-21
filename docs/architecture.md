@@ -49,7 +49,7 @@ graph TB
       ├─ 查缓存（SHA256(op_type + ":" + inputs_json)；iterate 混入 over 数组）
       ├─ 算子执行（retry 包裹每次尝试；timeout_sec 包裹算子 future）
       │    iterate：按 over 数组切 chunk，每 chunk 独立 retry+timeout，
-      │    当前元素固定注入 inputs["data"]
+      │    当前元素绑定 as 名（{item...} 在 inputs 任意字段逐 chunk 解析）
       ├─ save_snapshot（Snapshot v2 → SNAPSHOT 表）
       ├─ scope.set_output(step_id, Arc<Value>)
       └─ tracker 更新（Running/Iterating/Completed/Failed → WS 广播）

@@ -134,6 +134,22 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
             let op_val = serde_json::to_value(&step.op).unwrap_or(Value::Null);
             let as_name = step.iterate.as_ref().map(|c| c.as_name.as_str());
             check_ref_in_json(&op_val, &all_step_ids, &step.id, as_name, &mut report);
+
+            // iterate 步骤的 inputs 没有引用 as_name → 元素不会被任何算子字段消费，
+            // 每个 chunk 的 inputs 完全相同，iterate 失去意义（防呆提示，不阻断）。
+            if let Some(ref cfg) = step.iterate
+                && !refs_in_json(&op_val)
+                    .iter()
+                    .any(|(prefix, _)| prefix == &cfg.as_name)
+            {
+                report.warnings.push(ValidationWarning {
+                    code: "iterate_element_unused".into(),
+                    message: format!(
+                        "步骤 {} 的 inputs 未引用 iterate.as（{}），当前元素不会被消费",
+                        step.id, cfg.as_name
+                    ),
+                });
+            }
         }
         check_iterate_config(step.iterate.as_ref(), &step.id, &all_step_ids, &mut report);
         if let Some(ref retry) = step.retry {
@@ -1259,7 +1275,7 @@ mod tests {
 
     #[test]
     fn iterate_as_name_ref_passthrough_allowed() {
-        // {item.xxx}（item 为本步骤 iterate.as）在运行时透传为字面量，
+        // {item.xxx}（item 为本步骤 iterate.as）在运行时绑定当前元素，
         // validator 不得误报 variable_ref_not_found。
         let mut def = valid_def();
         def.steps[0].iterate = Some(IterateConfig {
@@ -1278,6 +1294,40 @@ mod tests {
                 .iter()
                 .any(|e| e.code == "variable_ref_not_found"),
             "as_name ref must not be flagged: {:?}",
+            report.errors
+        );
+        // 引用了 as_name → 不触发"元素未消费"warning
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.code == "iterate_element_unused"),
+            "warnings: {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn iterate_without_as_ref_warns_element_unused() {
+        let mut def = valid_def();
+        def.steps[0].iterate = Some(IterateConfig {
+            over: VariablePath::parse("{slots.url}").unwrap(),
+            as_name: "item".into(),
+            max_workers: None,
+            batch: None,
+        });
+        let report = validate(&def);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.code == "iterate_element_unused"),
+            "warnings: {:?}",
+            report.warnings
+        );
+        assert!(
+            report.is_ok(),
+            "warning must not block: {:?}",
             report.errors
         );
     }

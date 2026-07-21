@@ -103,16 +103,18 @@ step 通用字段：`id` `type` `inputs` `after: [step_a]`（纯顺序依赖）`
   type: js
   iterate:
     over: "{slots.items}"    # 必须带花括号，指向数组
-    as: "item"               # 必填但名字不绑定（见下）
+    as: "item"               # 元素变量名，{item...} 在 inputs 任意字段解析
     max_workers: 4           # 缺省 = CPU 核数
   timeout_sec: 30            # 每个元素独立计时/重试
   inputs:
+    data: "{item}"           # 当前元素绑定 as 名，js 从 data 读
     code: |
       function run(data) { return data * 2; }
 ```
 
-- 当前元素固定注入 inputs 的 **`data` 键**；`as` 声明的名字**不会绑定**，`{item}` 是字面量。
-- `batch: {size: 100}` 时按批切分，每批（数组）注入 `data`。
+- 当前元素绑定 `as` 声明的名字：`{item}` / `{item.field}` / `{item.0.x}` 在 inputs 的**任意字段**真实解析（`prompt: "{item}"`、`url: "{item.endpoint}"` 都可以）。
+- `batch: {size: 100}` 时按批切分，`{item}` 是该批元素组成的数组。
+- 缓存粒度是整个 step（key 混入解析后的 over 数组），命中返回整个聚合数组。
 
 ### 算子速查（12 种）
 
@@ -159,7 +161,7 @@ step 通用字段：`id` `type` `inputs` `after: [step_a]`（纯顺序依赖）`
 | 引用不生效 | 只有整串 `"{...}"` 才是引用；`method`/`field`/`operator` 等纯 String 字段永远字面量 |
 | `variable_ref_not_found` | 引用的 step_id / slot 不存在，或写在纯 String 字段里 |
 | `cycle_detected` | `{step.output}` 引用构成环；纯顺序依赖改用 `after` |
-| iterate 不生效 / 解析错 | `over` 必须带花括号；元素从 `data` 键取，不是 `{item}` |
+| iterate 不生效 / 解析错 | `over` 必须带花括号；元素用 `{item}` 引用（`item` = `as` 名），如 `data: "{item}"` |
 | 任务一直 Running | step 没配 `timeout_sec`；给 js/command/http/llm 加超时 |
 | 结果/任务消失 | `storage.result_ttl` 过期被 prune（默认 3600s）；`weaveflow task ls` 确认 |
 | `/runs` 返回 503 | daemon 正在 draining（收到停止信号），等排空结束或重启 |

@@ -54,8 +54,11 @@ src/
 │   ├── types.rs          Operator trait, OperatorSpec { iterate, cache }, OperatorError
 │   └── builtin/          12 builtin operators + http_client shared hardened client
 ├── vm/                  # Variable resolution & scope
-│   ├── scope.rs          Scope (HashMap<StepId, Arc<Value>> + env redact set, poison-tolerant Mutex)
-│   └── resolver.rs       resolve_value_tree — recursive RefValue::Ref → Value from scope
+│   ├── scope.rs          Scope (Arc<HashMap<StepId, Arc<Value>>> — O(1) clone, Arc::make_mut
+│   │                     copy-on-write in set_output; env redact set behind poison-tolerant Mutex)
+│   └── resolver.rs       resolve_value_tree — recursive RefValue::Ref → Value from scope;
+│                         Locals overlay binds iterate's as_name per chunk; drill_down shared
+│                         by slots / step-output / locals paths (strict array indices)
 ├── tracker/             # In-memory runtime state + WS broadcast
 │   ├── tracker.rs        TaskTracker (HashMap<TaskId, RunState> + broadcast) — snapshot_and_subscribe atomic
 │   ├── state.rs          StepState, TaskStatus state machines
@@ -85,11 +88,11 @@ src/
 | Input model | Pipeline-level `slots` (placeholders), step-level `inputs` (per-operator typed structs) |
 | Raw → Pipeline conversion | `raw.rs` uses `Raw*Inputs` structs with plain types (no RefValue); `From<RawStepOp> for StepOp` explicitly converts `"{...}"` strings to `RefValue::Ref` |
 | Unknown YAML fields | `#[serde(deny_unknown_fields)]` on all Raw structs — misspelled keys are parse errors |
-| Scope | HashMap<StepId, Arc<Value>> — O(1) get/set, clone = refcount inc; env secret set behind poison-tolerant Mutex |
+| Scope | Arc<HashMap<StepId, Arc<Value>>> — O(1) clone, Arc::make_mut copy-on-write in set_output; env secret set behind poison-tolerant Mutex |
 | Storage | redb — all values inline, no external spill files; schema versioned via `::vN` type names; v0 DBs auto-migrate (`.v0.bak` backup, PIPELINE/TASK kept, SNAPSHOT/OBJECT/CACHE dropped) |
 | Snapshot encoding | Custom binary v2: `seq(8B BE) \| step_id_len(4B BE) \| step_id \| output` (type name `weaveflow::Snapshot::v2`); `SnapshotHeader` view lists/counts without copying output |
-| Cache | `SHA256(op_type + ":" + inputs_json)`; iterate steps mix the resolved `over` array into the key |
-| Variables | `{slots.name}` / `{env.KEY}` / `{step_id.output}` / `{step_id.output.field}` / `{step_id.output.0.field}` (array indices supported, strict) |
+| Cache | `SHA256(op_type + ":" + inputs_json)`; iterate steps mix the resolved `over` array into the key (whole-step granularity either way) |
+| Variables | `{slots.name}` / `{env.KEY}` / `{step_id.output}` / `{step_id.output.field}` / `{step_id.output.0.field}` (array indices supported, strict); iterate steps additionally bind `{as_name...}` per chunk |
 | Concurrency | DAG layer `join_all` + iterate chunk `join_all` (default workers = `available_parallelism`) + rayon inside operators |
 | Daemon concurrency | `--max-concurrent-tasks` flag or `WEAVEFLOW_MAX_CONCURRENT_TASKS` env (default unlimited), semaphore in daemon.rs; permit acquired inside the background task |
 | Shutdown | Graceful drain: on signal, `/runs` → 503 and in-flight tasks drain up to `--shutdown-drain` (default 30s); `daemon stop --timeout` (default 35s) then SIGKILL |
@@ -211,12 +214,12 @@ Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field
 
 ## Resolver
 
-`resolve_value_tree` (vm/resolver.rs) resolves `RefValue::Ref` → Value from scope and merges everything into one `Value::Object` — no data/config split. Path semantics: `{step}` or `{step.output}` = whole step output; `{step.output.field}` = field drill-down; `{step.output.0.name}` = array index (non-numeric segment on an array or out-of-bounds index is a **hard error**). Missing object fields / segments on non-objects resolve to `Null` with a `warn!` log. `slots` paths follow the same rules (array indices supported and strict since 2026-07-20; missing object keys → `Null`).
+`resolve_value_tree` (vm/resolver.rs) resolves `RefValue::Ref` → Value from scope and merges everything into one `Value::Object` — no data/config split. Path semantics: `{step}` or `{step.output}` = whole step output; `{step.output.field}` = field drill-down; `{step.output.0.name}` = array index (non-numeric segment on an array or out-of-bounds index is a **hard error**). Missing object fields / segments on non-objects resolve to `Null` with a `warn!` log. `slots` paths follow the same rules (array indices supported and strict since 2026-07-20; missing object keys → `Null`). Iterate steps resolve per chunk with a `Locals = (as_name, element)` overlay: a ref whose first segment equals `as_name` drills into the current element via the shared `drill_down` helper (same strict-index/Null rules); with no locals (cache-key material path) as_name refs stay `"{item}"` placeholder literals.
 
 ## Engine behavior — gotchas
 
 - **iterate `over` must include braces** (`over: "{slots.items}"`) — `raw.rs` rejects anything else with `ParseError::InvalidIterateOver`.
-- **iterate `as_name` is not actually bound**: the current element is injected into inputs under the fixed key `"data"`; `{item}`/`{item.field}` refs pass through as **literal strings** (validator allows them since 2026-07-20). Write steps so the operator consumes `data` (JS, command stdin, etc.). Validator rejects `as` values that are empty, non-`[A-Za-z0-9_]`, `slots`/`env`, or colliding with a step id.
+- **iterate `as_name` is bound per chunk**: each chunk resolves inputs with `locals = (as_name, element)` — `{item}`/`{item.field}`/`{item.0.x}` are real refs in ANY operator field (drill-down shared with slots/step-output paths; array indices strict, missing fields → `Null`). There is no `"data"` auto-injection; js/filter/sort/dedup steps must write `data: "{item}"` explicitly. The resolver's no-locals path keeps as_name refs as `"{item}"` placeholder literals — used only for the iterate cache-key material. Validator rejects `as` values that are empty, non-`[A-Za-z0-9_]`, `slots`/`env`, or colliding with a step id, and warns (`iterate_element_unused`) when an iterate step never references its `as` name.
 - **iterate steps are retried per element** (`retry_with_op` wraps each chunk), not as a whole.
 - **iterate cache key includes the resolved `over` array** — same inputs with different `over` data do not collide.
 - Step timeout (`timeout_sec`) applies to every attempt of every iterate chunk; it cancels the operator future (for JS, the drop-guard interrupts the blocking thread).

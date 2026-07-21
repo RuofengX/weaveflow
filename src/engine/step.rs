@@ -31,6 +31,8 @@ pub async fn execute_step(
     tracker: &TaskTracker,
 ) -> Result<(Value, u32, bool), (WeaveflowError, u32)> {
     // 1. 解析输入：将 scope 中的 slots、env、上游输出填入 step 的 inputs 占位符。
+    //    iterate 步骤此处仅用于缓存 key 材料（无 locals，as_name 引用保持占位符
+    //    字面量）；真正的逐 chunk 解析在 execute_iterate 内进行。
     let inputs = resolve_inputs(scope, step).map_err(|e| (e, 0))?;
     trace!(step = %step.id, op = %step.op.op_type(), "inputs resolved");
 
@@ -38,7 +40,8 @@ pub async fn execute_step(
     let op: Box<dyn Operator> = resolve_operator(step).map_err(|e| (e, 0))?;
     let cache_enabled = step.cache.unwrap_or(op.spec().cache);
 
-    // 3. 计算内容寻址缓存 key；iterate 步骤将解析后的 over 数组混入 key，
+    // 3. 计算内容寻址缓存 key（粒度 = 整个 step，与是否配置 iterate 无关）；
+    //    iterate 步骤将解析后的 over 数组混入 key，
     //    避免相同 inputs 配不同 over 数据命中同一缓存。
     let cache_key = if let Some(cfg) = step.iterate.as_ref() {
         let over = resolve_ref(scope, &cfg.over).map_err(|e| (e, 0))?;
@@ -57,7 +60,7 @@ pub async fn execute_step(
     }
     debug!(step = %step.id, op = %step.op.op_type(), "cache miss");
 
-    // 4. Iterate 路径：展开输入数组，分批执行，聚合结果。
+    // 4. Iterate 路径：展开输入数组，逐 chunk 绑定 as_name 解析 inputs，聚合结果。
     if let Some(cfg) = step.iterate.as_ref() {
         info!(
             step = %step.id,
@@ -66,8 +69,7 @@ pub async fn execute_step(
             batched = cfg.batch.is_some(),
             "dispatching iterate",
         );
-        let (result, attempts) =
-            execute_iterate(scope, step, &inputs, cfg, task_id, tracker).await?;
+        let (result, attempts) = execute_iterate(scope, step, cfg, task_id, tracker).await?;
 
         if cache_enabled {
             if let Err(e) = db.set_cache_bytes(&cache_key, &result) {

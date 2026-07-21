@@ -10,7 +10,9 @@ const MIN_REDACT_LEN: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct Scope {
-    outputs: HashMap<StepId, Arc<Value>>,
+    // Arc + make_mut 写时复制：clone 只 bump 引用计数（O(1)），
+    // set_output 在独占时原地修改，共享时才复制 HashMap。
+    outputs: Arc<HashMap<StepId, Arc<Value>>>,
     slots: Arc<Value>,
     env_values: Arc<Mutex<HashSet<String>>>,
 }
@@ -19,7 +21,7 @@ impl Scope {
     pub fn new(slots: HashMap<String, Value>) -> Self {
         let value = Value::Object(slots.into_iter().collect());
         Self {
-            outputs: HashMap::new(),
+            outputs: Arc::new(HashMap::new()),
             slots: Arc::new(value),
             env_values: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -54,7 +56,7 @@ impl Scope {
 
     pub fn set_output(&mut self, step_id: &StepId, value: Value) {
         debug!(step = %step_id, "scope set_output");
-        self.outputs.insert(step_id.clone(), Arc::new(value));
+        Arc::make_mut(&mut self.outputs).insert(step_id.clone(), Arc::new(value));
     }
 }
 

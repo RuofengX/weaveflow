@@ -7,19 +7,24 @@ use crate::dsl::{StepId, VariablePath};
 use crate::error::{WeaveflowError, WeaveflowResult};
 use crate::vm::Scope;
 
+/// iterate 逐 chunk 解析时的元素绑定：`(as_name, 当前元素)`。
+/// 命中 `{as_name...}` 前缀的引用从元素钻取，等同于把元素注入 op 级 scope 根。
+pub type Locals<'a> = Option<(&'a str, &'a Value)>;
+
 pub fn resolve_inputs(scope: &Scope, step: &crate::dsl::StepDef) -> WeaveflowResult<Value> {
     let as_name = step.iterate.as_ref().map(|c| c.as_name.as_str());
 
     let op_value = serde_json::to_value(&step.op)
         .map_err(|e| WeaveflowError::Internal(format!("step op serialize: {e}")))?;
 
-    resolve_value_tree(scope, &op_value, as_name, true, false)
+    resolve_value_tree(scope, &op_value, as_name, None, true, false)
 }
 
 pub fn resolve_value_tree(
     scope: &Scope,
     val: &Value,
     as_name: Option<&str>,
+    locals: Locals<'_>,
     is_top: bool,
     in_literal: bool,
 ) -> WeaveflowResult<Value> {
@@ -32,6 +37,16 @@ pub fn resolve_value_tree(
                         if let Some(as_name) = as_name
                             && path.parts.first().map(|p| p.as_str()) == Some(as_name)
                         {
+                            if let Some((name, element)) = locals
+                                && name == as_name
+                            {
+                                return drill_down(
+                                    element,
+                                    &path.parts[1..],
+                                    &path.parts.join("."),
+                                );
+                            }
+                            // 无 locals（缓存 key 材料等场景）：as_name 引用保持占位符字面量
                             return Ok(Value::String(format!("{{{}}}", path.parts.join("."))));
                         }
                         let value = resolve_ref(scope, &path)?;
@@ -39,17 +54,17 @@ pub fn resolve_value_tree(
                     }
                     // 用户数据恰好是单键 "Ref" 对象但不是合法引用标签：
                     // 按普通对象递归（与 validator/dag 的回退行为一致）。
-                    _ => resolve_plain_map(scope, map, as_name, in_literal),
+                    _ => resolve_plain_map(scope, map, as_name, locals, in_literal),
                 }
             } else if !in_literal && map.len() == 1 && map.contains_key("Literal") {
                 // RefValue::Literal 序列化标签只出现在算子字段位置；
                 // Literal 负载内部的单键 "Literal" 对象一律视为用户数据。
-                resolve_value_tree(scope, &map["Literal"], as_name, false, true)
+                resolve_value_tree(scope, &map["Literal"], as_name, locals, false, true)
             } else if is_top {
                 // 顶层 op 信封：有 "inputs" 键取其值；否则（如 noop）移除 "type"
-                // 键后以剩余 map 作为 inputs，iterate 注入的 "data" 得以存活。
+                // 键后以剩余 map 作为 inputs。
                 if let Some(inputs_val) = map.get("inputs") {
-                    resolve_value_tree(scope, inputs_val, as_name, false, in_literal)
+                    resolve_value_tree(scope, inputs_val, as_name, locals, false, in_literal)
                 } else {
                     let mut resolved_map = serde_json::Map::new();
                     for (k, v) in map {
@@ -58,19 +73,19 @@ pub fn resolve_value_tree(
                         }
                         resolved_map.insert(
                             k.clone(),
-                            resolve_value_tree(scope, v, as_name, false, in_literal)?,
+                            resolve_value_tree(scope, v, as_name, locals, false, in_literal)?,
                         );
                     }
                     Ok(Value::Object(resolved_map))
                 }
             } else {
-                resolve_plain_map(scope, map, as_name, in_literal)
+                resolve_plain_map(scope, map, as_name, locals, in_literal)
             }
         }
         Value::Array(arr) => {
             let resolved: Vec<Value> = arr
                 .iter()
-                .map(|v| resolve_value_tree(scope, v, as_name, false, in_literal))
+                .map(|v| resolve_value_tree(scope, v, as_name, locals, false, in_literal))
                 .collect::<Result<_, _>>()?;
             Ok(Value::Array(resolved))
         }
@@ -82,16 +97,60 @@ fn resolve_plain_map(
     scope: &Scope,
     map: &serde_json::Map<String, Value>,
     as_name: Option<&str>,
+    locals: Locals<'_>,
     in_literal: bool,
 ) -> WeaveflowResult<Value> {
     let mut resolved_map = serde_json::Map::new();
     for (k, v) in map {
         resolved_map.insert(
             k.clone(),
-            resolve_value_tree(scope, v, as_name, false, in_literal)?,
+            resolve_value_tree(scope, v, as_name, locals, false, in_literal)?,
         );
     }
     Ok(Value::Object(resolved_map))
+}
+
+/// 从 root 按路径段钻取：数组索引严格（非数字/越界 → 硬错误），
+/// 对象缺字段 / 非对象上取段 → Null + warn。slots / step output / locals 三处共用。
+fn drill_down(root: &Value, parts: &[String], path_display: &str) -> WeaveflowResult<Value> {
+    let mut current = root;
+    for part in parts {
+        match current {
+            Value::Array(arr) => {
+                let idx = part.parse::<usize>().map_err(|_| {
+                    WeaveflowError::Internal(format!(
+                        "ref path {path_display} segment '{part}' is not a valid array index"
+                    ))
+                })?;
+                current = arr.get(idx).ok_or_else(|| {
+                    WeaveflowError::Internal(format!(
+                        "ref path {path_display} array index {idx} out of bounds (len {})",
+                        arr.len()
+                    ))
+                })?;
+            }
+            Value::Object(map) => match map.get(part) {
+                Some(v) => current = v,
+                None => {
+                    warn!(
+                        ref_path = %path_display,
+                        missing_part = %part,
+                        "ref path field not found, using Null"
+                    );
+                    return Ok(Value::Null);
+                }
+            },
+            _ => {
+                warn!(
+                    ref_path = %path_display,
+                    missing_part = %part,
+                    "ref path segment on non-object, using Null"
+                );
+                return Ok(Value::Null);
+            }
+        }
+    }
+    Ok(current.clone())
 }
 
 pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveflowResult<Arc<Value>> {
@@ -102,51 +161,12 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveflowResult<Arc<Va
     match path.parts[0].as_str() {
         "slots" => {
             let slots_val = scope.slots();
-            let mut current = &*slots_val;
-            for part in &path.parts[1..] {
-                match current {
-                    Value::Array(arr) => {
-                        // 与 step output 分支一致：数组索引严格，越界/非数字 → 硬错误
-                        let idx = part.parse::<usize>().map_err(|_| {
-                            WeaveflowError::Internal(format!(
-                                "slot ref path {} segment '{part}' is not a valid array index",
-                                path.parts.join(".")
-                            ))
-                        })?;
-                        current = arr.get(idx).ok_or_else(|| {
-                            WeaveflowError::Internal(format!(
-                                "slot ref path {} array index {idx} out of bounds (len {})",
-                                path.parts.join("."),
-                                arr.len()
-                            ))
-                        })?;
-                    }
-                    Value::Object(map) => match map.get(part) {
-                        Some(v) => current = v,
-                        None => {
-                            warn!(
-                                ref_path = %path.parts.join("."),
-                                missing_part = %part,
-                                "slot ref path not found, using Null"
-                            );
-                            return Ok(Arc::new(Value::Null));
-                        }
-                    },
-                    _ => {
-                        warn!(
-                            ref_path = %path.parts.join("."),
-                            missing_part = %part,
-                            "slot ref path segment on non-object, using Null"
-                        );
-                        return Ok(Arc::new(Value::Null));
-                    }
-                }
-            }
+            let value = drill_down(&slots_val, &path.parts[1..], &path.parts.join("."))?;
             debug!(
                 ref_path = %path.parts.join("."),
                 "resolved slot ref"
             );
-            Ok(Arc::new(current.clone()))
+            Ok(Arc::new(value))
         }
         "env" => {
             let val = if path.parts.len() >= 2 {
@@ -166,52 +186,13 @@ pub fn resolve_ref(scope: &Scope, path: &VariablePath) -> WeaveflowResult<Arc<Va
             if path.parts.len() == 1 || (path.parts.len() == 2 && path.parts[1] == "output") {
                 Ok(value)
             } else {
-                let mut current = &*value;
                 let start = if path.parts.len() >= 2 && path.parts[1] == "output" {
                     2
                 } else {
                     1
                 };
-                for part in &path.parts[start..] {
-                    match current {
-                        Value::Array(arr) => {
-                            // 数组索引保持严格：非数字/负数/越界 → 硬错误
-                            let idx = part.parse::<usize>().map_err(|_| {
-                                WeaveflowError::Internal(format!(
-                                    "ref path {} segment '{part}' is not a valid array index",
-                                    path.parts.join(".")
-                                ))
-                            })?;
-                            current = arr.get(idx).ok_or_else(|| {
-                                WeaveflowError::Internal(format!(
-                                    "ref path {} array index {idx} out of bounds (len {})",
-                                    path.parts.join("."),
-                                    arr.len()
-                                ))
-                            })?;
-                        }
-                        Value::Object(map) => match map.get(part) {
-                            Some(v) => current = v,
-                            None => {
-                                warn!(
-                                    ref_path = %path.parts.join("."),
-                                    missing_part = %part,
-                                    "ref path field not found, using Null"
-                                );
-                                return Ok(Arc::new(Value::Null));
-                            }
-                        },
-                        _ => {
-                            warn!(
-                                ref_path = %path.parts.join("."),
-                                missing_part = %part,
-                                "ref path segment on non-object, using Null"
-                            );
-                            return Ok(Arc::new(Value::Null));
-                        }
-                    }
-                }
-                Ok(Arc::new(current.clone()))
+                let drilled = drill_down(&value, &path.parts[start..], &path.parts.join("."))?;
+                Ok(Arc::new(drilled))
             }
         }
     }
@@ -263,7 +244,7 @@ mod tests {
         // 必须按普通数据透传，而不是硬错误。
         let scope = scope_with_step(serde_json::json!({}));
         let input = serde_json::json!({ "body": { "Ref": 123 } });
-        let out = resolve_value_tree(&scope, &input, None, false, false).unwrap();
+        let out = resolve_value_tree(&scope, &input, None, None, false, false).unwrap();
         assert_eq!(out, serde_json::json!({ "body": { "Ref": 123 } }));
     }
 
@@ -274,7 +255,7 @@ mod tests {
         let input = serde_json::json!({
             "Literal": { "payload": { "Literal": 5 } }
         });
-        let out = resolve_value_tree(&scope, &input, None, false, false).unwrap();
+        let out = resolve_value_tree(&scope, &input, None, None, false, false).unwrap();
         assert_eq!(out, serde_json::json!({ "payload": { "Literal": 5 } }));
     }
 
@@ -311,5 +292,64 @@ mod tests {
         let path = VariablePath::parse("{s.output.missing}").unwrap();
         let value = resolve_ref(&scope, &path).expect("missing field resolves to Null");
         assert_eq!(*value, Value::Null);
+    }
+
+    #[test]
+    fn locals_whole_element_resolves() {
+        let scope = scope_with_step(serde_json::json!({}));
+        let element = serde_json::json!({"id": 7});
+        let input = serde_json::json!({"Ref": {"parts": ["item"]}});
+        let out = resolve_value_tree(
+            &scope,
+            &input,
+            Some("item"),
+            Some(("item", &element)),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(out, element);
+    }
+
+    #[test]
+    fn locals_field_drill_down_resolves() {
+        let scope = scope_with_step(serde_json::json!({}));
+        let element = serde_json::json!({"user": {"name": "ann"}});
+        let input = serde_json::json!({"Ref": {"parts": ["item", "user", "name"]}});
+        let out = resolve_value_tree(
+            &scope,
+            &input,
+            Some("item"),
+            Some(("item", &element)),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(out, serde_json::json!("ann"));
+    }
+
+    #[test]
+    fn locals_array_index_strict() {
+        let scope = scope_with_step(serde_json::json!({}));
+        let element = serde_json::json!([1, 2]);
+        let input = serde_json::json!({"Ref": {"parts": ["item", "5"]}});
+        let result = resolve_value_tree(
+            &scope,
+            &input,
+            Some("item"),
+            Some(("item", &element)),
+            false,
+            false,
+        );
+        assert!(result.is_err(), "out-of-bounds locals index must error");
+    }
+
+    #[test]
+    fn locals_absent_as_ref_stays_literal_placeholder() {
+        // 无 locals（缓存 key 材料路径）：as_name 引用透传为 "{...}" 字面量。
+        let scope = scope_with_step(serde_json::json!({}));
+        let input = serde_json::json!({"Ref": {"parts": ["item", "id"]}});
+        let out = resolve_value_tree(&scope, &input, Some("item"), None, false, false).unwrap();
+        assert_eq!(out, serde_json::json!("{item.id}"));
     }
 }

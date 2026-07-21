@@ -10,7 +10,7 @@ use crate::error::WeaveflowError;
 use crate::operator::Operator;
 use crate::tracker::{IterateProgress, StepState, TaskId, TaskTracker};
 use crate::vm::Scope;
-use crate::vm::resolver::resolve_ref;
+use crate::vm::resolver::{resolve_ref, resolve_value_tree};
 
 pub fn effective_max_workers(cfg: &IterateConfig) -> usize {
     cfg.max_workers
@@ -25,7 +25,6 @@ pub fn effective_max_workers(cfg: &IterateConfig) -> usize {
 pub async fn execute_iterate(
     scope: &mut Scope,
     step: &StepDef,
-    inputs: &Value,
     cfg: &IterateConfig,
     task_id: &TaskId,
     tracker: &TaskTracker,
@@ -39,6 +38,7 @@ pub async fn execute_iterate(
         ));
     }
 
+    // over 只解析一次并持有，分派时按 chunk 取元素/切片
     let over_ref = resolve_ref(scope, &cfg.over).map_err(|e| (e, 0))?;
 
     let total_items = match &*over_ref {
@@ -80,8 +80,14 @@ pub async fn execute_iterate(
         )
         .await;
 
-    // 将 operator 解析移到循环外，避免重复分配
+    // operator 与 op 的 JSON 序列化移到循环外，每个 step 只做一次
     let op: Arc<dyn Operator> = Arc::from(resolve_operator(step).map_err(|e| (e, 0))?);
+    let op_value = serde_json::to_value(&step.op).map_err(|e| {
+        (
+            WeaveflowError::Internal(format!("step op serialize: {e}")),
+            0,
+        )
+    })?;
 
     let mut results: Vec<Value> = vec![Value::Null; total_chunks];
     let mut remaining: Vec<usize> = (0..total_chunks).collect();
@@ -96,7 +102,7 @@ pub async fn execute_iterate(
 
         for &idx in &batch {
             // 切片访问 over 数组，不克隆整个数组
-            let data = if batched {
+            let element = if batched {
                 let bs = batch_size.unwrap();
                 let start = idx * bs;
                 let end = (start + bs).min(total_items);
@@ -112,12 +118,19 @@ pub async fn execute_iterate(
                 }
             };
 
-            let op = op.clone();
-            let mut item_inputs = inputs.clone();
-            if let Value::Object(ref mut map) = item_inputs {
-                map.insert("data".to_string(), data);
-            }
+            // 逐 chunk 解析：as_name 绑定当前元素，{as_name...} 引用在任意
+            // 算子字段真实解析（等同于注入 op 级 scope 根）。
+            let item_inputs = resolve_value_tree(
+                scope,
+                &op_value,
+                Some(cfg.as_name.as_str()),
+                Some((cfg.as_name.as_str(), &element)),
+                true,
+                false,
+            )
+            .map_err(|e| (e, 0))?;
 
+            let op = op.clone();
             batch_futures.push(async move {
                 let (output, attempts) = retry_with_op(op.as_ref(), item_inputs, step)
                     .await
@@ -239,7 +252,6 @@ mod tests {
         let result = execute_iterate(
             &mut scope,
             &step,
-            &Value::Null,
             &cfg,
             &TaskId(uuid::Uuid::new_v4()),
             &tracker,
@@ -273,7 +285,6 @@ mod tests {
         let result = execute_iterate(
             &mut scope,
             &step,
-            &Value::Null,
             &cfg,
             &TaskId(uuid::Uuid::new_v4()),
             &tracker,

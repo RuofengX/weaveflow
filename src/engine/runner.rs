@@ -246,7 +246,7 @@ pub async fn run_inner(
     {
         // output 是任意 JSON + 内联 Ref 标签；in_literal=true 避免把用户数据里的
         // 单键 "Literal" 对象误当 RefValue serde 标签拆包（该约定只属于算子字段位）。
-        output_val = resolve_value_tree(&scope, &pipeline.output, None, false, true)?;
+        output_val = resolve_value_tree(&scope, &pipeline.output, None, None, false, true)?;
         final_output = serde_json::to_vec(&output_val)
             .map_err(|e| WeaveflowError::Internal(format!("output serialize: {e}")))?;
     }

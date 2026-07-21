@@ -67,7 +67,7 @@ slots:
 | `{step_id.output}` | 步骤完整输出 |
 | `{step_id.output.field}` | 步骤输出字段访问（数字段可索引数组，如 `{step.output.0.name}`；非数字/越界为硬错误） |
 
-iterate 模式注意：`as` 声明的元素变量名**当前不会被绑定**——当前元素固定注入到算子 inputs 的 `data` 键；写成 `{item}` 的引用会按字面量字符串透传，不会解析。
+iterate 模式中，`as` 声明的元素变量名会绑定当前元素：`{item}`、`{item.field}`、`{item.0.x}` 在 iterate 步骤的任意 inputs 字段真实解析（数组索引严格，缺字段 → Null），等同于把元素注入该次 op 调用的 scope 根。
 
 ## 步骤定义
 
@@ -101,27 +101,28 @@ iterate 模式注意：`as` 声明的元素变量名**当前不会被绑定**—
   type: js
   iterate:
     over: "{upstream.output}"  # 变量引用，指向数组
-    as: "item"                 # 元素变量名（见下注：当前不会绑定）
+    as: "item"                 # 元素变量名，{item...} 在 inputs 任意字段可解析
     max_workers: 4             # 缺省 → 按 CPU 核数（available_parallelism）
     batch:                     # 可选：按数组批次传给算子
       size: 100
   inputs:
+    data: "{item}"             # 当前元素（batch 模式为切片数组）
     code: |
       function run(data) { return process(data); }
-    # 当前元素（或 batch 数组）固定以 `data` 键注入 inputs，
-    # 会覆盖 inputs 中原有的 data 字段
 ```
 
 | 字段 | 说明 |
 |------|------|
 | `over` | 变量引用，指向数组（必须带花括号，如 `"{slots.items}"`） |
-| `as` | 元素变量名。**当前实现不会把该名字绑定进作用域**：元素固定注入 inputs 的 `data` 键，`{item}` 引用按字面量透传 |
+| `as` | 元素变量名。逐 chunk 绑定当前元素，`{item}` / `{item.field}` / `{item.0.x}` 在 inputs 的任意字段真实解析（仅 `[A-Za-z0-9_]`；不能是 `slots`/`env`，不能与步骤 id 冲突） |
 | `max_workers` | 并发数（缺省 = `available_parallelism`，即 CPU 核数；不允许 0，上限 1024） |
-| `batch` | 批量模式，`batch.size` 个元素打包传给算子（不允许 0） |
+| `batch` | 批量模式，`batch.size` 个元素打包为一个数组绑定给 `as`（不允许 0） |
 
-- 无 `batch`：每个元素作为裸对象注入 `data`
-- 有 `batch`：按 `size` 切分数组，每批作为数组注入 `data`
-- 重试按元素独立进行（每个 chunk 单独套 retry + timeout）
+- 无 `batch`：`{item}` = 当前元素；有 `batch`：`{item}` = `size` 个元素组成的切片数组
+- 重试按元素独立进行（每个 chunk 单独套 retry + timeout），单个元素失败不影响其他元素
+- 缓存粒度是整个 step：key = SHA256(op_type + inputs（`{item}` 保持占位符）+ 解析后的 over 数组），命中返回整个聚合数组
+- iterate 步骤的 inputs 未引用 `as` 名时 validator 给出 `iterate_element_unused` 警告（元素不会被消费）
+- 输出：各 chunk 结果按序组成的数组（batch 模式要求每个 chunk 返回数组，聚合时展平）
 
 ### 内联 JS（`type: js`）
 
