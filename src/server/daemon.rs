@@ -39,16 +39,17 @@ pub struct ServeConfig {
 
 // ── 状态 ────────────────────────────────────────────────────────────────
 
-struct AppState {
-    db: DbRef,
-    tracker: TrackerRef,
-    semaphore: Arc<tokio::sync::Semaphore>,
-    log_ring: RingWriter,
+pub(crate) struct AppState {
+    pub(crate) db: DbRef,
+    pub(crate) tracker: TrackerRef,
+    pub(crate) semaphore: Arc<tokio::sync::Semaphore>,
+    pub(crate) log_ring: RingWriter,
     /// 停机中：/runs 拒绝新任务（503）。
-    draining: Arc<AtomicBool>,
+    pub(crate) draining: Arc<AtomicBool>,
     /// 运行中的后台 pipeline 任务数。
-    in_flight: Arc<AtomicUsize>,
-    drain_notify: Arc<tokio::sync::Notify>,
+    pub(crate) in_flight: Arc<AtomicUsize>,
+    pub(crate) drain_notify: Arc<tokio::sync::Notify>,
+    pub(crate) trigger_mgr: Arc<super::trigger::TriggerManager>,
 }
 
 #[derive(Deserialize)]
@@ -191,6 +192,32 @@ async fn run_pipeline(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<Value>, WeaveflowError> {
+    tracing::info!(pipeline = %req.pipeline, "POST /runs");
+    let outcome = submit_run(&state, &req.pipeline, req.inputs.unwrap_or_default(), "manual").await?;
+    let response = serde_json::json!({
+        "task_id": outcome.task_id.to_string(),
+        "pipeline_name": outcome.pipeline_name,
+        "status": outcome.snapshot.status,
+        "layers": outcome.snapshot.layers,
+    });
+    Ok(Json(response))
+}
+
+pub(crate) struct SubmitOutcome {
+    pub(crate) task_id: TaskId,
+    pub(crate) pipeline_name: String,
+    pub(crate) snapshot: TaskSnapshot,
+}
+
+/// 统一任务提交路径：HTTP /runs 与 trigger worker 共用。
+/// 自带 in_flight/draining 协议（先占计数再复查，watcher 无条件回收）。
+/// `source` 记录到 TaskMeta.trigger_source（"manual" 或 "trigger:<name>"）。
+pub(crate) async fn submit_run(
+    state: &Arc<AppState>,
+    pipeline_name: &str,
+    inputs: HashMap<String, Value>,
+    source: &str,
+) -> Result<SubmitOutcome, WeaveflowError> {
     // 先占 in_flight 计数再复查 draining（反向顺序存在 TOCTOU：
     // 检查通过后信号触发、wait_for_drain 读到 0 返回，任务才被计入）。
     state.in_flight.fetch_add(1, Ordering::SeqCst);
@@ -200,20 +227,18 @@ async fn run_pipeline(
             "daemon 正在停机，不再接受新任务".to_string(),
         ));
     }
-    tracing::info!(pipeline = %req.pipeline, "POST /runs");
 
     // 加载 pipeline
-    let pipeline = match state.db.find_pipeline_by_name(&req.pipeline)? {
+    let pipeline = match state.db.find_pipeline_by_name(pipeline_name)? {
         Some((_pid, p)) => p,
         None => {
+            state.in_flight.fetch_sub(1, Ordering::SeqCst);
             return Err(WeaveflowError::NotFound(format!(
-                "pipeline {} not found",
-                req.pipeline
+                "pipeline {pipeline_name} not found"
             )));
         }
     };
 
-    let inputs = req.inputs.unwrap_or_default();
     tracing::info!(pipeline = %pipeline.name, input_keys = ?inputs.keys().collect::<Vec<_>>(), "run inputs resolved");
 
     // 构建用于进度展示的 DAG 层
@@ -234,10 +259,11 @@ async fn run_pipeline(
         .collect();
 
     // 在 DB 中创建任务
-    let task_id = state.db.create_task(
+    let task_id = state.db.create_task_with_source(
         &pipeline.name,
         serde_json::json!(inputs),
         result_ttl_secs(&pipeline),
+        Some(source.to_string()),
     )?;
 
     // 注册到 tracker
@@ -331,13 +357,11 @@ async fn run_pipeline(
 
     tracing::info!(task_id = %task_id, "task submitted to background runner");
 
-    let response = serde_json::json!({
-        "task_id": task_id.to_string(),
-        "pipeline_name": pipeline.name,
-        "status": snapshot.status,
-        "layers": snapshot.layers,
-    });
-    Ok(Json(response))
+    Ok(SubmitOutcome {
+        task_id,
+        pipeline_name: pipeline.name.to_string(),
+        snapshot,
+    })
 }
 
 /// 任务结果保留时长：pipeline 的 storage.result_ttl（下限 60s），缺省 3600s。
@@ -633,7 +657,7 @@ fn parse_task_id(s: &str) -> Result<TaskId, WeaveflowError> {
     Ok(TaskId(uuid))
 }
 
-fn build_app(state: Arc<AppState>) -> Router {
+pub(crate) fn build_app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/pipelines", post(create_pipeline).get(list_pipelines))
         .route(
@@ -647,6 +671,15 @@ fn build_app(state: Arc<AppState>) -> Router {
         .route("/runs/:task_id/snapshots", get(list_snapshots))
         .route("/runs/:task_id/snapshots/:seq", get(get_snapshot_by_seq))
         .route("/prune", post(prune_tasks))
+        .route("/triggers", get(super::trigger::list_triggers))
+        .route(
+            "/triggers/:name",
+            axum::routing::put(super::trigger::upsert_trigger)
+                .get(super::trigger::get_trigger)
+                .delete(super::trigger::delete_trigger),
+        )
+        .route("/triggers/:name/push", post(super::trigger::push_trigger))
+        .route("/triggers/:name/ws", get(super::trigger::ws_trigger))
         .route("/system/operators", get(list_operators))
         .route("/system/logs", get(get_logs))
         .route("/system/version", get(system_version))
@@ -724,7 +757,11 @@ pub async fn serve(cfg: ServeConfig) {
         draining: Arc::new(AtomicBool::new(false)),
         in_flight: Arc::new(AtomicUsize::new(0)),
         drain_notify: Arc::new(tokio::sync::Notify::new()),
+        trigger_mgr: Arc::new(super::trigger::TriggerManager::new()),
     });
+
+    // 从 redb 恢复全部 trigger worker（cron 调度 + stream 缓冲）。
+    super::trigger::start_all(&state);
 
     {
         let tracker = state.tracker.clone();
@@ -1130,6 +1167,7 @@ mod tests {
             draining: Arc::new(AtomicBool::new(false)),
             in_flight: Arc::new(AtomicUsize::new(0)),
             drain_notify: Arc::new(tokio::sync::Notify::new()),
+            trigger_mgr: Arc::new(crate::server::trigger::TriggerManager::new()),
         })
     }
 

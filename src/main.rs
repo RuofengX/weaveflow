@@ -153,6 +153,10 @@ enum Commands {
     #[command(subcommand)]
     Pipeline(PipelineCmd),
 
+    /// Manage triggers (compose-style orchestration over pipelines)
+    #[command(subcommand)]
+    Trigger(TriggerCmd),
+
     /// Run a pipeline
     Run {
         /// Pipeline name
@@ -231,6 +235,30 @@ enum PipelineCmd {
     Inspect { name: String },
     /// Delete a pipeline
     Delete { name: String },
+}
+
+#[derive(Subcommand)]
+enum TriggerCmd {
+    /// Create or update a trigger from a TOML file (idempotent upsert)
+    Apply {
+        /// TOML file path
+        #[arg(short = 'f', long = "file")]
+        file: String,
+    },
+    /// List all triggers with runtime state (alias: list)
+    #[command(alias = "list")]
+    Ls,
+    /// Show trigger definition and runtime state
+    Inspect { name: String },
+    /// Delete a trigger and stop its worker
+    Delete { name: String },
+    /// Push elements into a stream trigger's buffer (JSON array or single value)
+    Push {
+        name: String,
+        /// JSON string literal (array or single value)
+        #[arg(short = 'd', long = "data")]
+        data: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -349,6 +377,7 @@ async fn main() {
     let talks_to_daemon = matches!(
         cli.command,
         Commands::Pipeline(_)
+            | Commands::Trigger(_)
             | Commands::Run { .. }
             | Commands::Task(_)
             | Commands::System(_)
@@ -384,6 +413,21 @@ async fn main() {
         }
         Commands::Pipeline(PipelineCmd::Delete { name }) => {
             exit_on_err(cli::client::pipeline_delete(&cfg, &name).await);
+        }
+        Commands::Trigger(TriggerCmd::Apply { file }) => {
+            exit_on_err(cli::client::trigger_apply(&cfg, &file).await);
+        }
+        Commands::Trigger(TriggerCmd::Ls) => {
+            exit_on_err(cli::client::trigger_ls(&cfg).await);
+        }
+        Commands::Trigger(TriggerCmd::Inspect { name }) => {
+            exit_on_err(cli::client::trigger_inspect(&cfg, &name).await);
+        }
+        Commands::Trigger(TriggerCmd::Delete { name }) => {
+            exit_on_err(cli::client::trigger_delete(&cfg, &name).await);
+        }
+        Commands::Trigger(TriggerCmd::Push { name, data }) => {
+            exit_on_err(cli::client::trigger_push(&cfg, &name, &data).await);
         }
         Commands::Run {
             name,

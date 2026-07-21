@@ -8,6 +8,7 @@ use crate::store::object::ObjectDigest;
 use crate::store::object::ObjectValue;
 use crate::tracker::snapshot::{Snapshot, SnapshotKey};
 use crate::tracker::{PipelineId, TaskId, TaskMeta};
+use crate::trigger::TriggerRow;
 use uuid::Uuid;
 
 // ── TaskId（UUID v4，定长 16 字节） ───────────────────────────────────
@@ -414,6 +415,37 @@ pub const CACHE: TableDefinition<CacheKey, ObjectDigest> = TableDefinition::new(
 /// snapshot 表的 header-only 视图（与 SNAPSHOT 同表名、同类型名）。
 pub(crate) const SNAPSHOT_HEADER: TableDefinition<SnapshotKey, SnapshotHeader> =
     TableDefinition::new("snapshot");
+
+impl RedbValue for TriggerRow {
+    type SelfType<'a>
+        = TriggerRow
+    where
+        Self: 'a;
+    type AsBytes<'a>
+        = Vec<u8>
+    where
+        Self: 'a;
+    fn fixed_width() -> Option<usize> {
+        None
+    }
+    fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+    where
+        Self: 'a,
+    {
+        serde_json::from_slice(data).expect("反序列化 TriggerRow 失败")
+    }
+    fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+    where
+        Self: 'b,
+    {
+        serde_json::to_vec(value).expect("序列化 TriggerRow 失败")
+    }
+    fn type_name() -> TypeName {
+        TypeName::new("weaveflow::TriggerRow::v1")
+    }
+}
+
+pub const TRIGGER: TableDefinition<&str, TriggerRow> = TableDefinition::new("trigger");
 
 // ── v0 schema（自动迁移用）：类型名不带 ::vN 后缀 ─────────────────────
 // v0 行的序列化格式同为 serde_json，这里以 Value 暂存，由迁移代码做字段兼容处理。

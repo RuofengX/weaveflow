@@ -4,7 +4,7 @@
 
 ```bash
 cargo build                    # compile
-cargo test --lib               # 186 unit tests (no external deps)
+cargo test --lib               # 210 unit tests (no external deps)
 cargo test --test '*'          # 28 integration test binaries (51 tests) — in-process
                                # Runner + temp redb, NO daemon/binary required
                                # (see tests/common/mod.rs)
@@ -66,12 +66,18 @@ src/
 │   └── meta.rs           TaskMeta
 ├── store/               # redb embedded KV
 │   ├── mod.rs            Database facade (RwLock<redb::Database>, write lock only for compact):
-│   │                     PIPELINE/TASK/SNAPSHOT/OBJECT/CACHE tables + prune + v0 auto-migration
+│   │                     PIPELINE/TASK/SNAPSHOT/OBJECT/CACHE/TRIGGER tables + prune + v0 auto-migration
 │   ├── database.rs       redb table defs + (de)serialization helpers + SnapshotHeader view
 │   └── object.rs         ObjectDigest (SHA256) + ObjectValue (all inline, no spill files, no ref_count)
+├── trigger/             # TriggerDef/TriggerRow 纯数据类型 + 校验 + cron 调度计算（lib 层，
+│                        # CLI 与 daemon 共用；运行时 worker 在 server/trigger.rs）
 ├── quickjs/             # QuickJS sandbox (rquickjs), one Runtime per call; drop-guard interrupt
 ├── server/              # daemon side (binary-only)
 │   ├── daemon.rs         Axum HTTP server + daemon lifecycle (pidfile) + graceful drain shutdown
+│   │                     + submit_run 统一任务提交路径（HTTP /runs 与 trigger worker 共用）
+│   ├── trigger.rs        Trigger 运行时：TriggerManager（worker 注册表 + 全局事件 broadcast）、
+│   │                     cron worker（misfire 策略）/ stream worker（微批缓冲 + max_in_flight
+│   │                     信号量 + buffer_cap 背压）+ /triggers HTTP API + WS 事件流
 │   └── logging.rs        ring-buffer log store, absolute offsets (X-Log-Offset / X-Log-Truncated)
 └── cli/                 # CLI client side (binary-only)
     ├── config.rs         统一运行配置层 (CliConfig/OutputFormat/parse_duration) — CLI 参数 + WEAVEFLOW_* env 在此汇合
@@ -110,6 +116,11 @@ weaveflow pipeline apply -f <file.yml> | -d '<yaml string>'   # -f and -d are FL
 weaveflow pipeline ls              # alias: list
 weaveflow pipeline inspect <name>
 weaveflow pipeline delete <name>
+weaveflow trigger apply -f <file.toml>   # TOML（CLI 本地解析）→ PUT JSON；daemon 不接触 TOML
+weaveflow trigger ls                     # alias: list；含 total_fired/next_fire 等运行时状态
+weaveflow trigger inspect <name>
+weaveflow trigger delete <name>
+weaveflow trigger push <name> -d '[...]' # stream 型；单对象自动包一层数组
 weaveflow run <name> [-i k=v] [-i k=@file.json] [--watch|--text-output]  # mutually exclusive; task Failed → exit 1
 weaveflow check -f <file.yml>      # local validation, no daemon needed; --output json → structured report
 weaveflow task ls
@@ -242,12 +253,24 @@ Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field
 
 ## Storage (redb)
 
-- Five tables pre-created at `Database::open`; schema-versioned type names (`::v1`, Snapshot `::v2`). Opening a v0 database auto-migrates: backup to `<file>.v0.bak`, copy PIPELINE/TASK (stripping removed `snapshot_ttl`), drop SNAPSHOT/OBJECT/CACHE.
+- Six tables pre-created at `Database::open`; schema-versioned type names (`::v1`, Snapshot `::v2`). Opening a v0 database auto-migrates: backup to `<file>.v0.bak`, copy PIPELINE/TASK (stripping removed `snapshot_ttl`), drop SNAPSHOT/OBJECT/CACHE.
 - Concurrency: `RwLock<redb::Database>` inside `Database` (poison-tolerant); the write lock is taken **only** for `compact()`. No global DB Mutex.
 - Prune is two-phase (`prune_scan` read-only → `prune_execute` write txn): skips tasks in `tracker.running_task_ids()` and tasks whose status is still `running` with no snapshots; terminal tasks without snapshots ARE prunable; only deletes snapshots with seq ≤ the scan-time max_seq (snapshots written mid-prune survive), GCs unreferenced OBJECT rows and dangling CACHE entries, then compacts.
 - `save_pipeline_upsert` does the name scan + insert in a single redb write transaction (write txns are globally serialized) — concurrent same-name applies cannot double-insert.
 - `find_pipeline_by_name` is a full table scan — **intentional** (pipeline count is small).
 - `storage.result_ttl` is live: default 3600s, floor 60s, stored in `TaskMeta.result_ttl_secs`. `snapshot_ttl` no longer exists (unknown-field error).
+- `TaskMeta.trigger_source`: `Some("manual")` (HTTP /runs) or `Some("trigger:<name>")`; old rows default `None`.
+
+## Triggers（编排层，compose 式）
+
+- **daemon 只接收 JSON**：`PUT /triggers/:name` body = `TriggerDef`（serde，deny_unknown_fields）；TOML 是 CLI 侧业务载体（`trigger apply -f x.toml` 本地解析+校验后 PUT）。类型/校验/调度计算在 lib 的 `src/trigger/`，CLI 与 daemon 共用。
+- 两种类型：`stream`（push → 内存缓冲，按 `batch_size`/`flush_interval` 切微批，每批 = 一次 run，写入 `slot`）与 `cron`（`schedule` 5/6/7 段 cron 表达式或 `interval`，二选一）。
+- **统一提交路径**：`daemon.rs::submit_run`（HTTP /runs 与 worker 共用，自带 in_flight/draining 协议）；触发产生的微批是普通 task，快照/WS/TUI 观测零改动。
+- 运行时状态持久化在 TRIGGER 表（`TriggerRow`：`last_fired_at`/`next_fire_at`/`total_fired`/`total_failed`/近期 20 个 task_id）；daemon 启动时 `trigger::start_all` 从 redb 恢复 worker。
+- cron misfire：`misfire: catch_up`（补最近一次）| `skip`（默认）。interval 以 created_at 为锚点对齐，重启不漂移。
+- stream 并发闸：per-trigger `max_in_flight` 信号量（默认 4），permit 由 1s 轮询 task 终态的后台任务释放；缓冲上限 `buffer_cap`（默认 10 万元素），到顶 push → 429。缓冲纯内存，重启丢弃未 flush 数据。
+- 事件流：TriggerManager 全局 broadcast（容量 64），`/triggers/:name/ws` 按名过滤；事件 = fired/failed/dropped。
+- PUT 已存在 trigger = 热更新（停旧 worker 起新 worker，计数与近期 task 保留，stream 缓冲 flush 后重建）。
 
 ## API endpoints (daemon HTTP)
 
@@ -261,13 +284,18 @@ Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field
 | GET/DELETE | `/pipelines/:name` | Inspect/delete pipeline |
 | GET | `/tasks` | List tasks |
 | POST | `/prune` | Prune tasks (response includes `snapshots_removed`) |
+| PUT | `/triggers/:name` | Upsert trigger（JSON body = TriggerDef；幂等） |
+| GET | `/triggers` · `/triggers/:name` | Trigger 列表（含运行时状态）/ 详情（含 buffered、近期 task_id） |
+| DELETE | `/triggers/:name` | 删除并停 worker（stream worker 先 flush 剩余缓冲再退出） |
+| POST | `/triggers/:name/push` | stream 入口：JSON 数组或单值（自动包一层）；缓冲满（buffer_cap，默认 10 万）→ 429 |
+| WS | `/triggers/:name/ws` | Trigger 事件流（fired/failed/dropped；全局 broadcast 按名过滤） |
 | GET | `/system/operators` · `/system/logs` · `/system/version` | Operators / daemon ring-buffer logs (absolute `offset`, `X-Log-Offset` / `X-Log-Truncated` headers) / `{version, build_code}` (CLI warns on build_code mismatch — stale daemon detection) |
 
 Error mapping: `WeaveflowError::BadRequest`/`Parse` → 400, `NotFound` → 404, `Unavailable` (draining) → 503, other 5xx return a fixed message (no internal detail leak).
 
 ## Tests
 
-- **186 lib tests** in-module (`#[cfg(test)]`) across dsl/engine/operator/store/tracker/vm; **24 bin tests** under `src/server` + `src/cli` (not in lib).
+- **210 lib tests** in-module (`#[cfg(test)]`) across dsl/engine/operator/store/tracker/vm/trigger; **37 bin tests** under `src/server` + `src/cli` (not in lib).
 - **28 integration test binaries** (51 tests) use `tests/common/mod.rs::run_yaml` — parse → validate → in-process `Runner` with a tempfile redb. No daemon, no network, no binary.
 - Coverage highlights: cache behavior (`tests/cache_control.rs`), retry/backoff/timeout (`tests/retry.rs`, `tests/step_timeout.rs`), env redaction, array index paths, merge deep, noop envelope (`tests/noop_output.rs`), v0 DB migration, Snapshot v2 layout roundtrip, prune max_seq guard, mark_interrupted, JS syntax sandbox (incl. `while(1){}` watchdog), `effective_max_workers`, command 10MB truncation, http_client split_url/SSRF, file allowlist edge cases, `wait_for_drain`, pidfile binary verification, `encode_segment`, log absolute offsets, `snapshot_and_subscribe` atomicity, `cleanup_stale`.
 

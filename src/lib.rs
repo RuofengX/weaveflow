@@ -5,6 +5,7 @@ pub mod operator;
 pub mod quickjs;
 pub mod store;
 pub mod tracker;
+pub mod trigger;
 pub mod vm;
 
 pub use engine::dag::Dag;

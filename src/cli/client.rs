@@ -142,6 +142,80 @@ pub async fn pipeline_delete(cfg: &CliConfig, name: &str) -> Result<(), String> 
     Ok(())
 }
 
+// ── Trigger ─────────────────────────────────────────────────────────────
+
+async fn put(cfg: &CliConfig, path: &str, body: Value) -> Result<Value, String> {
+    let url = api_url(&cfg.daemon, path);
+    let resp = cfg
+        .http_client()
+        .put(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| daemon_error(&url, e))?;
+    parse_response(resp, &url).await
+}
+
+/// trigger apply：本地解析 TOML（业务侧载体）→ 校验 → PUT JSON 到 daemon。
+/// daemon 只接收 JSON，从不接触 TOML。
+pub async fn trigger_apply(cfg: &CliConfig, file: &str) -> Result<(), String> {
+    let src = std::fs::read_to_string(file).map_err(|e| format!("读取文件 {file}: {e}"))?;
+    let def: weaveflow::trigger::TriggerDef =
+        toml::from_str(&src).map_err(|e| format!("TOML 解析失败 ({file}): {e}"))?;
+    let errors = weaveflow::trigger::validate_trigger(&def);
+    if !errors.is_empty() {
+        return Err(format!("trigger 校验失败:\n  {}", errors.join("\n  ")));
+    }
+    let name = def.name.clone();
+    let body = serde_json::to_value(&def).map_err(|e| format!("序列化 trigger 失败: {e}"))?;
+    let result = put(cfg, &format!("/triggers/{}", encode_segment(&name)), body).await?;
+    cfg.print_json(&result);
+    Ok(())
+}
+
+pub async fn trigger_ls(cfg: &CliConfig) -> Result<(), String> {
+    let result = get(cfg, "/triggers").await?;
+    if cfg.is_json() {
+        cfg.print_json(&result);
+        return Ok(());
+    }
+    let list = result.as_array().ok_or("invalid response")?;
+    for t in list {
+        let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        let ty = t.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+        let pipeline = t.get("pipeline").and_then(|v| v.as_str()).unwrap_or("?");
+        let fired = t.get("total_fired").and_then(|v| v.as_u64()).unwrap_or(0);
+        let failed = t.get("total_failed").and_then(|v| v.as_u64()).unwrap_or(0);
+        let next = t.get("next_fire_at").and_then(|v| v.as_str()).unwrap_or("-");
+        println!("{name}\t{ty}\t{pipeline}\tfired={fired} failed={failed}\tnext={next}");
+    }
+    Ok(())
+}
+
+pub async fn trigger_inspect(cfg: &CliConfig, name: &str) -> Result<(), String> {
+    let result = get(cfg, &format!("/triggers/{}", encode_segment(name))).await?;
+    cfg.print_json(&result);
+    Ok(())
+}
+
+pub async fn trigger_delete(cfg: &CliConfig, name: &str) -> Result<(), String> {
+    let result = delete(cfg, &format!("/triggers/{}", encode_segment(name))).await?;
+    cfg.print_json(&result);
+    Ok(())
+}
+
+pub async fn trigger_push(cfg: &CliConfig, name: &str, data: &str) -> Result<(), String> {
+    let value: Value = serde_json::from_str(data).map_err(|e| format!("解析 JSON 失败: {e}"))?;
+    let result = post(
+        cfg,
+        &format!("/triggers/{}/push", encode_segment(name)),
+        value,
+    )
+    .await?;
+    cfg.print_json(&result);
+    Ok(())
+}
+
 // ── 运行 ──────────────────────────────────────────────────────────────────
 
 fn build_run_body(name: &str, inputs: &[(String, String)]) -> Result<Value, String> {

@@ -12,12 +12,13 @@ use tracing::debug;
 use crate::dsl::{PipelineDef, StepId};
 use crate::error::{WeaveflowError, WeaveflowResult};
 use crate::store::database::{
-    CACHE, OBJECT, PIPELINE, SNAPSHOT, SNAPSHOT_HEADER, TASK, V0_PIPELINE, V0_TASK, V1_PIPELINE,
-    V1_TASK,
+    CACHE, OBJECT, PIPELINE, SNAPSHOT, SNAPSHOT_HEADER, TASK, TRIGGER, V0_PIPELINE, V0_TASK,
+    V1_PIPELINE, V1_TASK,
 };
 use crate::tracker::meta::TASK_STATUS_RUNNING;
 use crate::tracker::snapshot::{Snapshot, SnapshotKey};
 use crate::tracker::{PipelineId, TaskId, TaskMeta};
+use crate::trigger::TriggerRow;
 
 /// weaveflow 数据层入口。封装 redb。
 #[derive(Debug)]
@@ -82,6 +83,7 @@ impl Database {
         init_table(&txn, SNAPSHOT, "init_tables snapshot")?;
         init_table(&txn, OBJECT, "init_tables object")?;
         init_table(&txn, CACHE, "init_tables cache")?;
+        init_table(&txn, TRIGGER, "init_tables trigger")?;
         txn.commit().map_err(|e| {
             OpenFailure::Other(WeaveflowError::Database {
                 operation: "init_tables commit",
@@ -392,6 +394,151 @@ impl Database {
         Ok(None)
     }
 
+    // ── Trigger ───────────────────────────────────────────────────────
+
+    /// upsert：存在则覆盖（保留 created_at/运行时状态由调用方决定——
+    /// 本函数整行写入）。
+    pub fn save_trigger(&self, row: &TriggerRow) -> WeaveflowResult<()> {
+        debug!(name = %row.def.name, "save_trigger");
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveflowError::Database {
+            operation: "save_trigger begin_write",
+            source: Box::new(e.into()),
+        })?;
+        {
+            let mut table = txn.open_table(TRIGGER).map_err(|e| WeaveflowError::Database {
+                operation: "save_trigger open_table",
+                source: Box::new(e.into()),
+            })?;
+            table
+                .insert(row.def.name.as_str(), row)
+                .map_err(|e| WeaveflowError::Database {
+                    operation: "save_trigger insert",
+                    source: Box::new(e.into()),
+                })?;
+        }
+        txn.commit().map_err(|e| WeaveflowError::Database {
+            operation: "save_trigger commit",
+            source: Box::new(e.into()),
+        })?;
+        Ok(())
+    }
+
+    pub fn load_trigger(&self, name: &str) -> WeaveflowResult<Option<TriggerRow>> {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveflowError::Database {
+            operation: "load_trigger begin_read",
+            source: Box::new(e.into()),
+        })?;
+        let table = match txn.open_table(TRIGGER) {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+        let result = match table.get(name).map_err(|e| WeaveflowError::Database {
+            operation: "load_trigger get",
+            source: Box::new(e.into()),
+        })? {
+            Some(guard) => Ok(Some(guard.value())),
+            None => Ok(None),
+        };
+        drop(table);
+        result
+    }
+
+    pub fn list_triggers(&self) -> WeaveflowResult<Vec<TriggerRow>> {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveflowError::Database {
+            operation: "list_triggers begin_read",
+            source: Box::new(e.into()),
+        })?;
+        let table = match txn.open_table(TRIGGER) {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let mut items = Vec::new();
+        for result in table.iter().map_err(|e| WeaveflowError::Database {
+            operation: "list_triggers iter",
+            source: Box::new(e.into()),
+        })? {
+            let (_, v) = result.map_err(|e| WeaveflowError::Database {
+                operation: "list_triggers read_row",
+                source: Box::new(e.into()),
+            })?;
+            items.push(v.value());
+        }
+        Ok(items)
+    }
+
+    pub fn delete_trigger(&self, name: &str) -> WeaveflowResult<bool> {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveflowError::Database {
+            operation: "delete_trigger begin_write",
+            source: Box::new(e.into()),
+        })?;
+        let removed = {
+            let mut table = txn.open_table(TRIGGER).map_err(|e| WeaveflowError::Database {
+                operation: "delete_trigger open_table",
+                source: Box::new(e.into()),
+            })?;
+            table
+                .remove(name)
+                .map_err(|e| WeaveflowError::Database {
+                    operation: "delete_trigger remove",
+                    source: Box::new(e.into()),
+                })?
+                .is_some()
+        };
+        txn.commit().map_err(|e| WeaveflowError::Database {
+            operation: "delete_trigger commit",
+            source: Box::new(e.into()),
+        })?;
+        Ok(removed)
+    }
+
+    /// 原子地修改一行 trigger 的运行时状态（读-改-写单事务）。
+    pub fn update_trigger(
+        &self,
+        name: &str,
+        f: impl FnOnce(&mut TriggerRow),
+    ) -> WeaveflowResult<bool> {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_write().map_err(|e| WeaveflowError::Database {
+            operation: "update_trigger begin_write",
+            source: Box::new(e.into()),
+        })?;
+        let updated = {
+            let mut table = txn.open_table(TRIGGER).map_err(|e| WeaveflowError::Database {
+                operation: "update_trigger open_table",
+                source: Box::new(e.into()),
+            })?;
+            let existing: Option<TriggerRow> = table
+                .get(name)
+                .map_err(|e| WeaveflowError::Database {
+                    operation: "update_trigger get",
+                    source: Box::new(e.into()),
+                })?
+                .map(|g| g.value());
+            match existing {
+                Some(mut row) => {
+                    f(&mut row);
+                    table
+                        .insert(name, &row)
+                        .map_err(|e| WeaveflowError::Database {
+                            operation: "update_trigger insert",
+                            source: Box::new(e.into()),
+                        })?;
+                    true
+                }
+                None => false,
+            }
+        };
+        txn.commit().map_err(|e| WeaveflowError::Database {
+            operation: "update_trigger commit",
+            source: Box::new(e.into()),
+        })?;
+        Ok(updated)
+    }
+
     // ── Task ────────────────────────────────────────────────────────────
 
     /// 更新 TaskMeta（由 executor 内部调用）。
@@ -426,6 +573,17 @@ impl Database {
         inputs: serde_json::Value,
         result_ttl_secs: i64,
     ) -> WeaveflowResult<TaskId> {
+        self.create_task_with_source(pipeline_name, inputs, result_ttl_secs, None)
+    }
+
+    /// 创建新 Task 并记录触发来源（"manual" 或 "trigger:<name>"）。
+    pub fn create_task_with_source(
+        &self,
+        pipeline_name: &str,
+        inputs: serde_json::Value,
+        result_ttl_secs: i64,
+        trigger_source: Option<String>,
+    ) -> WeaveflowResult<TaskId> {
         debug!(pipeline = %pipeline_name, "create_task");
         let task_id = TaskId::new();
         let meta = TaskMeta {
@@ -435,6 +593,7 @@ impl Database {
             result_ttl_secs,
             inputs,
             status: crate::tracker::meta::TASK_STATUS_RUNNING.to_string(),
+            trigger_source,
         };
         let g = self.db.read().unwrap_or_else(|e| e.into_inner());
         let txn = g.begin_write().map_err(|e| WeaveflowError::Database {
@@ -1521,6 +1680,7 @@ output: "{s.output}"
             result_ttl_secs: 3600,
             inputs: serde_json::json!({}),
             status: crate::tracker::meta::TASK_STATUS_RUNNING.to_string(),
+            trigger_source: None,
         };
         let mut task_json = serde_json::to_value(&meta).expect("task json");
         // v0 TaskMeta 可能没有 status 字段（serde default 应兜底为 "unknown"）
