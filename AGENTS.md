@@ -5,7 +5,7 @@
 ```bash
 cargo build                    # compile
 cargo test --lib               # 210 unit tests (no external deps)
-cargo test --test '*'          # 28 integration test binaries (51 tests) — in-process
+cargo test --test '*'          # 31 integration test binaries (71 tests) — in-process
                                # Runner + temp redb, NO daemon/binary required
                                # (see tests/common/mod.rs)
 cargo test --test js_code_template   # single integration file
@@ -33,7 +33,8 @@ src/
 │   │                     #[serde(deny_unknown_fields)] on ALL Raw structs — misspelled YAML keys are rejected
 │   ├── step_op.rs        StepOp tagged enum + per-operator Inputs structs (12 operators)
 │   ├── step.rs           StepDef (id, after, iterate, retry, cache, timeout_sec, #[serde(flatten)] op)
-│   ├── variable.rs       RefValue { Literal | Ref }, VariablePath, parse_string_to_refvalue
+│   ├── variable.rs       RefValue { Literal | Ref | Template }, TemplatePart, VariablePath,
+│   │                     parse_string_to_refvalue, TemplatePart::parse_fstring (f"..." 模板)
 │   ├── pipeline.rs       PipelineDef (name, slots, steps, output)
 │   ├── validator.rs      compile-time-like checks (step ids, refs, iterate config + as_name
 │   │                     reserved-prefix/collision rules, JSON Schema, filter/sort/base64/http
@@ -217,9 +218,9 @@ YAML → serde_yaml → RawPipelineDef (Raw*Inputs with plain types)
      → TryFrom → PipelineDef (Inputs with RefValue fields)
 ```
 
-`yaml_to_refvalue(&Value)` detects whole-string `"{...}"` patterns. Embedded `{...}` inside a longer string stays a **literal** everywhere — parser, resolver, validator and DAG all agree (whole-string guard).
+`yaml_to_refvalue(&Value)` detects whole-string `"{...}"` patterns and opt-in `f"..."` templates. Embedded `{...}` inside a longer plain string stays a **literal** everywhere — parser, resolver, validator and DAG all agree (whole-string guard). `f"..."`（仅小写 f 前缀，须配对结尾引号，否则 ParseError）parses into `RefValue::Template(Vec<TemplatePart>)` (`Lit` | `Ref`)：解析结果恒为 String（String 原样 / Null → 空串 / 数字·布尔·对象·数组 → 紧凑 JSON），字面量花括号写作 `\{` / `\}`（其余 `\x` 原样保留，裸 `}` 报错）。Template 与 Ref 走完全相同的 locals overlay / 依赖收集 / 前缀校验路径。
 
-Top-level `Value::Object`/`Value::Array` literals have nested `"{...}"` strings replaced with `{"Ref": {"parts": [...]}}` **inline tags**, so the resolver finds refs deep inside literal JSON. Resolver, validator (`parse_ref_tag`) and DAG (`collect_refs`) all require the object to have **exactly one key** (`len == 1`) before treating `"Ref"` as a tag — user data containing a `"Ref"` key alongside other keys passes through untouched. A single-key `"Ref"` object whose value is NOT a valid VariablePath (e.g. `{"Ref": 123}`, CloudFormation-style `{"Ref": "MyResource"}`) is user data: all three consumers fall back to treating it as a plain object (resolver recurses, validator skips, DAG recurses). Single-key `"Literal"` objects are RefValue serde tags **only at operator-field positions** — inside a Literal payload they are user data and pass through unwrapped.
+Top-level `Value::Object`/`Value::Array` literals have nested `"{...}"` strings replaced with `{"Ref": {"parts": [...]}}` **inline tags** (nested `f"..."` strings become `{"Template": [...]}` tags likewise), so the resolver finds refs deep inside literal JSON. Resolver, validator (`parse_ref_tag`/`parse_template_tag`) and DAG (`collect_refs`) all require the object to have **exactly one key** (`len == 1`) before treating `"Ref"`/`"Template"` as a tag — user data containing a `"Ref"` key alongside other keys passes through untouched. A single-key `"Ref"` object whose value is NOT a valid VariablePath (e.g. `{"Ref": 123}`, CloudFormation-style `{"Ref": "MyResource"}`) is user data: all three consumers fall back to treating it as a plain object (resolver recurses, validator skips, DAG recurses) — same fallback for malformed `"Template"` values. Single-key `"Literal"` objects are RefValue serde tags **only at operator-field positions** — inside a Literal payload they are user data and pass through unwrapped.
 
 Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field/order`, `dedup.field`, `base64.mode`, `command.shell`, `llm.model`) are **always literal** — a whole-string `"{...}"` there is NOT a ref: resolver never parses bare strings, and validator/DAG symmetrically ignore them (no false cycle, no false variable_ref_not_found). (`llm.mime_type` is a RefValue, so `{file.output.mimetype}` refs DO resolve.)
 
@@ -239,7 +240,7 @@ Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field
 ## Security posture
 
 - **No auth on any endpoint — by design (C6 wontfix, 2026-07-20 decision).** weaveflow is a localhost-only open service; authentication is the gateway/reverse-proxy layer's job. `--allow-remote` is required to bind non-loopback addresses and prints a loud startup warning — binding `0.0.0.0` is unauthenticated RCE via `command`/`file`; even on localhost, browser CSRF (simple POST, no preflight) can create+run pipelines. Treat the daemon as localhost-only.
-- `command` runs `sh -c` with `env_clear` + a minimal whitelist (PATH/HOME/LANG/LC_ALL/TZ); `file` canonicalizes both the target and each `WEAVEFLOW_FILE_ALLOW_ROOTS` root before the prefix check (empty segments filtered with a warn; unset → one `Once` warn and allow-all); `{env.KEY}` values are recorded and redacted in persisted snapshots.
+- `command` runs `sh -c` with `env_clear` + a minimal whitelist (PATH/HOME/LANG/LC_ALL/TZ); `file` canonicalizes both the target and each `WEAVEFLOW_FILE_ALLOW_ROOTS` root before the prefix check (empty segments filtered with a warn; unset → one `Once` warn and allow-all); `{env.KEY}` values are recorded and redacted in persisted snapshots (**子串替换**：快照序列化前对每个字符串做 `replace(secret, "***")`，长值优先——拼进更长串的 secret 也会被脱敏；<4 字符的 env 值不入库）。
 - Shared HTTP client hardening: no redirects, per-DNS-result SSRF check (169.254.169.254 always blocked; IPv4-mapped IPv6 normalized before classification; `WEAVEFLOW_HTTP_BLOCK_PRIVATE=1` also covers 0.0.0.0, CGNAT 100.64/10, 198.18/15), 64MB streamed response cap. **No total/read timeout anywhere — execution timeouts exist ONLY at step level (`timeout_sec`, engine wraps `op.run`); the client never implicitly truncates long-running requests.** 10s connect_timeout is kept as a fast-fail floor for connection establishment only. **Known residual: DNS rebinding TOCTOU** — the pre-check and reqwest's connect each resolve DNS independently, so a low-TTL malicious domain can in principle pass the check and then resolve to a blocked IP (no resolve pinning with the shared client).
 - `js` sandbox: no fs/net, 256MB memory limit, 1MB stack; step timeout triggers real interruption via the drop-guard. `__native__.inflate` output is capped at 256MB on the Rust side (decompression bombs can't bypass the sandbox memory limit). **Without `step.timeout_sec`, a `while(1){}` still occupies a blocking thread indefinitely (design decision: timeouts live only at step layer).**
 
@@ -295,8 +296,8 @@ Error mapping: `WeaveflowError::BadRequest`/`Parse` → 400, `NotFound` → 404,
 
 ## Tests
 
-- **210 lib tests** in-module (`#[cfg(test)]`) across dsl/engine/operator/store/tracker/vm/trigger; **37 bin tests** under `src/server` + `src/cli` (not in lib).
-- **28 integration test binaries** (51 tests) use `tests/common/mod.rs::run_yaml` — parse → validate → in-process `Runner` with a tempfile redb. No daemon, no network, no binary.
+- **226 lib tests** in-module (`#[cfg(test)]`) across dsl/engine/operator/store/tracker/vm/trigger; **37 bin tests** under `src/server` + `src/cli` (not in lib).
+- **31 integration test binaries** (71 tests) use `tests/common/mod.rs::run_yaml` — parse → validate → in-process `Runner` with a tempfile redb. No daemon, no network, no binary.
 - Coverage highlights: cache behavior (`tests/cache_control.rs`), retry/backoff/timeout (`tests/retry.rs`, `tests/step_timeout.rs`), env redaction, array index paths, merge deep, noop envelope (`tests/noop_output.rs`), v0 DB migration, Snapshot v2 layout roundtrip, prune max_seq guard, mark_interrupted, JS syntax sandbox (incl. `while(1){}` watchdog), `effective_max_workers`, command 10MB truncation, http_client split_url/SSRF, file allowlist edge cases, `wait_for_drain`, pidfile binary verification, `encode_segment`, log absolute offsets, `snapshot_and_subscribe` atomicity, `cleanup_stale`.
 
 ## Known bugs / open items

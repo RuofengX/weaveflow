@@ -34,7 +34,7 @@ graph TB
 ```
 1. 注册 Pipeline         POST /pipelines (YAML body)
    ├─ parse: YAML → RawPipelineDef（deny_unknown_fields）→ TryFrom → PipelineDef
-   │         （"{...}" 整串 → RefValue::Ref；object/array 字面量内嵌 → 单键 {"Ref":..} tag）
+   │         （"{...}" 整串 → RefValue::Ref；f"..." → RefValue::Template；object/array 字面量内嵌 → 单键 {"Ref":..}/{"Template":..} tag）
    ├─ validate() → errors（阻断）/ warnings（提示）
    └─ save_pipeline_upsert() → redb（单写事务内扫描+插入，同名 upsert）
 

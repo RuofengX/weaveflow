@@ -200,6 +200,20 @@ fn collect_refs(val: &serde_json::Value, results: &mut Vec<StepId>, known_steps:
                     // 按普通对象继续递归（与 validator/resolver 的回退行为一致）。
                     Err(_) => collect_refs(path_val, results, known_steps),
                 }
+            } else if map.len() == 1 && map.contains_key("Template") {
+                match serde_json::from_value::<Vec<crate::dsl::TemplatePart>>(
+                    map["Template"].clone(),
+                ) {
+                    Ok(parts) => {
+                        for part in parts {
+                            if let crate::dsl::TemplatePart::Ref(path) = part {
+                                results.extend(extract_refs_from_path(&path, known_steps));
+                            }
+                        }
+                    }
+                    // 单键 "Template" 用户数据回退：与 "Ref" 标签同一规则。
+                    Err(_) => collect_refs(&map["Template"], results, known_steps),
+                }
             } else if map.len() == 1 && map.contains_key("Literal") {
                 if let Some(lit) = map.get("Literal") {
                     collect_refs(lit, results, known_steps);

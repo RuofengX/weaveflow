@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use crate::dsl::{StepId, VariablePath};
+use crate::dsl::{StepId, TemplatePart, VariablePath};
 use crate::error::{WeaveflowError, WeaveflowResult};
 use crate::vm::Scope;
 
@@ -34,27 +34,31 @@ pub fn resolve_value_tree(
                 let parsed = serde_json::from_value::<VariablePath>(map["Ref"].clone());
                 match parsed {
                     Ok(path) if !path.parts.is_empty() => {
-                        if let Some(as_name) = as_name
-                            && path.parts.first().map(|p| p.as_str()) == Some(as_name)
-                        {
-                            if let Some((name, element)) = locals
-                                && name == as_name
-                            {
-                                return drill_down(
-                                    element,
-                                    &path.parts[1..],
-                                    &path.parts.join("."),
-                                );
-                            }
-                            // 无 locals（缓存 key 材料等场景）：as_name 引用保持占位符字面量
-                            return Ok(Value::String(format!("{{{}}}", path.parts.join("."))));
-                        }
-                        let value = resolve_ref(scope, &path)?;
-                        Ok((*value).clone())
+                        resolve_path_value(scope, &path, as_name, locals)
                     }
                     // 用户数据恰好是单键 "Ref" 对象但不是合法引用标签：
                     // 按普通对象递归（与 validator/dag 的回退行为一致）。
                     _ => resolve_plain_map(scope, map, as_name, locals, in_literal),
+                }
+            } else if map.len() == 1 && map.contains_key("Template") {
+                let parsed = serde_json::from_value::<Vec<TemplatePart>>(map["Template"].clone());
+                match parsed {
+                    Ok(parts) => {
+                        let mut out = String::new();
+                        for part in &parts {
+                            match part {
+                                TemplatePart::Lit(s) => out.push_str(s),
+                                TemplatePart::Ref(path) if !path.parts.is_empty() => {
+                                    let v = resolve_path_value(scope, path, as_name, locals)?;
+                                    push_stringified(&mut out, &v);
+                                }
+                                TemplatePart::Ref(_) => {}
+                            }
+                        }
+                        Ok(Value::String(out))
+                    }
+                    // 单键 "Template" 用户数据回退：与 "Ref" 标签同一规则。
+                    Err(_) => resolve_plain_map(scope, map, as_name, locals, in_literal),
                 }
             } else if !in_literal && map.len() == 1 && map.contains_key("Literal") {
                 // RefValue::Literal 序列化标签只出现在算子字段位置；
@@ -108,6 +112,39 @@ fn resolve_plain_map(
         );
     }
     Ok(Value::Object(resolved_map))
+}
+
+/// 解析单个变量路径：as_name 前缀命中 locals 时从当前元素钻取；
+/// 无 locals（缓存 key 材料等场景）保持 `"{...}"` 占位符字面量；
+/// 其余走 scope 解析。Ref 标签与 Template 片段共用。
+fn resolve_path_value(
+    scope: &Scope,
+    path: &VariablePath,
+    as_name: Option<&str>,
+    locals: Locals<'_>,
+) -> WeaveflowResult<Value> {
+    if let Some(as_name) = as_name
+        && path.parts.first().map(|p| p.as_str()) == Some(as_name)
+    {
+        if let Some((name, element)) = locals
+            && name == as_name
+        {
+            return drill_down(element, &path.parts[1..], &path.parts.join("."));
+        }
+        return Ok(Value::String(format!("{{{}}}", path.parts.join("."))));
+    }
+    let value = resolve_ref(scope, path)?;
+    Ok((*value).clone())
+}
+
+/// f-string 片段的字符串化规则：String 原样、Null → 空串、
+/// 数字/布尔/对象/数组 → 紧凑 JSON（`Value::to_string`）。
+fn push_stringified(out: &mut String, v: &Value) {
+    match v {
+        Value::String(s) => out.push_str(s),
+        Value::Null => {}
+        other => out.push_str(&other.to_string()),
+    }
 }
 
 /// 从 root 按路径段钻取：数组索引严格（非数字/越界 → 硬错误），
@@ -351,5 +388,95 @@ mod tests {
         let input = serde_json::json!({"Ref": {"parts": ["item", "id"]}});
         let out = resolve_value_tree(&scope, &input, Some("item"), None, false, false).unwrap();
         assert_eq!(out, serde_json::json!("{item.id}"));
+    }
+
+    #[test]
+    fn template_resolves_to_concatenated_string() {
+        let scope = scope_with_step(serde_json::json!({"code": 0, "items": [1, 2]}));
+        let input = serde_json::json!({
+            "Template": [
+                {"lit": "code="},
+                {"ref": {"parts": ["s", "output", "code"]}},
+                {"lit": "&items="},
+                {"ref": {"parts": ["s", "output", "items"]}},
+            ]
+        });
+        let out = resolve_value_tree(&scope, &input, None, None, false, false).unwrap();
+        assert_eq!(out, serde_json::json!("code=0&items=[1,2]"));
+    }
+
+    #[test]
+    fn template_null_becomes_empty_string() {
+        let scope = scope_with_step(serde_json::json!({"a": 1}));
+        let input = serde_json::json!({
+            "Template": [
+                {"lit": "["},
+                {"ref": {"parts": ["s", "output", "missing"]}},
+                {"lit": "]"},
+            ]
+        });
+        let out = resolve_value_tree(&scope, &input, None, None, false, false).unwrap();
+        assert_eq!(out, serde_json::json!("[]"));
+    }
+
+    #[test]
+    fn template_locals_ref_drills_into_element() {
+        let scope = scope_with_step(serde_json::json!({}));
+        let element = serde_json::json!({"name": "ann"});
+        let input = serde_json::json!({
+            "Template": [
+                {"lit": "hello "},
+                {"ref": {"parts": ["item", "name"]}},
+            ]
+        });
+        let out = resolve_value_tree(
+            &scope,
+            &input,
+            Some("item"),
+            Some(("item", &element)),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(out, serde_json::json!("hello ann"));
+    }
+
+    #[test]
+    fn template_locals_absent_keeps_placeholder() {
+        let scope = scope_with_step(serde_json::json!({}));
+        let input = serde_json::json!({
+            "Template": [
+                {"lit": "x="},
+                {"ref": {"parts": ["item", "id"]}},
+            ]
+        });
+        let out = resolve_value_tree(&scope, &input, Some("item"), None, false, false).unwrap();
+        assert_eq!(out, serde_json::json!("x={item.id}"));
+    }
+
+    #[test]
+    fn template_single_key_user_data_passes_through() {
+        // 单键 "Template" 但值不是合法模板标签：按普通对象递归。
+        let scope = scope_with_step(serde_json::json!({}));
+        let input = serde_json::json!({"body": {"Template": 123}});
+        let out = resolve_value_tree(&scope, &input, None, None, false, false).unwrap();
+        assert_eq!(out, serde_json::json!({"body": {"Template": 123}}));
+    }
+
+    #[test]
+    fn template_nested_inside_literal_object() {
+        let scope = scope_with_step(serde_json::json!("tok123"));
+        let input = serde_json::json!({
+            "Literal": {
+                "headers": {
+                    "Template": [
+                        {"lit": "Bearer "},
+                        {"ref": {"parts": ["s", "output"]}},
+                    ]
+                }
+            }
+        });
+        let out = resolve_value_tree(&scope, &input, None, None, false, false).unwrap();
+        assert_eq!(out, serde_json::json!({"headers": "Bearer tok123"}));
     }
 }

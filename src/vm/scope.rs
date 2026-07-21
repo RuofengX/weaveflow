@@ -63,8 +63,17 @@ impl Scope {
 pub fn redact_env_values(value: &mut Value, secrets: &HashSet<String>) {
     match value {
         Value::String(s) => {
-            if secrets.contains(s.as_str()) {
-                *s = "***".to_string();
+            if secrets.iter().any(|sec| s.contains(sec.as_str())) {
+                // 长值优先替换，避免短值先替换破坏长值（子串重叠时结果确定）
+                let mut sorted: Vec<&String> = secrets.iter().collect();
+                sorted.sort_by_key(|sec| std::cmp::Reverse(sec.len()));
+                let mut out = std::mem::take(s);
+                for sec in sorted {
+                    if out.contains(sec.as_str()) {
+                        out = out.replace(sec.as_str(), "***");
+                    }
+                }
+                *s = out;
             }
         }
         Value::Array(arr) => {
@@ -115,9 +124,33 @@ mod tests {
         redact_env_values(&mut v, &secrets);
         assert_eq!(v["a"], "***");
         assert_eq!(v["b"][0], "***");
-        assert_eq!(v["b"][1], "xs3cr3tx");
+        assert_eq!(v["b"][1], "x***x");
         assert_eq!(v["b"][2], 1);
         assert_eq!(v["c"]["d"], "***");
         assert_eq!(v["e"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn redact_substring_matches() {
+        let secrets: HashSet<String> = ["tok123".to_string()].into_iter().collect();
+        let mut v = serde_json::json!({
+            "auth": "Bearer tok123",
+            "url": "https://h/api?k=tok123&x=1",
+            "plain": "no secret here"
+        });
+        redact_env_values(&mut v, &secrets);
+        assert_eq!(v["auth"], "Bearer ***");
+        assert_eq!(v["url"], "https://h/api?k=***&x=1");
+        assert_eq!(v["plain"], "no secret here");
+    }
+
+    #[test]
+    fn redact_overlapping_secrets_longest_first() {
+        let secrets: HashSet<String> = ["abcdef".to_string(), "abcd".to_string()]
+            .into_iter()
+            .collect();
+        let mut v = serde_json::json!("xabcdefy");
+        redact_env_values(&mut v, &secrets);
+        assert_eq!(v, "x***y");
     }
 }

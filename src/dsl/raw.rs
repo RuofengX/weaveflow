@@ -8,7 +8,7 @@ use super::retry::RetryDef;
 use super::step::{BatchConfig, IterateConfig, StepDef, StepId};
 use super::step_op::{self, StepOp};
 use super::storage::StorageDef;
-use super::variable::{RefValue, VariablePath};
+use super::variable::{RefValue, TemplatePart, VariablePath};
 
 // ---------------------------------------------------------------------------
 // Raw pipeline —— 不含 RefValue，步骤上也没有兜底的 HashMap
@@ -26,7 +26,8 @@ pub struct RawPipelineDef {
     pub slots: Vec<super::pipeline::SlotDef>,
     #[serde(default)]
     pub steps: Vec<RawStepDef>,
-    /// 任意 JSON；字符串/嵌套字符串中的整串 `"{...}"` 会转换为内联 Ref 标签。
+    /// 任意 JSON；字符串/嵌套字符串中的整串 `"{...}"` 与 `f"..."` 模板
+    /// 会转换为内联 Ref/Template 标签。
     pub output: Value,
 }
 
@@ -217,7 +218,7 @@ impl TryFrom<RawPipelineDef> for PipelineDef {
                 .into_iter()
                 .map(StepDef::try_from)
                 .collect::<Result<Vec<_>, _>>()?,
-            output: refvalue_to_json(yaml_to_refvalue(&raw.output)),
+            output: refvalue_to_json(yaml_to_refvalue(&raw.output)?),
         })
     }
 }
@@ -238,78 +239,83 @@ impl TryFrom<RawStepDef> for StepDef {
             cache: raw.cache,
             retry: raw.retry,
             timeout_sec: raw.timeout_sec,
-            op: raw.op.into(),
+            op: raw.op.try_into()?,
         })
     }
 }
 
-impl From<RawStepOp> for StepOp {
-    fn from(raw: RawStepOp) -> Self {
-        match raw {
+impl TryFrom<RawStepOp> for StepOp {
+    type Error = ParseError;
+
+    fn try_from(raw: RawStepOp) -> Result<Self, Self::Error> {
+        Ok(match raw {
             RawStepOp::Http(r) => StepOp::Http(step_op::HttpInputs {
-                url: yaml_to_refvalue(&r.url),
+                url: yaml_to_refvalue(&r.url)?,
                 method: r.method,
-                headers: r.headers.map(|m| {
-                    m.into_iter()
-                        .map(|(k, v)| (k, yaml_to_refvalue(&v)))
-                        .collect()
-                }),
-                body: r.body.as_ref().map(yaml_to_refvalue),
+                headers: r
+                    .headers
+                    .map(|m| {
+                        m.into_iter()
+                            .map(|(k, v)| yaml_to_refvalue(&v).map(|rv| (k, rv)))
+                            .collect::<Result<_, _>>()
+                    })
+                    .transpose()?,
+                body: r.body.as_ref().map(yaml_to_refvalue).transpose()?,
             }),
             RawStepOp::Js(r) => StepOp::Js(step_op::JsInputs {
-                code: yaml_to_refvalue(&r.code),
-                data: r.data.as_ref().map(yaml_to_refvalue),
+                code: yaml_to_refvalue(&r.code)?,
+                data: r.data.as_ref().map(yaml_to_refvalue).transpose()?,
             }),
             RawStepOp::Filter(r) => StepOp::Filter(step_op::FilterInputs {
-                data: r.data.as_ref().map(yaml_to_refvalue),
+                data: r.data.as_ref().map(yaml_to_refvalue).transpose()?,
                 operator: r.operator.unwrap_or_else(|| "eq".into()),
                 field: r.field,
-                value: r.value.as_ref().map(yaml_to_refvalue),
+                value: r.value.as_ref().map(yaml_to_refvalue).transpose()?,
             }),
             RawStepOp::Sort(r) => StepOp::Sort(step_op::SortInputs {
-                data: r.data.as_ref().map(yaml_to_refvalue),
+                data: r.data.as_ref().map(yaml_to_refvalue).transpose()?,
                 field: r.field,
                 order: r.order.unwrap_or_else(|| "asc".into()),
             }),
             RawStepOp::Dedup(r) => StepOp::Dedup(step_op::DedupInputs {
-                data: r.data.as_ref().map(yaml_to_refvalue),
+                data: r.data.as_ref().map(yaml_to_refvalue).transpose()?,
                 field: r.field,
             }),
             RawStepOp::Merge(r) => StepOp::Merge(step_op::MergeInputs {
-                b: yaml_to_refvalue(&r.b),
-                a: r.a.as_ref().map(yaml_to_refvalue),
+                b: yaml_to_refvalue(&r.b)?,
+                a: r.a.as_ref().map(yaml_to_refvalue).transpose()?,
                 deep: r.deep,
             }),
             RawStepOp::Base64(r) => StepOp::Base64(step_op::Base64Inputs {
-                data: r.data.as_ref().map(yaml_to_refvalue),
+                data: r.data.as_ref().map(yaml_to_refvalue).transpose()?,
                 mode: r.mode,
             }),
             RawStepOp::Noop => StepOp::Noop,
             RawStepOp::Var(r) => StepOp::Var(step_op::VarInputs {
-                value: r.value.as_ref().map(yaml_to_refvalue),
+                value: r.value.as_ref().map(yaml_to_refvalue).transpose()?,
             }),
             RawStepOp::File(r) => StepOp::File(step_op::FileInputs {
-                path: r.path.as_ref().map(yaml_to_refvalue),
-                url: r.url.as_ref().map(yaml_to_refvalue),
+                path: r.path.as_ref().map(yaml_to_refvalue).transpose()?,
+                url: r.url.as_ref().map(yaml_to_refvalue).transpose()?,
             }),
             RawStepOp::Command(r) => StepOp::Command(step_op::CommandInputs {
-                command: yaml_to_refvalue(&r.command),
+                command: yaml_to_refvalue(&r.command)?,
                 shell: r.shell,
-                stdin: r.stdin.as_ref().map(yaml_to_refvalue),
+                stdin: r.stdin.as_ref().map(yaml_to_refvalue).transpose()?,
             }),
             RawStepOp::Llm(r) => StepOp::Llm(step_op::LlmInputs {
-                url: yaml_to_refvalue(&r.url),
+                url: yaml_to_refvalue(&r.url)?,
                 model: r.model,
-                prompt: yaml_to_refvalue(&r.prompt),
-                system: r.system.as_ref().map(yaml_to_refvalue),
-                images_b64: r.images_b64.as_ref().map(yaml_to_refvalue),
-                mime_type: r.mime_type.as_ref().map(yaml_to_refvalue),
+                prompt: yaml_to_refvalue(&r.prompt)?,
+                system: r.system.as_ref().map(yaml_to_refvalue).transpose()?,
+                images_b64: r.images_b64.as_ref().map(yaml_to_refvalue).transpose()?,
+                mime_type: r.mime_type.as_ref().map(yaml_to_refvalue).transpose()?,
                 max_tokens: r.max_tokens.unwrap_or(4096),
                 temperature: r.temperature,
                 skip_vision_check: r.skip_vision_check,
-                api_key: r.api_key.as_ref().map(yaml_to_refvalue),
+                api_key: r.api_key.as_ref().map(yaml_to_refvalue).transpose()?,
             }),
-        }
+        })
     }
 }
 
@@ -332,31 +338,39 @@ impl TryFrom<RawIterateConfig> for IterateConfig {
 // ---------------------------------------------------------------------------
 
 /// 将 YAML `Value` 转换为 `RefValue`。
-/// 字符串 `"{slots.x}"` → `Ref`，其他标量 → `Literal`。
+/// 整串 `"{slots.x}"` → `Ref`，`f"..."` → `Template`（语法非法 → `ParseError`），
+/// 其他标量 → `Literal`。
 /// 对象/数组递归遍历：嵌套字符串转换为
-/// `{"Ref": {"parts": [...]}}` 内联标签。
-fn yaml_to_refvalue(v: &Value) -> RefValue {
+/// `{"Ref": {"parts": [...]}}` / `{"Template": [...]}` 内联标签。
+fn yaml_to_refvalue(v: &Value) -> Result<RefValue, ParseError> {
     match v {
         Value::String(s) => {
             if let Some(path) = VariablePath::parse(s) {
-                RefValue::Ref(path)
+                Ok(RefValue::Ref(path))
+            } else if let Some(parts) =
+                TemplatePart::parse_fstring(s).map_err(ParseError::InvalidTemplate)?
+            {
+                Ok(RefValue::Template(parts))
             } else {
-                RefValue::Literal(v.clone())
+                Ok(RefValue::Literal(v.clone()))
             }
         }
-        Value::Object(map) => RefValue::Literal(Value::Object(
+        Value::Object(map) => Ok(RefValue::Literal(Value::Object(
             map.iter()
-                .map(|(k, v)| (k.clone(), replace_template_strings(v)))
-                .collect(),
-        )),
-        Value::Array(arr) => RefValue::Literal(Value::Array(
-            arr.iter().map(replace_template_strings).collect(),
-        )),
-        _ => RefValue::Literal(v.clone()),
+                .map(|(k, v)| Ok((k.clone(), replace_template_strings(v)?)))
+                .collect::<Result<_, ParseError>>()?,
+        ))),
+        Value::Array(arr) => Ok(RefValue::Literal(Value::Array(
+            arr.iter()
+                .map(replace_template_strings)
+                .collect::<Result<_, _>>()?,
+        ))),
+        _ => Ok(RefValue::Literal(v.clone())),
     }
 }
 
-/// RefValue → 带内联标签的 JSON 树：`Ref` → `{"Ref": {"parts": [...]}}`。
+/// RefValue → 带内联标签的 JSON 树：`Ref` → `{"Ref": {"parts": [...]}}`，
+/// `Template` → `{"Template": [...]}`。
 /// 用于 PipelineDef.output（不再是 RefValue，而是任意 JSON + 内联标签）。
 fn refvalue_to_json(rv: RefValue) -> Value {
     match rv {
@@ -366,29 +380,51 @@ fn refvalue_to_json(rv: RefValue) -> Value {
             map.insert("Ref".into(), serde_json::json!({"parts": path.parts}));
             Value::Object(map)
         }
+        RefValue::Template(parts) => {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                "Template".into(),
+                serde_json::to_value(&parts).unwrap_or(Value::Null),
+            );
+            Value::Object(map)
+        }
     }
 }
 
-/// 将 Value 树中的 `"{...}"` 字符串替换为 `{"Ref": {"parts": [...]}}`。
+/// 将 Value 树中的 `"{...}"` / `f"..."` 字符串替换为
+/// `{"Ref": {"parts": [...]}}` / `{"Template": [...]}` 内联标签。
 /// 用于转换 `RefValue::Literal` 内部的嵌套数据。
-fn replace_template_strings(v: &Value) -> Value {
+fn replace_template_strings(v: &Value) -> Result<Value, ParseError> {
     match v {
         Value::String(s) => {
             if let Some(path) = VariablePath::parse(s) {
                 let mut map = serde_json::Map::new();
                 map.insert("Ref".into(), serde_json::json!({"parts": path.parts}));
-                Value::Object(map)
+                Ok(Value::Object(map))
+            } else if let Some(parts) =
+                TemplatePart::parse_fstring(s).map_err(ParseError::InvalidTemplate)?
+            {
+                let mut map = serde_json::Map::new();
+                map.insert(
+                    "Template".into(),
+                    serde_json::to_value(&parts).unwrap_or(Value::Null),
+                );
+                Ok(Value::Object(map))
             } else {
-                v.clone()
+                Ok(v.clone())
             }
         }
-        Value::Object(map) => Value::Object(
+        Value::Object(map) => Ok(Value::Object(
             map.iter()
-                .map(|(k, v)| (k.clone(), replace_template_strings(v)))
-                .collect(),
-        ),
-        Value::Array(arr) => Value::Array(arr.iter().map(replace_template_strings).collect()),
-        _ => v.clone(),
+                .map(|(k, v)| Ok((k.clone(), replace_template_strings(v)?)))
+                .collect::<Result<_, ParseError>>()?,
+        )),
+        Value::Array(arr) => Ok(Value::Array(
+            arr.iter()
+                .map(replace_template_strings)
+                .collect::<Result<_, _>>()?,
+        )),
+        _ => Ok(v.clone()),
     }
 }
 // ---------------------------------------------------------------------------
@@ -401,6 +437,8 @@ pub enum ParseError {
     Yaml(String),
     #[error("iterate.over 必须是 {{...}} 形式的变量路径: {0}")]
     InvalidIterateOver(String),
+    #[error("f-string 模板非法: {0}")]
+    InvalidTemplate(String),
     #[error("步骤 {0} 存在未知字段: {1}")]
     UnknownStepFields(String, String),
 }

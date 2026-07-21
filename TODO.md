@@ -2,7 +2,7 @@
 
 > 本文件只记两件事：**待修改的开放项**（上半）与 **v1.0 已完成的修改**（下半）。
 > 行为与用法文档在 [docs/](docs/README.md)；工程约定在 [AGENTS.md](AGENTS.md)。
-> 质量基线：188 lib tests + 51 集成测试（28 个二进制）+ 24 bin tests 全绿，`cargo clippy --all-targets` 0 警告。
+> 质量基线：226 lib tests + 71 集成测试（31 个二进制）+ 37 bin tests 全绿，`cargo clippy --all-targets` 0 警告。
 
 ---
 
@@ -29,8 +29,8 @@
 | # | 位置 | 问题 | 处置 |
 |---|------|------|------|
 | L4 | `engine/runner.rs` + `vm/scope.rs` | 大 Value 多级深拷贝 | 需改 Scope 签名 + 并行期合并，架构改动大 |
-| L5 | `dsl/variable.rs` | 疑似模板（嵌在长串中的 `{...}`）静默变字面量，无 warning | 需 validator 重构；M12/M13 已修相关项 |
-| L6 | `dsl/variable.rs` | `{foo}` 无转义手段（想要字面量 `{foo}` 无法表达） | DSL 设计决策：需提供 `\{foo}` 语法并文档化 |
+| L5 | `dsl/variable.rs` | 疑似模板（嵌在长串中的 `{...}`）静默变字面量，无 warning | 需 validator 重构；M12/M13 已修相关项。2026-07-21 起可用显式 `f"..."` 模板（opt-in，非法即 parse error） |
+| L6 | `dsl/variable.rs` | `{foo}` 无转义手段（想要字面量 `{foo}` 无法表达） | DSL 设计决策：普通串维持无转义（兼容）；`f"..."` 模板内提供 `\{`/`\}` 转义（2026-07-21） |
 | O8 | `operator/builtin/filter.rs` | eq/ne/in 是严格 JSON 相等（`1 ≠ 1.0`），与 gt/lt 的数值语义不一致 | 语义文档化，不改行为 |
 | — | `dsl/variable.rs` | `VariablePath::parse` 的 trim() 使首尾带空格的字面量被意外当 ref | 设计取舍，待文档化 |
 

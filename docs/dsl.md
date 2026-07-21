@@ -69,6 +69,24 @@ slots:
 
 iterate 模式中，`as` 声明的元素变量名会绑定当前元素：`{item}`、`{item.field}`、`{item.0.x}` 在 iterate 步骤的任意 inputs 字段真实解析（数组索引严格，缺字段 → Null），等同于把元素注入该次 op 调用的 scope 根。
 
+### f-string 模板（字符串拼接）
+
+普通字符串中的 `{...}` 只有**整串独占**时才解析为引用；嵌在更长字符串里一律按字面量处理。需要拼接时显式使用 `f"..."` 前缀（仅小写 `f`，须配对结尾引号，否则 parse error）：
+
+```yaml
+url: f"{env.SPIDER_BASE}/api/clue/cross?min_cases={slots.min_cases}"
+headers:
+  Authorization: f"Bearer {env.SPIDER_TOKEN}"
+```
+
+规则：
+
+- 解析结果恒为字符串：String 原样、`null` → 空串、数字/布尔/对象/数组 → 紧凑 JSON。
+- 字面量花括号转义为 `\{` / `\}`；其余 `\x` 序列原样保留；裸 `}` 报错。
+- 支持全部引用形式（`{slots.*}` / `{env.*}` / `{step.output.*}` / iterate 的 `{item.*}`），同样产生隐式 DAG 依赖并参与校验。
+- 仅 RefValue 类型字段有效；`method`/`field`/`mode` 等纯 string 字段不解析。
+- 建议用 YAML plain/单引号标量书写（双引号标量中 `\` 需写成 `\\`）。
+
 ## 步骤定义
 
 | 字段 | 类型 | 必填 | 默认 | 说明 |

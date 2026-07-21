@@ -283,7 +283,15 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
                         });
                     }
                 }
-                if let Some(RefValue::Literal(_)) = &inputs.api_key {
+                let api_key_plaintext = match &inputs.api_key {
+                    Some(RefValue::Literal(_)) => true,
+                    // 纯字面量片段组成的 f-string 模板等同于明文
+                    Some(RefValue::Template(parts)) => parts
+                        .iter()
+                        .all(|p| matches!(p, crate::dsl::TemplatePart::Lit(_))),
+                    _ => false,
+                };
+                if api_key_plaintext {
                     report.errors.push(ValidationError {
                         code: "insecure_api_key".into(),
                         message: format!(
@@ -648,6 +656,26 @@ fn parse_ref_tag(map: &serde_json::Map<String, Value>) -> Option<VariablePath> {
     Some(path)
 }
 
+/// 与 "Ref" 标签同一规则：仅单键 `{"Template": ...}` 且值可解析为
+/// `Vec<TemplatePart>` 才识别为内联模板标签；否则按普通对象继续递归。
+/// 返回模板中的全部引用路径。
+fn parse_template_tag(map: &serde_json::Map<String, Value>) -> Option<Vec<VariablePath>> {
+    if map.len() != 1 || !map.contains_key("Template") {
+        return None;
+    }
+    let parts: Vec<crate::dsl::TemplatePart> =
+        serde_json::from_value(map.get("Template")?.clone()).ok()?;
+    Some(
+        parts
+            .into_iter()
+            .filter_map(|p| match p {
+                crate::dsl::TemplatePart::Ref(path) if !path.parts.is_empty() => Some(path),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
 fn refs_in_json(val: &Value) -> Vec<(String, String)> {
     match val {
         Value::Object(map) => {
@@ -655,6 +683,12 @@ fn refs_in_json(val: &Value) -> Vec<(String, String)> {
                 let prefix = path.parts[0].clone();
                 let rest = path.parts[1..].join(".");
                 return vec![(prefix, rest)];
+            }
+            if let Some(paths) = parse_template_tag(map) {
+                return paths
+                    .into_iter()
+                    .map(|path| (path.parts[0].clone(), path.parts[1..].join(".")))
+                    .collect();
             }
             let mut all = Vec::new();
             for v in map.values() {
@@ -710,6 +744,10 @@ fn check_ref_in_json(
         Value::Object(map) => {
             if let Some(path) = parse_ref_tag(map) {
                 check_step_ref_prefix(&path.parts[0], all_ids, step_id, as_name, report);
+            } else if let Some(paths) = parse_template_tag(map) {
+                for path in &paths {
+                    check_step_ref_prefix(&path.parts[0], all_ids, step_id, as_name, report);
+                }
             } else {
                 for v in map.values() {
                     check_ref_in_json(v, all_ids, step_id, as_name, report);
@@ -1360,6 +1398,110 @@ mod tests {
                 .errors
                 .iter()
                 .any(|e| e.code == "invalid_retry_config")
+        );
+    }
+
+    #[test]
+    fn template_as_name_ref_allowed_and_counts_as_used() {
+        // iterate as_name 出现在 f-string 模板中：不得误报 variable_ref_not_found，
+        // 且应抑制 iterate_element_unused warning。
+        let mut def = valid_def();
+        def.steps[0].iterate = Some(IterateConfig {
+            over: VariablePath::parse("{slots.url}").unwrap(),
+            as_name: "item".into(),
+            max_workers: None,
+            batch: None,
+        });
+        def.steps[0].op = StepOp::Var(VarInputs {
+            value: Some(RefValue::Template(vec![
+                crate::dsl::TemplatePart::Lit("u=".into()),
+                crate::dsl::TemplatePart::Ref(VariablePath::parse("{item.name}").unwrap()),
+            ])),
+        });
+        let report = validate(&def);
+        assert!(
+            !report
+                .errors
+                .iter()
+                .any(|e| e.code == "variable_ref_not_found"),
+            "errors: {:?}",
+            report.errors
+        );
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.code == "iterate_element_unused"),
+            "warnings: {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn template_ghost_step_ref_flagged() {
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Var(VarInputs {
+            value: Some(RefValue::Template(vec![crate::dsl::TemplatePart::Ref(
+                VariablePath::parse("{ghost.output}").unwrap(),
+            )])),
+        });
+        let report = validate(&def);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "variable_ref_not_found"),
+            "errors: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn pure_literal_template_api_key_rejected() {
+        // 纯字面量片段的 f-string 等同于明文 api_key；含 ref 的模板放行。
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Llm(crate::dsl::step_op::LlmInputs {
+            url: literal(serde_json::json!("http://x")),
+            model: "m".into(),
+            prompt: literal(serde_json::json!("p")),
+            system: None,
+            images_b64: None,
+            mime_type: None,
+            max_tokens: 4096,
+            temperature: None,
+            skip_vision_check: None,
+            api_key: Some(RefValue::Template(vec![crate::dsl::TemplatePart::Lit(
+                "sk-plain".into(),
+            )])),
+        });
+        let report = validate(&def);
+        assert!(
+            report.errors.iter().any(|e| e.code == "insecure_api_key"),
+            "errors: {:?}",
+            report.errors
+        );
+
+        let mut def = valid_def();
+        def.steps[0].op = StepOp::Llm(crate::dsl::step_op::LlmInputs {
+            url: literal(serde_json::json!("http://x")),
+            model: "m".into(),
+            prompt: literal(serde_json::json!("p")),
+            system: None,
+            images_b64: None,
+            mime_type: None,
+            max_tokens: 4096,
+            temperature: None,
+            skip_vision_check: None,
+            api_key: Some(RefValue::Template(vec![
+                crate::dsl::TemplatePart::Lit("Bearer ".into()),
+                crate::dsl::TemplatePart::Ref(VariablePath::parse("{env.API_KEY}").unwrap()),
+            ])),
+        });
+        let report = validate(&def);
+        assert!(
+            !report.errors.iter().any(|e| e.code == "insecure_api_key"),
+            "errors: {:?}",
+            report.errors
         );
     }
 

@@ -20,7 +20,7 @@
     url: "{slots.source_url}"
     method: GET
     headers:
-      Authorization: "Bearer {env.API_KEY}"
+      Authorization: f"Bearer {env.API_KEY}"
 ```
 
 ---

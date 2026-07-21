@@ -16,4 +16,4 @@ pub use retry::RetryDef;
 pub use step::{BatchConfig, IterateConfig, StepDef, StepId};
 pub use step_op::StepOp;
 pub use storage::{StorageDef, Ttl};
-pub use variable::{RefValue, VariablePath};
+pub use variable::{RefValue, TemplatePart, VariablePath};
