@@ -228,14 +228,12 @@ pub fn validate_trigger(def: &TriggerDef) -> Vec<String> {
     match def.trigger_type {
         TriggerType::Stream => {
             if def.cron.is_some() {
-                errors.push(
-                    "[section_mismatch] type 为 stream 时不允许出现 cron 配置段".to_string(),
-                );
+                errors
+                    .push("[section_mismatch] type 为 stream 时不允许出现 cron 配置段".to_string());
             }
             match &def.stream {
-                None => errors.push(
-                    "[section_mismatch] type 为 stream 时缺少 stream 配置段".to_string(),
-                ),
+                None => errors
+                    .push("[section_mismatch] type 为 stream 时缺少 stream 配置段".to_string()),
                 Some(s) => {
                     if s.batch_size == 0 {
                         errors.push("[invalid_batch_size] batch_size 必须 >= 1".to_string());
@@ -253,9 +251,8 @@ pub fn validate_trigger(def: &TriggerDef) -> Vec<String> {
                         ));
                     }
                     match s.flush_interval_duration() {
-                        Ok(Some(d)) if d.is_zero() => errors.push(
-                            "[invalid_flush_interval] flush_interval 必须 > 0".to_string(),
-                        ),
+                        Ok(Some(d)) if d.is_zero() => errors
+                            .push("[invalid_flush_interval] flush_interval 必须 > 0".to_string()),
                         Err(e) => errors.push(format!("[invalid_flush_interval] {e}")),
                         _ => {}
                     }
@@ -264,33 +261,30 @@ pub fn validate_trigger(def: &TriggerDef) -> Vec<String> {
         }
         TriggerType::Cron => {
             if def.stream.is_some() {
-                errors.push(
-                    "[section_mismatch] type 为 cron 时不允许出现 stream 配置段".to_string(),
-                );
+                errors
+                    .push("[section_mismatch] type 为 cron 时不允许出现 stream 配置段".to_string());
             }
             match &def.cron {
                 None => {
                     errors.push("[section_mismatch] type 为 cron 时缺少 cron 配置段".to_string())
                 }
                 Some(c) => match (&c.schedule, &c.interval) {
-                    (Some(_), Some(_)) => errors.push(
-                        "[invalid_schedule] schedule 与 interval 只能二选一".to_string(),
-                    ),
+                    (Some(_), Some(_)) => errors
+                        .push("[invalid_schedule] schedule 与 interval 只能二选一".to_string()),
                     (None, None) => errors.push(
                         "[invalid_schedule] cron 触发器必须提供 schedule 或 interval".to_string(),
                     ),
                     (Some(expr), None) => {
                         if parse_cron(expr).is_none() {
-                            errors.push(format!(
-                                "[invalid_schedule] 无法解析 cron 表达式: {expr:?}"
-                            ));
+                            errors
+                                .push(format!("[invalid_schedule] 无法解析 cron 表达式: {expr:?}"));
                         }
                     }
                     (None, Some(iv)) => match parse_duration_str(iv) {
                         Err(e) => errors.push(format!("[invalid_interval] {e}")),
-                        Ok(d) if d < Duration::from_secs(1) => errors.push(
-                            "[invalid_interval] interval 必须 >= 1s".to_string(),
-                        ),
+                        Ok(d) if d < Duration::from_secs(1) => {
+                            errors.push("[invalid_interval] interval 必须 >= 1s".to_string())
+                        }
                         _ => {}
                     },
                 },
@@ -318,7 +312,11 @@ fn parse_cron(expr: &str) -> Option<cron::Schedule> {
 
 /// 计算 cron 触发器在 `now` 之后的下一次触发时间。
 /// interval 以 `base`（通常为 created_at）为锚点对齐，避免重启后漂移。
-pub fn next_fire_after(c: &CronConfig, base: DateTime<Utc>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+pub fn next_fire_after(
+    c: &CronConfig,
+    base: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
     if let Some(expr) = &c.schedule {
         let sched = parse_cron(expr)?;
         return sched.after(&now).next();
@@ -395,38 +393,70 @@ mod tests {
     fn validate_rejects_section_mismatch() {
         let mut d = stream_def();
         d.cron = Some(CronConfig::default());
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("section_mismatch")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("section_mismatch"))
+        );
 
         let mut d = stream_def();
         d.stream = None;
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("section_mismatch")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("section_mismatch"))
+        );
 
         let mut d = cron_def();
         d.stream = Some(StreamConfig::default());
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("section_mismatch")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("section_mismatch"))
+        );
     }
 
     #[test]
     fn validate_stream_bounds() {
         let mut d = stream_def();
         d.stream.as_mut().unwrap().batch_size = 0;
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("invalid_batch_size")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("invalid_batch_size"))
+        );
 
         let mut d = stream_def();
         d.stream.as_mut().unwrap().max_in_flight = 0;
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("invalid_max_in_flight")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("invalid_max_in_flight"))
+        );
 
         let mut d = stream_def();
         d.stream.as_mut().unwrap().buffer_cap = 1; // < batch_size(100)
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("invalid_buffer_cap")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("invalid_buffer_cap"))
+        );
 
         let mut d = stream_def();
         d.stream.as_mut().unwrap().flush_interval = Some("0s".into());
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("invalid_flush_interval")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("invalid_flush_interval"))
+        );
 
         let mut d = stream_def();
         d.stream.as_mut().unwrap().flush_interval = Some("abc".into());
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("invalid_flush_interval")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("invalid_flush_interval"))
+        );
 
         let mut d = stream_def();
         d.stream.as_mut().unwrap().flush_interval = Some("5s".into());
@@ -443,36 +473,63 @@ mod tests {
         let mut d = cron_def();
         d.cron.as_mut().unwrap().schedule = Some("0 3 * * *".into());
         // schedule + interval 同时存在
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("invalid_schedule")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("invalid_schedule"))
+        );
 
         let mut d = cron_def();
         d.cron.as_mut().unwrap().interval = None;
         // 两者都缺
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("invalid_schedule")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("invalid_schedule"))
+        );
 
         let mut d = cron_def();
         d.cron.as_mut().unwrap().interval = None;
         d.cron.as_mut().unwrap().schedule = Some("not a cron".into());
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("invalid_schedule")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("invalid_schedule"))
+        );
 
         let mut d = cron_def();
         d.cron.as_mut().unwrap().interval = Some("500ms".into());
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("invalid_interval")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("invalid_interval"))
+        );
     }
 
     #[test]
     fn validate_rejects_empty_names() {
         let mut d = stream_def();
         d.name = "  ".into();
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("invalid_name")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("invalid_name"))
+        );
         let mut d = stream_def();
         d.pipeline = String::new();
-        assert!(validate_trigger(&d).iter().any(|e| e.contains("invalid_pipeline")));
+        assert!(
+            validate_trigger(&d)
+                .iter()
+                .any(|e| e.contains("invalid_pipeline"))
+        );
     }
 
     #[test]
     fn parse_duration_units() {
-        assert_eq!(parse_duration_str("500ms").unwrap(), Duration::from_millis(500));
+        assert_eq!(
+            parse_duration_str("500ms").unwrap(),
+            Duration::from_millis(500)
+        );
         assert_eq!(parse_duration_str("30s").unwrap(), Duration::from_secs(30));
         assert_eq!(parse_duration_str("5m").unwrap(), Duration::from_secs(300));
         assert_eq!(parse_duration_str("1h").unwrap(), Duration::from_secs(3600));
@@ -572,7 +629,10 @@ max_in_flight = 2
         assert!(validate_trigger(&d).is_empty());
         let s = d.stream.unwrap();
         assert_eq!(s.batch_size, 50);
-        assert_eq!(s.flush_interval_duration().unwrap(), Some(Duration::from_secs(5)));
+        assert_eq!(
+            s.flush_interval_duration().unwrap(),
+            Some(Duration::from_secs(5))
+        );
 
         let toml_cron = r#"
 name = "nightly"

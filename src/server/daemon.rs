@@ -193,7 +193,13 @@ async fn run_pipeline(
     Json(req): Json<RunRequest>,
 ) -> Result<Json<Value>, WeaveflowError> {
     tracing::info!(pipeline = %req.pipeline, "POST /runs");
-    let outcome = submit_run(&state, &req.pipeline, req.inputs.unwrap_or_default(), "manual").await?;
+    let outcome = submit_run(
+        &state,
+        &req.pipeline,
+        req.inputs.unwrap_or_default(),
+        "manual",
+    )
+    .await?;
     let response = serde_json::json!({
         "task_id": outcome.task_id.to_string(),
         "pipeline_name": outcome.pipeline_name,

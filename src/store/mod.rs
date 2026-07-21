@@ -406,10 +406,12 @@ impl Database {
             source: Box::new(e.into()),
         })?;
         {
-            let mut table = txn.open_table(TRIGGER).map_err(|e| WeaveflowError::Database {
-                operation: "save_trigger open_table",
-                source: Box::new(e.into()),
-            })?;
+            let mut table = txn
+                .open_table(TRIGGER)
+                .map_err(|e| WeaveflowError::Database {
+                    operation: "save_trigger open_table",
+                    source: Box::new(e.into()),
+                })?;
             table
                 .insert(row.def.name.as_str(), row)
                 .map_err(|e| WeaveflowError::Database {
@@ -476,10 +478,12 @@ impl Database {
             source: Box::new(e.into()),
         })?;
         let removed = {
-            let mut table = txn.open_table(TRIGGER).map_err(|e| WeaveflowError::Database {
-                operation: "delete_trigger open_table",
-                source: Box::new(e.into()),
-            })?;
+            let mut table = txn
+                .open_table(TRIGGER)
+                .map_err(|e| WeaveflowError::Database {
+                    operation: "delete_trigger open_table",
+                    source: Box::new(e.into()),
+                })?;
             table
                 .remove(name)
                 .map_err(|e| WeaveflowError::Database {
@@ -507,10 +511,12 @@ impl Database {
             source: Box::new(e.into()),
         })?;
         let updated = {
-            let mut table = txn.open_table(TRIGGER).map_err(|e| WeaveflowError::Database {
-                operation: "update_trigger open_table",
-                source: Box::new(e.into()),
-            })?;
+            let mut table = txn
+                .open_table(TRIGGER)
+                .map_err(|e| WeaveflowError::Database {
+                    operation: "update_trigger open_table",
+                    source: Box::new(e.into()),
+                })?;
             let existing: Option<TriggerRow> = table
                 .get(name)
                 .map_err(|e| WeaveflowError::Database {

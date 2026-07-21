@@ -145,7 +145,13 @@ impl TriggerManager {
         self.workers
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(def.name.clone(), WorkerHandle { cancel: cancel_tx, push });
+            .insert(
+                def.name.clone(),
+                WorkerHandle {
+                    cancel: cancel_tx,
+                    push,
+                },
+            );
         tracing::info!(trigger = %def.name, r#type = %def.trigger_type, "trigger worker started");
     }
 
@@ -216,12 +222,7 @@ pub fn start_all(state: &Arc<AppState>) {
 
 // ── 提交与状态记录 ───────────────────────────────────────────────────────
 
-async fn fire(
-    state: &Arc<AppState>,
-    name: &str,
-    pipeline: &str,
-    inputs: HashMap<String, Value>,
-) {
+async fn fire(state: &Arc<AppState>, name: &str, pipeline: &str, inputs: HashMap<String, Value>) {
     match submit_run(state, pipeline, inputs, &format!("trigger:{name}")).await {
         Ok(outcome) => {
             tracing::info!(
@@ -234,11 +235,15 @@ async fn fire(
             }) {
                 tracing::warn!(trigger = %name, error = %e, "update_trigger(fired) failed");
             }
-            state.trigger_mgr.emit(&TriggerEvent::fired(name, &outcome.task_id));
+            state
+                .trigger_mgr
+                .emit(&TriggerEvent::fired(name, &outcome.task_id));
         }
         Err(WeaveflowError::Unavailable(_)) => {
             tracing::warn!(trigger = %name, "trigger dropped: daemon draining");
-            state.trigger_mgr.emit(&TriggerEvent::dropped(name, "daemon draining"));
+            state
+                .trigger_mgr
+                .emit(&TriggerEvent::dropped(name, "daemon draining"));
         }
         Err(e) => {
             tracing::error!(trigger = %name, error = %e, "trigger submit failed");
@@ -316,13 +321,13 @@ async fn stream_worker(
     mut cancel: tokio::sync::watch::Receiver<bool>,
 ) {
     let name = def.name.clone();
-    let sem = Arc::new(tokio::sync::Semaphore::new(cfg.max_in_flight.max(1) as usize));
-    let flush_dur = cfg
-        .flush_interval_duration()
-        .unwrap_or_else(|e| {
-            tracing::warn!(trigger = %name, error = %e, "invalid flush_interval, disabled");
-            None
-        });
+    let sem = Arc::new(tokio::sync::Semaphore::new(
+        cfg.max_in_flight.max(1) as usize
+    ));
+    let flush_dur = cfg.flush_interval_duration().unwrap_or_else(|e| {
+        tracing::warn!(trigger = %name, error = %e, "invalid flush_interval, disabled");
+        None
+    });
     let mut buf: Vec<Value> = Vec::new();
 
     // flush 一个批次：提交 run + 更新状态 + 发事件 + 终态后释放并发 permit
@@ -356,7 +361,9 @@ async fn stream_worker(
                 }) {
                     tracing::warn!(trigger = %name, error = %e, "update_trigger(fired) failed");
                 }
-                state.trigger_mgr.emit(&TriggerEvent::fired(name, &outcome.task_id));
+                state
+                    .trigger_mgr
+                    .emit(&TriggerEvent::fired(name, &outcome.task_id));
                 tokio::spawn(async move {
                     let _permit = permit;
                     wait_task_terminal(&db, &outcome.task_id).await;
@@ -364,13 +371,14 @@ async fn stream_worker(
             }
             Err(WeaveflowError::Unavailable(_)) => {
                 tracing::warn!(trigger = %name, "stream batch dropped: daemon draining");
-                state.trigger_mgr.emit(&TriggerEvent::dropped(name, "daemon draining"));
+                state
+                    .trigger_mgr
+                    .emit(&TriggerEvent::dropped(name, "daemon draining"));
                 drop(permit);
             }
             Err(e) => {
                 tracing::error!(trigger = %name, error = %e, "stream batch submit failed");
-                if let Err(db_err) = state.db.update_trigger(name, |row| row.record_failed())
-                {
+                if let Err(db_err) = state.db.update_trigger(name, |row| row.record_failed()) {
                     tracing::warn!(trigger = %name, error = %db_err, "update_trigger(failed) failed");
                 }
                 state.trigger_mgr.emit(&TriggerEvent::failed(name, e));
@@ -380,8 +388,8 @@ async fn stream_worker(
     }
 
     // flush_interval 缺省时 timer 为 None，对应 select 分支永不就绪。
-    let mut flush_timer: Option<tokio::time::Interval> = flush_dur
-        .map(|d| tokio::time::interval_at(tokio::time::Instant::now() + d, d));
+    let mut flush_timer: Option<tokio::time::Interval> =
+        flush_dur.map(|d| tokio::time::interval_at(tokio::time::Instant::now() + d, d));
 
     loop {
         tokio::select! {
@@ -417,12 +425,14 @@ async fn stream_worker(
 }
 
 /// 轮询 task 状态直到终态（用于释放 trigger 级并发 permit）。
-async fn wait_task_terminal(db: &Arc<weaveflow::store::Database>, task_id: &weaveflow::tracker::TaskId) {
+async fn wait_task_terminal(
+    db: &Arc<weaveflow::store::Database>,
+    task_id: &weaveflow::tracker::TaskId,
+) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         match db.load_task(task_id) {
-            Ok(Some(meta))
-                if meta.status == weaveflow::tracker::meta::TASK_STATUS_RUNNING => {}
+            Ok(Some(meta)) if meta.status == weaveflow::tracker::meta::TASK_STATUS_RUNNING => {}
             _ => return, // 终态、行消失（prune）或 DB 错误都视为可释放
         }
     }
@@ -488,7 +498,10 @@ pub async fn get_trigger(
         .ok_or_else(|| WeaveflowError::NotFound(format!("trigger {name} not found")))?;
     let mut v = serde_json::to_value(&row).map_err(|e| WeaveflowError::Internal(e.to_string()))?;
     if let Some(obj) = v.as_object_mut() {
-        obj.insert("buffered".into(), serde_json::json!(buffered_of(&state, &name)));
+        obj.insert(
+            "buffered".into(),
+            serde_json::json!(buffered_of(&state, &name)),
+        );
     }
     Ok(Json(v))
 }
@@ -499,7 +512,9 @@ pub async fn delete_trigger(
 ) -> Result<Json<Value>, WeaveflowError> {
     tracing::info!(trigger = %name, "DELETE /triggers/:name");
     if !state.db.delete_trigger(&name)? {
-        return Err(WeaveflowError::NotFound(format!("trigger {name} not found")));
+        return Err(WeaveflowError::NotFound(format!(
+            "trigger {name} not found"
+        )));
     }
     state.trigger_mgr.stop_worker(&name);
     tracing::info!(trigger = %name, "trigger deleted");
@@ -579,7 +594,9 @@ pub async fn ws_trigger(
 ) -> Result<Response, WeaveflowError> {
     tracing::info!(trigger = %name, "GET /triggers/:name/ws");
     if state.db.load_trigger(&name)?.is_none() {
-        return Err(WeaveflowError::NotFound(format!("trigger {name} not found")));
+        return Err(WeaveflowError::NotFound(format!(
+            "trigger {name} not found"
+        )));
     }
     let rx = state.trigger_mgr.subscribe_events();
     Ok(ws.on_upgrade(move |socket| handle_trigger_ws(socket, rx, name)))
@@ -636,10 +653,8 @@ mod tests {
     fn temp_db() -> Database {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "weaveflow-trigger-test-{}-{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("weaveflow-trigger-test-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).ok();
         Database::open(dir.join("weaveflow.redb")).expect("open db")
@@ -835,9 +850,7 @@ output: "{s.output}"
         assert_eq!(row.recent_tasks.len(), 1);
 
         // task 的 inputs 应是 {items: [1,2,3]}，且来源为 trigger
-        let tid = weaveflow::tracker::TaskId(
-            uuid::Uuid::parse_str(&row.recent_tasks[0]).unwrap(),
-        );
+        let tid = weaveflow::tracker::TaskId(uuid::Uuid::parse_str(&row.recent_tasks[0]).unwrap());
         let meta = db.load_task(&tid).unwrap().unwrap();
         assert_eq!(meta.inputs, serde_json::json!({"items": [1, 2, 3]}));
         assert_eq!(meta.trigger_source.as_deref(), Some("trigger:s1"));

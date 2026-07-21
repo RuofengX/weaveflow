@@ -186,7 +186,10 @@ pub async fn trigger_ls(cfg: &CliConfig) -> Result<(), String> {
         let pipeline = t.get("pipeline").and_then(|v| v.as_str()).unwrap_or("?");
         let fired = t.get("total_fired").and_then(|v| v.as_u64()).unwrap_or(0);
         let failed = t.get("total_failed").and_then(|v| v.as_u64()).unwrap_or(0);
-        let next = t.get("next_fire_at").and_then(|v| v.as_str()).unwrap_or("-");
+        let next = t
+            .get("next_fire_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
         println!("{name}\t{ty}\t{pipeline}\tfired={fired} failed={failed}\tnext={next}");
     }
     Ok(())
