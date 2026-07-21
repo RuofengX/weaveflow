@@ -405,8 +405,12 @@ async fn list_tasks(State(state): State<Arc<AppState>>) -> Result<Json<Value>, W
 async fn get_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
-) -> Result<Json<TaskResponse>, WeaveflowError> {
-    tracing::info!(task_id = %task_id, "GET /runs/:task_id");
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<Value>, WeaveflowError> {
+    let summary = params
+        .get("summary")
+        .is_some_and(|v| v == "1" || v == "true");
+    tracing::info!(task_id = %task_id, summary, "GET /runs/:task_id");
     let tid = parse_task_id(&task_id)?;
     let task = match state.db.load_task(&tid)? {
         Some(t) => t,
@@ -418,20 +422,45 @@ async fn get_task(
     };
     let snapshot_count = state.db.count_snapshots(&tid)?;
 
+    if summary {
+        // token 友好模式：不带 inputs，progress.status.Completed 的内嵌输出
+        // 替换为 true（结果细节走 snapshots 端点按需获取）。
+        let progress = state.tracker.get(&tid).await.and_then(|s| {
+            let mut v = serde_json::to_value(&s).ok()?;
+            if let Some(status) = v.get_mut("status").and_then(|s| s.as_object_mut())
+                && let Some(completed) = status.get_mut("Completed")
+            {
+                *completed = Value::Bool(true);
+            }
+            Some(v)
+        });
+        return Ok(Json(serde_json::json!({
+            "task_id": task_id,
+            "pipeline_name": task.pipeline_name,
+            "status": task.status,
+            "created_at": task.created_at.to_rfc3339(),
+            "snapshot_count": snapshot_count,
+            "progress": progress,
+        })));
+    }
+
     let progress = state
         .tracker
         .get(&tid)
         .await
         .and_then(|s| serde_json::to_value(s).ok());
 
-    Ok(Json(TaskResponse {
-        task_id,
-        pipeline_name: task.pipeline_name,
-        inputs: task.inputs,
-        created_at: task.created_at.to_rfc3339(),
-        snapshot_count,
-        progress,
-    }))
+    Ok(Json(
+        serde_json::to_value(TaskResponse {
+            task_id,
+            pipeline_name: task.pipeline_name,
+            inputs: task.inputs,
+            created_at: task.created_at.to_rfc3339(),
+            snapshot_count,
+            progress,
+        })
+        .map_err(|e| WeaveflowError::Internal(e.to_string()))?,
+    ))
 }
 
 async fn list_snapshots(
@@ -451,8 +480,13 @@ async fn list_snapshots(
 async fn get_snapshot_by_seq(
     State(state): State<Arc<AppState>>,
     Path((task_id, seq)): Path<(String, u64)>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<SnapshotResponse>, WeaveflowError> {
     tracing::info!(task_id = %task_id, seq = seq, "GET /runs/:task_id/snapshots/:seq");
+    let max_bytes: Option<usize> = params
+        .get("max_bytes")
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0);
     let tid = parse_task_id(&task_id)?;
     let snap = state.db.load_snapshot_by_seq(&tid, seq)?;
     match snap {
@@ -479,6 +513,11 @@ async fn get_snapshot_by_seq(
                         "_base64": b64,
                     })
                 }
+            };
+            // token 友好截断：?max_bytes=N 时超长输出替换为头部预览
+            let output = match max_bytes {
+                Some(cap) => super::routine::preview_value(&output, cap),
+                None => output,
             };
             Ok(Json(SnapshotResponse {
                 seq: snap.seq,
@@ -1434,6 +1473,105 @@ output: "{s.output}"
 
         handle.abort();
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn summary_mode_and_snapshot_max_bytes() {
+        let (db, _dir) = temp_db();
+        let state = test_state(Arc::new(db));
+        let app = build_app(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let yaml = r#"
+name: big_pipe
+steps:
+  - id: gen
+    type: js
+    inputs:
+      code: "function run(data) { return {data: 'x'.repeat(5000)}; }"
+output: "{gen.output}"
+"#;
+        let client = reqwest::Client::new();
+        client
+            .post(format!("http://{addr}/pipelines"))
+            .header("content-type", "text/plain")
+            .body(yaml.to_string())
+            .send()
+            .await
+            .unwrap();
+        let resp = client
+            .post(format!("http://{addr}/runs"))
+            .json(&serde_json::json!({"pipeline": "big_pipe"}))
+            .send()
+            .await
+            .unwrap();
+        let run_body: Value = resp.json().await.unwrap();
+        let task_id = run_body["task_id"].as_str().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+        // summary 模式：无 inputs，Completed 内嵌输出被替换为 true
+        let resp = client
+            .get(format!("http://{addr}/runs/{task_id}?summary=1"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let summary: Value = resp.json().await.unwrap();
+        assert!(summary.get("inputs").is_none(), "summary: {summary}");
+        assert_eq!(summary["status"], "completed");
+        assert_eq!(
+            summary["progress"]["status"]["Completed"],
+            Value::Bool(true),
+            "summary progress: {}",
+            summary["progress"]
+        );
+
+        // full 模式：有 inputs，Completed 内嵌完整输出
+        let resp = client
+            .get(format!("http://{addr}/runs/{task_id}"))
+            .send()
+            .await
+            .unwrap();
+        let full: Value = resp.json().await.unwrap();
+        assert!(full.get("inputs").is_some());
+        assert_eq!(
+            full["progress"]["status"]["Completed"]["data"]
+                .as_str()
+                .unwrap()
+                .len(),
+            5000
+        );
+
+        // snapshot max_bytes：超长输出被截断为预览字符串
+        let resp = client
+            .get(format!(
+                "http://{addr}/runs/{task_id}/snapshots/1?max_bytes=100"
+            ))
+            .send()
+            .await
+            .unwrap();
+        let snap: Value = resp.json().await.unwrap();
+        let preview = snap["output"].as_str().unwrap_or("");
+        assert!(preview.contains("truncated"), "preview: {preview}");
+
+        // 不带 max_bytes：完整结构
+        let resp = client
+            .get(format!("http://{addr}/runs/{task_id}/snapshots/1"))
+            .send()
+            .await
+            .unwrap();
+        let snap: Value = resp.json().await.unwrap();
+        assert_eq!(
+            snap["output"]["data"].as_str().unwrap().len(),
+            5000,
+            "snap: {snap:?}"
+        );
+
+        handle.abort();
     }
 
     #[tokio::test]

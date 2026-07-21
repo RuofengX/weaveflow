@@ -138,7 +138,7 @@ pub async fn on_task_terminal(state: &Arc<AppState>, task_id: &weaveflow::tracke
 }
 
 /// 截断为预览：紧凑序列化超出 max_bytes 时截取头部并标记总字节数。
-fn preview_value(v: &Value, max_bytes: usize) -> Value {
+pub(crate) fn preview_value(v: &Value, max_bytes: usize) -> Value {
     let s = serde_json::to_string(v).unwrap_or_default();
     if s.len() <= max_bytes {
         return v.clone();

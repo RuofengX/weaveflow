@@ -270,6 +270,19 @@ pub async fn task_ls(cfg: &CliConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// task show：默认 summary（省 token：不带 inputs、不内嵌最终输出）；
+/// full = 完整响应。
+pub async fn task_show(cfg: &CliConfig, task_id: &str, full: bool) -> Result<(), String> {
+    let path = if full {
+        format!("/runs/{task_id}")
+    } else {
+        format!("/runs/{task_id}?summary=1")
+    };
+    let result = get(cfg, &path).await?;
+    cfg.print_json(&result);
+    Ok(())
+}
+
 pub async fn snapshot_list(cfg: &CliConfig, task_id: &str) -> Result<(), String> {
     let result = get(cfg, &format!("/runs/{task_id}/snapshots")).await?;
     cfg.print_json(&result);
@@ -335,8 +348,13 @@ pub async fn snapshot_show(
     task_id: &str,
     seq: u64,
     full: bool,
+    max_bytes: Option<usize>,
 ) -> Result<(), String> {
-    let mut result = get(cfg, &format!("/runs/{task_id}/snapshots/{seq}")).await?;
+    let path = match max_bytes {
+        Some(n) => format!("/runs/{task_id}/snapshots/{seq}?max_bytes={n}"),
+        None => format!("/runs/{task_id}/snapshots/{seq}"),
+    };
+    let mut result = get(cfg, &path).await?;
     if !full {
         mask_base64_strings(&mut result);
     }

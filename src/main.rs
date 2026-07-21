@@ -273,6 +273,13 @@ enum TaskCmd {
     /// List all tasks (alias: list)
     #[command(alias = "list")]
     Ls,
+    /// Show task status (token-friendly summary by default; --full includes inputs + embedded output)
+    Show {
+        task_id: String,
+        /// Full response including inputs and embedded pipeline output
+        #[arg(long)]
+        full: bool,
+    },
     /// Manage task snapshots
     #[command(subcommand)]
     Snapshot(SnapshotCmd),
@@ -289,6 +296,9 @@ enum SnapshotCmd {
         /// Print超长 base64 字段的完整内容（默认隐藏，仅显示字节长度）
         #[arg(long)]
         full: bool,
+        /// 服务端截断：输出超过 N 字节时只回头部预览（省 token）
+        #[arg(long)]
+        max_bytes: Option<usize>,
     },
 }
 
@@ -459,11 +469,14 @@ async fn main() {
         Commands::Task(TaskCmd::Ls) => {
             exit_on_err(cli::client::task_ls(&cfg).await);
         }
+        Commands::Task(TaskCmd::Show { task_id, full }) => {
+            exit_on_err(cli::client::task_show(&cfg, &task_id, full).await);
+        }
         Commands::Task(TaskCmd::Snapshot(SnapshotCmd::List { task_id })) => {
             exit_on_err(cli::client::snapshot_list(&cfg, &task_id).await);
         }
-        Commands::Task(TaskCmd::Snapshot(SnapshotCmd::Show { task_id, seq, full })) => {
-            exit_on_err(cli::client::snapshot_show(&cfg, &task_id, seq, full).await);
+        Commands::Task(TaskCmd::Snapshot(SnapshotCmd::Show { task_id, seq, full, max_bytes })) => {
+            exit_on_err(cli::client::snapshot_show(&cfg, &task_id, seq, full, max_bytes).await);
         }
         Commands::System(SystemCmd::Prune { force, dry_run }) => {
             exit_on_err(cli::client::system_prune(&cfg, force, dry_run).await);
