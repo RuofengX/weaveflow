@@ -47,6 +47,8 @@ rayon = "1"
 flate2 = "1"
 cron = "0.15"
 toml = "0.8"
+rmcp = { version = "2.2.0", features = ["server", "transport-io", "schemars"] }
+schemars = "1.2.1"
 
 
 

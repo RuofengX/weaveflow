@@ -157,6 +157,9 @@ enum Commands {
     #[command(subcommand)]
     Routine(RoutineCmd),
 
+    /// Start an MCP server on stdio (for AI agents: Claude Code, opencode, etc.)
+    Mcp,
+
     /// Run a pipeline
     Run {
         /// Pipeline name
@@ -465,6 +468,9 @@ async fn main() {
         }
         Commands::Check { file } => {
             exit_on_err(check_pipeline(&file, cfg.output));
+        }
+        Commands::Mcp => {
+            exit_on_err(cli::mcp::run(cfg).await);
         }
         Commands::Task(TaskCmd::Ls) => {
             exit_on_err(cli::client::task_ls(&cfg).await);

@@ -6,7 +6,7 @@ use tungstenite::Message;
 
 use super::config::CliConfig;
 
-fn encode_segment(s: &str) -> String {
+pub(crate) fn encode_segment(s: &str) -> String {
     let mut r = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
@@ -53,7 +53,7 @@ async fn parse_response(resp: reqwest::Response, url: &str) -> Result<Value, Str
     serde_json::from_str(&body).map_err(|e| format!("响应格式错误 ({url}): {e}"))
 }
 
-async fn get(cfg: &CliConfig, path: &str) -> Result<Value, String> {
+pub(crate) async fn get(cfg: &CliConfig, path: &str) -> Result<Value, String> {
     let url = api_url(&cfg.daemon, path);
     let resp = cfg
         .http_client()
@@ -64,7 +64,7 @@ async fn get(cfg: &CliConfig, path: &str) -> Result<Value, String> {
     parse_response(resp, &url).await
 }
 
-async fn post(cfg: &CliConfig, path: &str, body: Value) -> Result<Value, String> {
+pub(crate) async fn post(cfg: &CliConfig, path: &str, body: Value) -> Result<Value, String> {
     let url = api_url(&cfg.daemon, path);
     let resp = cfg
         .http_client()
@@ -76,7 +76,7 @@ async fn post(cfg: &CliConfig, path: &str, body: Value) -> Result<Value, String>
     parse_response(resp, &url).await
 }
 
-async fn post_body(cfg: &CliConfig, path: &str, body: String) -> Result<Value, String> {
+pub(crate) async fn post_body(cfg: &CliConfig, path: &str, body: String) -> Result<Value, String> {
     let url = api_url(&cfg.daemon, path);
     let resp = cfg
         .http_client()
@@ -89,7 +89,7 @@ async fn post_body(cfg: &CliConfig, path: &str, body: String) -> Result<Value, S
     parse_response(resp, &url).await
 }
 
-async fn delete(cfg: &CliConfig, path: &str) -> Result<Value, String> {
+pub(crate) async fn delete(cfg: &CliConfig, path: &str) -> Result<Value, String> {
     let url = api_url(&cfg.daemon, path);
     let resp = cfg
         .http_client()
@@ -144,7 +144,7 @@ pub async fn pipeline_delete(cfg: &CliConfig, name: &str) -> Result<(), String> 
 
 // ── Routine ─────────────────────────────────────────────────────────────
 
-async fn put(cfg: &CliConfig, path: &str, body: Value) -> Result<Value, String> {
+pub(crate) async fn put(cfg: &CliConfig, path: &str, body: Value) -> Result<Value, String> {
     let url = api_url(&cfg.daemon, path);
     let resp = cfg
         .http_client()
