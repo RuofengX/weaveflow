@@ -58,8 +58,8 @@ fn dropped_event(routine: &str, reason: impl std::fmt::Display) -> RoutineEventR
 }
 
 /// 持久化到收件箱（可靠通道：智能体下次会话按 seq 增量回查），
-/// 同时广播给 WS 实时订阅者（尽力通道）。
-fn emit(state: &Arc<AppState>, mut rec: RoutineEventRecord) {
+/// 同时广播给 WS 实时订阅者（尽力通道）。返回分配了 seq 的记录。
+fn emit(state: &Arc<AppState>, mut rec: RoutineEventRecord) -> RoutineEventRecord {
     match state.db.append_routine_event(rec.clone()) {
         Ok(Some(seq)) => rec.seq = seq,
         Ok(None) => {
@@ -70,6 +70,7 @@ fn emit(state: &Arc<AppState>, mut rec: RoutineEventRecord) {
         }
     }
     state.routine_mgr.emit(&rec);
+    rec
 }
 
 // ── 任务终态钩子（submit_run 的统一收口点调用） ─────────────────────────
@@ -120,7 +121,7 @@ pub async fn on_task_terminal(state: &Arc<AppState>, task_id: &weaveflow::tracke
     rec.task_id = Some(task_id.to_string());
     rec.error = error;
     rec.output_preview = output.map(|v| preview_value(&v, preview_bytes));
-    emit(state, rec.clone());
+    let rec = emit(state, rec);
 
     // webhook 只投递终态事件；投递失败落 notify_failed 事件（不再递归投递）
     if let Some(url) = notify.and_then(|n| n.webhook_url) {
@@ -388,8 +389,10 @@ async fn cron_worker(
         }
     }
     loop {
+        // interval 锚点固定为 created_at：next_fire_after 按 created_at+k*iv 对齐，
+        // 不把每轮调度延迟累进锚点（否则间隔逐周期漂移）。
         let base = match state.db.load_routine(&name) {
-            Ok(Some(row)) => row.last_fired_at.unwrap_or(row.created_at),
+            Ok(Some(row)) => row.created_at,
             _ => {
                 // routine 已被删除但 worker 尚未收到 cancel —— 直接退出
                 tracing::warn!(routine = %name, "cron worker: row missing, exiting");
@@ -449,13 +452,18 @@ async fn stream_worker(
         batch: Vec<Value>,
         buffered: &Arc<AtomicUsize>,
     ) {
+        // permit 获取成功前批次仍算 buffered（含阻塞在信号量上的等待期），
+        // 否则 buffer_cap 的 429 边界会漏掉在途批次。
+        let permit = match sem.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                buffered.fetch_sub(batch.len(), Ordering::SeqCst);
+                return;
+            }
+        };
         buffered.fetch_sub(batch.len(), Ordering::SeqCst);
         let mut inputs = HashMap::new();
         inputs.insert(slot.to_string(), Value::Array(batch));
-        let permit = match sem.clone().acquire_owned().await {
-            Ok(p) => p,
-            Err(_) => return,
-        };
         // 提交成功后，permit 由后台轮询在 task 到达终态时释放。
         let db = state.db.clone();
         match submit_run(state, pipeline, inputs, &format!("routine:{name}")).await {
@@ -493,13 +501,23 @@ async fn stream_worker(
     }
 
     // flush_interval 缺省时 timer 为 None，对应 select 分支永不就绪。
-    let mut flush_timer: Option<tokio::time::Interval> =
-        flush_dur.map(|d| tokio::time::interval_at(tokio::time::Instant::now() + d, d));
+    // MissedTickBehavior::Delay + 每批首元素 reset：批次窗口从"本批第一个
+    // 元素到达"起算，空闲期过期的 tick 不会导致首元素立即单飞。
+    let mut flush_timer: Option<tokio::time::Interval> = flush_dur.map(|d| {
+        let mut t = tokio::time::interval_at(tokio::time::Instant::now() + d, d);
+        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        t
+    });
 
     loop {
         tokio::select! {
             _ = cancel.changed() => {
-                // 关闭语义：尽力把剩余缓冲全部 flush 后退出
+                // 关闭语义：先把 channel 中已 accepted 的元素全部收进 buf
+                // （worker 阻塞在信号量期间 push 成功的元素只在 rx 里，不 drain 会丢），
+                // 再尽力把剩余缓冲全部 flush 后退出。
+                while let Ok(items) = rx.try_recv() {
+                    buf.extend(items);
+                }
                 while !buf.is_empty() {
                     let take = buf.len().min(cfg.batch_size);
                     let batch: Vec<Value> = buf.drain(..take).collect();
@@ -509,6 +527,11 @@ async fn stream_worker(
                 return;
             }
             Some(items) = rx.recv() => {
+                if buf.is_empty()
+                    && let Some(t) = flush_timer.as_mut()
+                {
+                    t.reset();
+                }
                 buf.extend(items);
                 while buf.len() >= cfg.batch_size {
                     let batch: Vec<Value> = buf.drain(..cfg.batch_size).collect();
@@ -1063,6 +1086,140 @@ output: "{s.output}"
         handle.abort();
     }
 
+    fn register_slow_pipeline(db: &Database) {
+        // ~1s 忙等：让 max_in_flight=1 的 permit 被长时间占住
+        let yaml = r#"
+name: slow_pipe
+steps:
+  - id: s
+    type: js
+    timeout_sec: 10
+    inputs:
+      code: |
+        function run() { var t = Date.now(); while (Date.now() - t < 1000) {} return 1; }
+output: "{s.output}"
+"#;
+        let def = weaveflow::dsl::parser::parse(yaml).expect("parse");
+        db.save_pipeline_upsert(&def).expect("save pipeline");
+    }
+
+    #[tokio::test]
+    async fn stream_flush_interval_waits_after_idle() {
+        // D5：空闲期过后首个元素不应立即 flush，批次窗口从首元素到达起算
+        let db = Arc::new(temp_db());
+        register_test_pipeline(&db);
+        let state = test_state(db.clone());
+        let (base, handle) = serve_app(state).await;
+        let client = reqwest::Client::new();
+
+        let mut def = stream_def("fl", 100);
+        def.stream.as_mut().unwrap().flush_interval = Some("400ms".into());
+        client
+            .put(format!("{base}/routines/fl"))
+            .json(&def)
+            .send()
+            .await
+            .unwrap();
+
+        // 空闲 1s（> flush_interval），旧实现里过期 tick 会让下个元素立即单飞
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        client
+            .post(format!("{base}/routines/fl/push"))
+            .json(&serde_json::json!([1]))
+            .send()
+            .await
+            .unwrap();
+
+        // 窗口内不应 flush
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let row = db.load_routine("fl").unwrap().unwrap();
+        assert_eq!(row.total_fired, 0, "空闲后首元素立即 flush（窗口未等待）");
+
+        // 窗口结束后应 flush
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let row = db.load_routine("fl").unwrap().unwrap();
+            if row.total_fired == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "flush_interval 未生效"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn stream_delete_drains_channel() {
+        // D6：DELETE 时滞留在 channel 中的已 accepted 元素必须 flush，不得丢失
+        let db = Arc::new(temp_db());
+        register_slow_pipeline(&db);
+        let state = test_state(db.clone());
+        let (base, handle) = serve_app(state).await;
+        let client = reqwest::Client::new();
+
+        let mut def = stream_def("d6", 1);
+        def.pipeline = "slow_pipe".into();
+        def.stream.as_mut().unwrap().max_in_flight = 1;
+        client
+            .put(format!("{base}/routines/d6"))
+            .json(&def)
+            .send()
+            .await
+            .unwrap();
+
+        // 元素 1：占住 permit；元素 2：worker recv 后阻塞在 acquire；
+        // 元素 3、4：滞留在 mpsc channel
+        for body in [
+            &serde_json::json!(1),
+            &serde_json::json!(2),
+            &serde_json::json!([3, 4]),
+        ] {
+            let resp = client
+                .post(format!("{base}/routines/d6/push"))
+                .json(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+        }
+        // 给 worker 一点时间把 2 从 channel 收走
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let resp = client
+            .delete(format!("{base}/routines/d6"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // 4 个元素最终都应产生 task（worker 关闭前 drain channel + flush）
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let resp = client.get(format!("{base}/tasks")).send().await.unwrap();
+            let tasks: Value = resp.json().await.unwrap();
+            let n = tasks
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter(|t| t["pipeline_name"] == "slow_pipe")
+                        .count()
+                })
+                .unwrap_or(0);
+            if n >= 4 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "channel 中元素丢失：只产生 {n}/4 个 task"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        handle.abort();
+    }
+
     #[tokio::test]
     async fn cron_interval_fires() {
         let db = Arc::new(temp_db());
@@ -1306,6 +1463,15 @@ output: "{s.output}"
         assert_eq!(ev["routine"], "wh");
         assert!(ev["task_id"].as_str().is_some());
         assert!(ev.get("output_preview").is_some());
+        // D9：webhook payload 的 seq 必须与收件箱一致（不再恒为 0）
+        assert!(
+            ev["seq"].as_u64().unwrap() > 0,
+            "webhook seq: {}",
+            ev["seq"]
+        );
+        let inbox = state.db.list_routine_events("wh", 0, 0).unwrap();
+        let inbox_ev = inbox.iter().find(|e| e.kind == "task_completed").unwrap();
+        assert_eq!(ev["seq"].as_u64().unwrap(), inbox_ev.seq);
 
         handle.abort();
         hook_handle.abort();

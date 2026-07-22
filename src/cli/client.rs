@@ -1,10 +1,8 @@
+use super::config::CliConfig;
 use futures::StreamExt;
 use serde_json::Value;
 use std::io::IsTerminal;
-use tokio_tungstenite::connect_async;
 use tungstenite::Message;
-
-use super::config::CliConfig;
 
 pub(crate) fn encode_segment(s: &str) -> String {
     let mut r = String::with_capacity(s.len());
@@ -121,6 +119,19 @@ pub async fn pipeline_apply(
     };
     let result = post_body(cfg, "/pipelines", yaml).await?;
     cfg.print_json(&result);
+    // apply 成功路径回显 validator warnings（原来静默丢弃，诊断信息丢失）
+    if let Some(warnings) = result["warnings"].as_array()
+        && !warnings.is_empty()
+    {
+        eprintln!("警告 ({} 项):", warnings.len());
+        for w in warnings {
+            eprintln!(
+                "  [{}] {}",
+                w["code"].as_str().unwrap_or("?"),
+                w["message"].as_str().unwrap_or("")
+            );
+        }
+    }
     Ok(())
 }
 
@@ -302,10 +313,9 @@ fn mask_base64_strings(v: &mut Value) {
     match v {
         Value::String(s) => {
             if looks_like_base64(s) {
-                let b64_len = s.len();
-                let padding = s.bytes().rev().take_while(|&b| b == b'=').count();
-                let decoded_bytes = b64_len / 4 * 3 - padding.min(2);
-                *s = format!("<base64 hidden: {decoded_bytes} bytes — use --full to show>");
+                // 报告原始字符数：纯文本长串（如 "x".repeat(N)）也会命中该启发式，
+                // 按 base64 解码公式反推字节数会严重误导。
+                *s = format!("<base64 hidden: {} chars — use --full to show>", s.len());
             }
         }
         Value::Array(arr) => arr.iter_mut().for_each(mask_base64_strings),
@@ -383,10 +393,16 @@ pub async fn system_operators(cfg: &CliConfig) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn system_prune(cfg: &CliConfig, force: bool, dry_run: bool) -> Result<(), String> {
+pub async fn system_prune(
+    cfg: &CliConfig,
+    force: bool,
+    dry_run: bool,
+    include_cache: bool,
+) -> Result<(), String> {
     let body = serde_json::json!({
         "force": force,
         "dry_run": dry_run,
+        "include_cache": include_cache,
     });
     // prune 可能全表扫描 + compact，使用独立的放宽超时（--prune-timeout）
     let url = api_url(&cfg.daemon, "/prune");
@@ -405,14 +421,15 @@ pub async fn system_prune(cfg: &CliConfig, force: bool, dry_run: bool) -> Result
     let tasks_removed = result["tasks_removed"].as_u64().unwrap_or(0);
     let snapshots_removed = result["snapshots_removed"].as_u64().unwrap_or(0);
     let objects_removed = result["objects_removed"].as_u64().unwrap_or(0);
+    let cache_removed = result["cache_entries_removed"].as_u64().unwrap_or(0);
     let bytes_freed = result["bytes_freed"].as_u64().unwrap_or(0);
     if dry_run {
         println!(
-            "Would remove: {tasks_removed} tasks, {snapshots_removed} snapshots, {objects_removed} objects ({bytes_freed} bytes)"
+            "Would remove: {tasks_removed} tasks, {snapshots_removed} snapshots, {objects_removed} objects, {cache_removed} cache entries ({bytes_freed} bytes)"
         );
     } else {
         println!(
-            "Removed: {tasks_removed} tasks, {snapshots_removed} snapshots, {objects_removed} objects ({bytes_freed} bytes)"
+            "Removed: {tasks_removed} tasks, {snapshots_removed} snapshots, {objects_removed} objects, {cache_removed} cache entries ({bytes_freed} bytes)"
         );
     }
     Ok(())
@@ -500,16 +517,30 @@ pub async fn run_pipeline_watch(
         "ws://"
     };
     let ws_url = format!("{ws_scheme}{host}/runs/{task_id}/ws");
-    let (ws_stream, _) = tokio::time::timeout(cfg.ws_timeout, connect_async(&ws_url))
-        .await
-        .map_err(|_| format!("WebSocket 连接超时 ({ws_url})"))?
-        .map_err(|e| format!("WebSocket 连接失败 ({ws_url}): {e}"))?;
+    // 终态 TaskSnapshot 可能携带大输出（command 2×10MB / http/file 64MB），
+    // tungstenite 默认 max_frame_size=16MiB 会把协议错误吞成"连接丢失"，
+    // 这里放宽到 256MiB（daemon 侧同步放宽）。
+    let ws_config = tungstenite::protocol::WebSocketConfig {
+        max_message_size: Some(256 << 20),
+        max_frame_size: Some(256 << 20),
+        ..Default::default()
+    };
+    let (ws_stream, _) = tokio::time::timeout(
+        cfg.ws_timeout,
+        tokio_tungstenite::connect_async_with_config(&ws_url, Some(ws_config), false),
+    )
+    .await
+    .map_err(|_| format!("WebSocket 连接超时 ({ws_url})"))?
+    .map_err(|e| format!("WebSocket 连接失败 ({ws_url}): {e}"))?;
 
     let (_, mut read) = ws_stream.split();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
 
-    // 启动 reader 任务
+    // 启动 reader 任务；协议错误（如对端帧超限）记录到共享槽，
+    // 供渲染层把"连接丢失"泛化错误替换为真实原因。
+    let ws_error = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let ws_error_reader = ws_error.clone();
     tokio::spawn(async move {
         while let Some(msg) = read.next().await {
             match msg {
@@ -530,30 +561,44 @@ pub async fn run_pipeline_watch(
                     }
                 }
                 Ok(Message::Close(_)) => break,
-                Err(_) => break,
+                Err(e) => {
+                    *ws_error_reader.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(e.to_string());
+                    break;
+                }
                 _ => {}
             }
         }
     });
 
+    // 渲染结束后：若失败且 WS 层记录了真实错误，把它拼进错误消息。
+    let finish = |r: Result<(), String>| -> Result<(), String> {
+        let ws_err = ws_error.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match (r, ws_err) {
+            (Err(e), Some(ws)) => Err(format!("{e}（WebSocket: {ws}）")),
+            (r, _) => r,
+        }
+    };
+
     // 3. Render：--output json 时逐条推送原始 TaskSnapshot JSON 行（面向 Agent）；
     //    否则 stdout 非 TTY 时自动回落 text 模式。
     if cfg.is_json() {
-        crate::cli::watch::run_json_stream(&mut rx).await?;
-        return Ok(());
+        return finish(crate::cli::watch::run_json_stream(&mut rx).await);
     }
     let text_mode = text_mode || !std::io::stdout().is_terminal();
     if text_mode {
-        crate::cli::watch::run_text(&mut rx).await?;
+        finish(crate::cli::watch::run_text(&mut rx).await)?;
     } else {
         // run_tui 是同步阻塞事件循环 —— 放进 spawn_blocking，
         // 否则单核 tokio runtime 下 WS reader 永远得不到调度。
         let tid = task_id.clone();
         let pname = pipeline_name.clone();
-        tokio::task::spawn_blocking(move || crate::cli::watch::run_tui(&mut rx, &tid, &pname))
-            .await
-            .map_err(|e| format!("TUI 任务 panic: {e}"))?
-            .map_err(|e| format!("TUI 渲染失败: {e}"))?;
+        let r =
+            tokio::task::spawn_blocking(move || crate::cli::watch::run_tui(&mut rx, &tid, &pname))
+                .await
+                .map_err(|e| format!("TUI 任务 panic: {e}"))
+                .and_then(|inner| inner.map_err(|e| format!("TUI 渲染失败: {e}")));
+        finish(r)?;
     }
     Ok(())
 }
@@ -640,13 +685,14 @@ mod tests {
     }
 
     #[test]
-    fn mask_base64_strings_hides_long_base64_with_byte_length() {
-        // 766 个 base64 字符（含 2 个 padding）= 571 字节原始数据
+    fn mask_base64_strings_hides_long_base64_with_char_count() {
+        // 766 个 base64 字符（含 2 个 padding）——报告原始字符数而非解码字节数
+        // （纯文本长串同样命中启发式，解码公式反推会误导）
         let b64 = format!("{}==", "QUJD".repeat(191));
         let mut v = serde_json::json!({"output": {"content": b64, "size": 571}});
         mask_base64_strings(&mut v);
         let masked = v["output"]["content"].as_str().unwrap();
-        assert!(masked.contains("571 bytes"), "masked: {masked}");
+        assert!(masked.contains("766 chars"), "masked: {masked}");
         assert!(masked.contains("--full"), "masked: {masked}");
         assert_eq!(v["output"]["size"], serde_json::json!(571));
     }

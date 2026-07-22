@@ -309,10 +309,14 @@ enum SnapshotCmd {
 enum SystemCmd {
     /// Prune old tasks and data
     Prune {
+        /// 忽略各 pipeline 的 result_ttl，删除所有终态任务
         #[arg(long)]
         force: bool,
         #[arg(long)]
         dry_run: bool,
+        /// 同时清空全部步骤缓存（CACHE 表 + 其独占 OBJECT）
+        #[arg(long)]
+        include_cache: bool,
     },
     /// List available operators
     Operators,
@@ -337,7 +341,23 @@ fn exit_on_err(r: Result<(), String>) {
 
 fn check_pipeline(file: &str, output: OutputFormat) -> Result<(), String> {
     let yaml = std::fs::read_to_string(file).map_err(|e| format!("读取文件 {file}: {e}"))?;
-    let def = weaveflow::dsl::parser::parse(&yaml).map_err(|e| format!("YAML 解析失败: {e}"))?;
+    let def = match weaveflow::dsl::parser::parse(&yaml) {
+        Ok(d) => d,
+        Err(e) => {
+            // ParseError Display 已含"YAML 解析失败:"前缀，不再重复包裹。
+            // --output json 下解析失败同样输出结构化报告（与校验失败路径一致）。
+            if output.is_json() {
+                let v = serde_json::json!({
+                    "ok": false,
+                    "errors": [{"code": "parse_error", "message": e.to_string()}],
+                    "warnings": [],
+                });
+                println!("{}", serde_json::to_string(&v).unwrap_or_default());
+                return Err("解析失败".to_string());
+            }
+            return Err(e.to_string());
+        }
+    };
     let report = weaveflow::dsl::validator::validate(&def);
 
     if output.is_json() {
@@ -458,7 +478,11 @@ async fn main() {
             watch,
             text_output,
         } => {
-            if watch || text_output {
+            // 非 TTY 场景（管道/CI）自动回落到 text-output 流式模式：
+            // 仅提交任务就退出会让失败任务不可见且 exit code 恒为 0。
+            use std::io::IsTerminal;
+            let auto_text = !watch && !text_output && !std::io::stdout().is_terminal();
+            if watch || text_output || auto_text {
                 exit_on_err(
                     cli::client::run_pipeline_watch(&cfg, &name, &input, text_output).await,
                 );
@@ -489,8 +513,12 @@ async fn main() {
         })) => {
             exit_on_err(cli::client::snapshot_show(&cfg, &task_id, seq, full, max_bytes).await);
         }
-        Commands::System(SystemCmd::Prune { force, dry_run }) => {
-            exit_on_err(cli::client::system_prune(&cfg, force, dry_run).await);
+        Commands::System(SystemCmd::Prune {
+            force,
+            dry_run,
+            include_cache,
+        }) => {
+            exit_on_err(cli::client::system_prune(&cfg, force, dry_run, include_cache).await);
         }
         Commands::System(SystemCmd::Operators) => {
             exit_on_err(cli::client::system_operators(&cfg).await);

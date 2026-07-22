@@ -65,6 +65,9 @@ struct TaskResponse {
     inputs: Value,
     created_at: String,
     snapshot_count: u64,
+    /// DB 中的任务终态字符串（running/completed/failed/interrupted）——
+    /// progress 在 tracker 回收后为 null，消费方据此兜底。
+    status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     progress: Option<Value>,
 }
@@ -87,6 +90,8 @@ struct PruneRequest {
     pipeline: Option<String>,
     force: Option<bool>,
     dry_run: Option<bool>,
+    /// 同时清空全部步骤缓存（CACHE + 其独占 OBJECT）
+    include_cache: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -137,6 +142,9 @@ async fn create_pipeline(
         "name": &*pipeline.name,
         "steps": pipeline.steps.len(),
         "slots": pipeline.slots,
+        "warnings": report.warnings.iter()
+            .map(|w| serde_json::json!({"code": w.code, "message": w.message}))
+            .collect::<Vec<_>>(),
     });
     Ok(Json(response))
 }
@@ -457,6 +465,7 @@ async fn get_task(
             inputs: task.inputs,
             created_at: task.created_at.to_rfc3339(),
             snapshot_count,
+            status: task.status,
             progress,
         })
         .map_err(|e| WeaveflowError::Internal(e.to_string()))?,
@@ -483,10 +492,17 @@ async fn get_snapshot_by_seq(
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<SnapshotResponse>, WeaveflowError> {
     tracing::info!(task_id = %task_id, seq = seq, "GET /runs/:task_id/snapshots/:seq");
-    let max_bytes: Option<usize> = params
-        .get("max_bytes")
-        .and_then(|v| v.parse().ok())
-        .filter(|&n| n > 0);
+    let max_bytes: Option<usize> = match params.get("max_bytes") {
+        None => None,
+        Some(v) => match v.parse::<usize>() {
+            Ok(n) if n > 0 => Some(n),
+            _ => {
+                return Err(WeaveflowError::BadRequest(format!(
+                    "max_bytes 必须为正整数，收到: {v}"
+                )));
+            }
+        },
+    };
     let tid = parse_task_id(&task_id)?;
     let snap = state.db.load_snapshot_by_seq(&tid, seq)?;
     match snap {
@@ -541,6 +557,7 @@ async fn prune_tasks(
         force: req.force.unwrap_or(false),
         dry_run: req.dry_run.unwrap_or(false),
         skip_tasks: state.tracker.running_task_ids(),
+        include_cache: req.include_cache.unwrap_or(false),
     };
     let plan = state.db.prune_scan(&options)?;
     let report = state.db.prune_execute(&plan, options.dry_run)?;
@@ -632,7 +649,12 @@ async fn ws_task(
         }
     };
 
-    Ok(ws.on_upgrade(move |socket| handle_ws(socket, rx, initial)))
+    Ok(ws
+        // 终态快照可携带大输出（command 2×10MB / http,file 64MB），放宽单帧上限，
+        // 与 CLI 侧 tungstenite 配置保持一致。
+        .max_frame_size(256 << 20)
+        .max_message_size(256 << 20)
+        .on_upgrade(move |socket| handle_ws(socket, rx, initial)))
 }
 
 async fn handle_ws(
@@ -737,6 +759,9 @@ pub(crate) fn build_app(state: Arc<AppState>) -> Router {
         .route("/system/operators", get(list_operators))
         .route("/system/logs", get(get_logs))
         .route("/system/version", get(system_version))
+        // 默认 DefaultBodyLimit=2MiB 会 413 掉大 pipeline YAML；放宽到 64MB
+        // （与单请求数据面上限一致）。
+        .layer(axum::extract::DefaultBodyLimit::max(64 << 20))
         .with_state(state)
 }
 
@@ -928,11 +953,25 @@ fn log_file_path() -> std::path::PathBuf {
     resolve_data_dir().join("weaveflow.log")
 }
 
+/// PID 复用防护：只比较 exe 的**文件名**而非完整路径。
+/// 二进制升级（cargo install / cp 覆盖）后新 CLI 与运行中 daemon 的
+/// exe 路径不同但文件名同为 weaveflow，必须视为同一 daemon——
+/// 否则 stop 会误判"PID 复用"拒绝 kill 并误删有效 pidfile，
+/// start 也会再拉起一个导致 bind 冲突。
 fn verify_pid_binary(pid: u32, expected_exe: &std::path::Path) -> bool {
     let exe_link = format!("/proc/{pid}/exe");
+    // 运行中二进制被替换（rename 覆盖）时 exe 链接带 " (deleted)" 后缀
+    let file_name = |p: &std::path::Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.strip_suffix(" (deleted)").unwrap_or(s).to_string())
+    };
     match std::fs::canonicalize(&exe_link) {
         Ok(pid_exe) => match std::fs::canonicalize(expected_exe) {
-            Ok(my_exe) => pid_exe == my_exe,
+            Ok(my_exe) => match (file_name(&pid_exe), file_name(&my_exe)) {
+                (Some(a), Some(b)) => a == b,
+                _ => pid_exe == my_exe,
+            },
             Err(_) => false,
         },
         Err(_) => false,
@@ -1258,6 +1297,19 @@ mod tests {
             99999999,
             &std::env::current_exe().unwrap()
         ));
+    }
+
+    #[test]
+    fn verify_pid_binary_same_basename_different_path() {
+        // 二进制升级场景：daemon 跑旧路径的 weaveflow，新 CLI 在另一路径——
+        // 文件名相同即视为同一 daemon（PID 复用防护只挡异名二进制）
+        let exe = std::env::current_exe().unwrap();
+        let dir = std::env::temp_dir().join(format!("weaveflow-pidverify-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let renamed = dir.join(exe.file_name().unwrap());
+        std::fs::copy(&exe, &renamed).unwrap();
+        assert!(verify_pid_binary(std::process::id(), &renamed));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1610,5 +1662,80 @@ output: "{gen.output}"
         assert_eq!(remaining, 2);
         assert!(start.elapsed() >= std::time::Duration::from_millis(300));
         assert!(start.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn ws_delivers_snapshot_larger_than_16mib() {
+        // D1：终态快照 >16MiB 时 WS 不再断连（两端帧上限放宽到 256MiB）
+        let (db, _dir) = temp_db();
+        let db = Arc::new(db);
+        let yaml = r#"
+name: ws_big
+steps:
+  - id: a
+    type: js
+    inputs:
+      code: |
+        function run() { return "A".repeat(17 * 1024 * 1024); }
+output: "{a.output}"
+"#;
+        let def = weaveflow::dsl::parser::parse(yaml).expect("parse");
+        db.save_pipeline_upsert(&def).expect("save pipeline");
+        let state = test_state(db);
+        let app = build_app(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{addr}/runs"))
+            .json(&serde_json::json!({"pipeline": "ws_big"}))
+            .send()
+            .await
+            .unwrap();
+        let task_id = resp.json::<Value>().await.unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let ws_url = format!("ws://{addr}/runs/{task_id}/ws");
+        let cfg = tungstenite::protocol::WebSocketConfig {
+            max_message_size: Some(256 << 20),
+            max_frame_size: Some(256 << 20),
+            ..Default::default()
+        };
+        let (mut ws, _) = tokio_tungstenite::connect_async_with_config(&ws_url, Some(cfg), false)
+            .await
+            .expect("ws connect");
+        use futures::StreamExt;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut terminal: Option<Value> = None;
+        while std::time::Instant::now() < deadline {
+            let Some(msg) = ws.next().await else { break };
+            let Ok(tungstenite::Message::Text(text)) = msg else {
+                continue;
+            };
+            let v: Value = serde_json::from_str(&text).unwrap_or_default();
+            if v["status"]
+                .as_object()
+                .is_some_and(|o| o.contains_key("Completed") || o.contains_key("Failed"))
+            {
+                terminal = Some(v);
+                break;
+            }
+        }
+        let terminal = terminal.expect("应收到终态快照（>16MiB 帧不再断连）");
+        assert!(
+            terminal["status"]
+                .as_object()
+                .unwrap()
+                .contains_key("Completed"),
+            "terminal: {:?}",
+            &terminal.to_string()[..200]
+        );
+        handle.abort();
     }
 }

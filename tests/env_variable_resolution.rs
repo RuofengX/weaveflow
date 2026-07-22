@@ -22,5 +22,6 @@ steps:
 output: "{s1.output.value}"
 "#;
     let result = run_yaml(yaml, HashMap::new()).expect("run");
-    assert_eq!(result["key"], json!("env_val"));
+    // env 引用正常解析；最终 output 与快照同规脱敏（≥4 字符的 env 值替换为 ***）
+    assert_eq!(result["key"], json!("***"));
 }

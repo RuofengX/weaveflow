@@ -9,6 +9,7 @@ use tracing::debug;
 const FILTER_OPERATORS: [&str; 8] = ["eq", "ne", "gt", "gte", "lt", "lte", "in", "contains"];
 const SORT_ORDERS: [&str; 2] = ["asc", "desc"];
 const MAX_ITERATE_WORKERS: u32 = 1024;
+const MAX_ITERATE_BATCH_SIZE: u32 = 1_048_576;
 const MAX_RETRY_ATTEMPTS: u32 = 100;
 const MAX_RETRY_DELAY_MS: u64 = 3_600_000;
 const BASE64_MODES: [&str; 2] = ["encode", "decode"];
@@ -152,6 +153,7 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
             }
         }
         check_iterate_config(step.iterate.as_ref(), &step.id, &all_step_ids, &mut report);
+        check_required_inputs(step, &mut report);
         if let Some(ref retry) = step.retry {
             if retry.max_attempts == 0 {
                 report.errors.push(ValidationError {
@@ -383,11 +385,29 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
 
     // ---- 6. JSON Schema ----
     for slot in &def.slots {
-        if let Err(e) = jsonschema::compile(&slot.schema) {
-            report.errors.push(ValidationError {
-                code: "invalid_json_schema".into(),
-                message: format!("slot {} 的 schema 非法: {}", slot.name, e),
-            });
+        match jsonschema::compile(&slot.schema) {
+            Err(e) => {
+                report.errors.push(ValidationError {
+                    code: "invalid_json_schema".into(),
+                    message: format!("slot {} 的 schema 非法: {}", slot.name, e),
+                });
+            }
+            Ok(compiled) => {
+                // default 静态校验：否则运行时缺 slot 才炸，且消息误导为调用方错误
+                if let Some(default_val) = slot.schema.get("default")
+                    && let Err(errors) = compiled.validate(default_val)
+                {
+                    let msgs: Vec<String> = errors.map(|e| e.to_string()).collect();
+                    report.errors.push(ValidationError {
+                        code: "invalid_slot_default".into(),
+                        message: format!(
+                            "slot {} 的 schema.default 不满足 schema 自身: {}",
+                            slot.name,
+                            msgs.join("; ")
+                        ),
+                    });
+                }
+            }
         }
     }
 
@@ -457,8 +477,10 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
         }
         {
             let op_val = serde_json::to_value(&step.op).unwrap_or(Value::Null);
+            // iterate 的 as_name 前缀是当前元素引用，不是上游步骤依赖
+            let as_name = step.iterate.as_ref().map(|c| c.as_name.as_str());
             for (prefix, _) in refs_in_json(&op_val) {
-                if prefix != "slots" && prefix != "env" {
+                if prefix != "slots" && prefix != "env" && Some(prefix.as_str()) != as_name {
                     upstream_deps
                         .entry(sid.clone())
                         .or_default()
@@ -491,10 +513,14 @@ pub fn validate(def: &PipelineDef) -> ValidationReport {
     }
 
     // ---- 10. DAG 环检测 ----
-    if has_dependency_cycle(def, &upstream_deps) {
+    let cycle_members = dependency_cycle_members(def, &upstream_deps);
+    if !cycle_members.is_empty() {
         report.errors.push(ValidationError {
             code: "cycle_detected".into(),
-            message: "步骤依赖存在环（after / inputs 引用 / iterate.over）".into(),
+            message: format!(
+                "步骤依赖存在环（after / inputs 引用 / iterate.over），环节点: {}",
+                cycle_members.join(", ")
+            ),
         });
     }
 
@@ -546,7 +572,11 @@ fn is_valid_mime_type(s: &str) -> bool {
     }
 }
 
-fn has_dependency_cycle(def: &PipelineDef, upstream_deps: &HashMap<StepId, Vec<StepId>>) -> bool {
+/// 返回环中剩余节点的 id（Kahn 拓扑排序后未访问的节点），无环返回空 Vec。
+fn dependency_cycle_members(
+    def: &PipelineDef,
+    upstream_deps: &HashMap<StepId, Vec<StepId>>,
+) -> Vec<String> {
     let mut unique_steps: Vec<&StepDef> = Vec::new();
     let mut seen: HashSet<&StepId> = HashSet::new();
     for step in &def.steps {
@@ -579,9 +609,9 @@ fn has_dependency_cycle(def: &PipelineDef, upstream_deps: &HashMap<StepId, Vec<S
         .filter(|(_, d)| **d == 0)
         .map(|(&id, _)| id)
         .collect();
-    let mut visited = 0usize;
+    let mut visited: HashSet<&StepId> = HashSet::new();
     while let Some(node) = queue.pop_front() {
-        visited += 1;
+        visited.insert(node);
         if let Some(children) = out_edges.get(node) {
             for child in children {
                 if let Some(d) = in_degree.get_mut(child) {
@@ -593,7 +623,12 @@ fn has_dependency_cycle(def: &PipelineDef, upstream_deps: &HashMap<StepId, Vec<S
             }
         }
     }
-    visited != unique_steps.len()
+    unique_steps
+        .iter()
+        .map(|s| &s.id)
+        .filter(|id| !visited.contains(id))
+        .map(|id| id.to_string())
+        .collect()
 }
 
 fn collect_slots_used(def: &PipelineDef) -> HashSet<String> {
@@ -733,6 +768,25 @@ fn check_step_ref_prefix(
     }
 }
 
+/// env 引用只允许 `{env.KEY}` 两段：运行时只取 parts[1]，多余段会被静默丢弃，
+/// 笔误（如 {env.API_KEY.x}）会拿到整个 env 值的静默错误数据。
+fn check_env_ref_path(
+    path: &crate::dsl::VariablePath,
+    step_id: &StepId,
+    report: &mut ValidationReport,
+) {
+    if path.parts.first().map(|p| p.as_str()) == Some("env") && path.parts.len() != 2 {
+        report.errors.push(ValidationError {
+            code: "invalid_env_ref".into(),
+            message: format!(
+                "步骤 {} 的 env 引用段数非法（应为 {{env.KEY}} 恰好两段）: {{{}}}",
+                step_id,
+                path.parts.join(".")
+            ),
+        });
+    }
+}
+
 fn check_ref_in_json(
     val: &Value,
     all_ids: &HashSet<StepId>,
@@ -744,9 +798,11 @@ fn check_ref_in_json(
         Value::Object(map) => {
             if let Some(path) = parse_ref_tag(map) {
                 check_step_ref_prefix(&path.parts[0], all_ids, step_id, as_name, report);
+                check_env_ref_path(&path, step_id, report);
             } else if let Some(paths) = parse_template_tag(map) {
                 for path in &paths {
                     check_step_ref_prefix(&path.parts[0], all_ids, step_id, as_name, report);
+                    check_env_ref_path(path, step_id, report);
                 }
             } else {
                 for v in map.values() {
@@ -775,6 +831,25 @@ fn check_output_ref(output: &Value, all_ids: &HashSet<StepId>, report: &mut Vali
     }
 }
 
+/// 必然失败的配置静态拦截：filter/sort/dedup/base64 缺 data、file 无 path/url，
+/// 这些字段全缺省时运行时 100% 报 Config 错误，应在 check 阶段拒绝。
+fn check_required_inputs(step: &StepDef, report: &mut ValidationReport) {
+    let missing = |field: &str| ValidationError {
+        code: "missing_required_input".into(),
+        message: format!("步骤 {} 缺少必填 inputs.{}", step.id, field),
+    };
+    match &step.op {
+        StepOp::Filter(i) if i.data.is_none() => report.errors.push(missing("data")),
+        StepOp::Sort(i) if i.data.is_none() => report.errors.push(missing("data")),
+        StepOp::Dedup(i) if i.data.is_none() => report.errors.push(missing("data")),
+        StepOp::Base64(i) if i.data.is_none() => report.errors.push(missing("data")),
+        StepOp::File(i) if i.path.is_none() && i.url.is_none() => {
+            report.errors.push(missing("path 或 url"))
+        }
+        _ => {}
+    }
+}
+
 fn check_iterate_config(
     cfg: Option<&crate::dsl::IterateConfig>,
     step_id: &StepId,
@@ -799,6 +874,20 @@ fn check_iterate_config(
                     code: "invalid_iterate_config".into(),
                     message: format!(
                         "步骤 {} 的 iterate.as 含非法字符（仅允许 [A-Za-z0-9_]）: {}",
+                        step_id, cfg.as_name
+                    ),
+                });
+            } else if cfg
+                .as_name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+            {
+                // 纯数字 as 名与数组索引段同形，引用解析语义混乱
+                report.errors.push(ValidationError {
+                    code: "invalid_iterate_config".into(),
+                    message: format!(
+                        "步骤 {} 的 iterate.as 不能以数字开头: {}",
                         step_id, cfg.as_name
                     ),
                 });
@@ -842,16 +931,24 @@ fn check_iterate_config(
                 ),
             });
         }
-        if let Some(ref batch) = cfg.batch
-            && batch.size == 0
-        {
-            report.errors.push(ValidationError {
-                code: "invalid_iterate_config".into(),
-                message: format!(
-                    "步骤 {} 的 iterate.batch.size 不能为 0（缺省可移除 batch 字段）",
-                    step_id
-                ),
-            });
+        if let Some(ref batch) = cfg.batch {
+            if batch.size == 0 {
+                report.errors.push(ValidationError {
+                    code: "invalid_iterate_config".into(),
+                    message: format!(
+                        "步骤 {} 的 iterate.batch.size 不能为 0（缺省可移除 batch 字段）",
+                        step_id
+                    ),
+                });
+            } else if batch.size > MAX_ITERATE_BATCH_SIZE {
+                report.errors.push(ValidationError {
+                    code: "invalid_iterate_config".into(),
+                    message: format!(
+                        "步骤 {} 的 iterate.batch.size 超过上限 {}: {}",
+                        step_id, MAX_ITERATE_BATCH_SIZE, batch.size
+                    ),
+                });
+            }
         }
         if let Some(prefix) = cfg.over.parts.first() {
             if prefix == &step_id.0 {
@@ -2156,6 +2253,243 @@ mod tests {
         assert!(
             start.elapsed() < std::time::Duration::from_secs(10),
             "syntax check on while(1){{}} must terminate via watchdog interrupt"
+        );
+    }
+
+    fn validate_yaml(yaml: &str) -> ValidationReport {
+        let def = crate::dsl::parser::parse(yaml).expect("parse");
+        validate(&def)
+    }
+
+    #[test]
+    fn env_ref_extra_segments_rejected() {
+        let report = validate_yaml(
+            r#"
+name: t
+steps:
+  - id: s
+    type: var
+    inputs:
+      value: "{env.HOME.foo.bar}"
+output: "{s.output}"
+"#,
+        );
+        assert!(
+            report.errors.iter().any(|e| e.code == "invalid_env_ref"),
+            "errors: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn env_ref_two_segments_ok() {
+        let report = validate_yaml(
+            r#"
+name: t
+steps:
+  - id: s
+    type: var
+    inputs:
+      value: "{env.HOME}"
+output: "{s.output}"
+"#,
+        );
+        assert!(!report.errors.iter().any(|e| e.code == "invalid_env_ref"));
+    }
+
+    #[test]
+    fn slot_default_violating_schema_rejected() {
+        let report = validate_yaml(
+            r#"
+name: t
+slots:
+  - name: n
+    schema:
+      type: string
+      default: 5
+steps:
+  - id: s
+    type: var
+    inputs:
+      value: "{slots.n}"
+output: "{s.output}"
+"#,
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_slot_default"),
+            "errors: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn filter_missing_data_rejected_statically() {
+        let report = validate_yaml(
+            r#"
+name: t
+steps:
+  - id: s
+    type: filter
+    inputs:
+      operator: eq
+      value: 1
+output: "{s.output}"
+"#,
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "missing_required_input"),
+            "errors: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn file_without_path_or_url_rejected_statically() {
+        let report = validate_yaml(
+            r#"
+name: t
+steps:
+  - id: s
+    type: file
+    inputs: {}
+output: "{s.output}"
+"#,
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "missing_required_input"),
+            "errors: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn iterate_as_leading_digit_rejected() {
+        let report = validate_yaml(
+            r#"
+name: t
+slots:
+  - name: items
+    schema:
+      type: array
+steps:
+  - id: s
+    type: js
+    iterate:
+      over: "{slots.items}"
+      as: "0"
+    inputs:
+      code: "function run(d){ return d; }"
+      data: "{0.name}"
+output: "{s.output}"
+"#,
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_iterate_config"),
+            "errors: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn iterate_batch_size_over_cap_rejected() {
+        let report = validate_yaml(
+            r#"
+name: t
+slots:
+  - name: items
+    schema:
+      type: array
+steps:
+  - id: s
+    type: js
+    iterate:
+      over: "{slots.items}"
+      as: item
+      batch:
+        size: 4294967295
+    inputs:
+      code: "function run(d){ return d; }"
+      data: "{item}"
+output: "{s.output}"
+"#,
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == "invalid_iterate_config"),
+            "errors: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn iterate_step_without_step_refs_gets_no_upstream_warning() {
+        // 只引用 as 名的 iterate 步骤是 DAG 根，应给出 no_upstream_deps 提示
+        let report = validate_yaml(
+            r#"
+name: t
+slots:
+  - name: items
+    schema:
+      type: array
+steps:
+  - id: s
+    type: js
+    iterate:
+      over: "{slots.items}"
+      as: item
+    inputs:
+      code: "function run(d){ return d; }"
+      data: "{item}"
+output: "{s.output}"
+"#,
+        );
+        assert!(
+            report.warnings.iter().any(|w| w.code == "no_upstream_deps"),
+            "warnings: {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn cycle_error_lists_members() {
+        let report = validate_yaml(
+            r#"
+name: t
+steps:
+  - id: a
+    type: var
+    inputs:
+      value: "{b.output}"
+  - id: b
+    type: var
+    inputs:
+      value: "{a.output}"
+output: "{a.output}"
+"#,
+        );
+        let err = report
+            .errors
+            .iter()
+            .find(|e| e.code == "cycle_detected")
+            .expect("cycle error");
+        assert!(
+            err.message.contains('a') && err.message.contains('b'),
+            "msg: {}",
+            err.message
         );
     }
 }

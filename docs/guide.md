@@ -77,7 +77,7 @@ weaveflow task ls
 weaveflow task show <task_id> [--full]            # 默认 summary（省 token）
 weaveflow task snapshot list <task_id>
 weaveflow task snapshot show <task_id> <seq> [--max-bytes N] [--full]
-weaveflow system prune [--force] [--dry-run]
+weaveflow system prune [--force] [--dry-run] [--include-cache]
 weaveflow system operators
 ```
 
@@ -103,7 +103,7 @@ Daemon 侧 env：`WEAVEFLOW_BIND`、`WEAVEFLOW_MAX_CONCURRENT_TASKS`、`WEAVEFLO
 ### 常用命令细节
 
 - **`pipeline apply`**：同名 pipeline 走 upsert（单个 redb 写事务内扫描+插入，并发 apply 不会双插）。
-- **`run -i`**：slot 注入。`-i k=v` 按字符串；`-i k=@file.json` 读取文件并解析为 JSON。pipeline 声明的 slot 有 JSON Schema 校验。
+- **`run -i`**：slot 注入。`-i k=v` 按字符串；`-i k=@file.json` 读取文件并解析为 JSON。pipeline 声明的 slot 有 JSON Schema 校验；schema 无 `default` 的 slot 未提供时任务立即失败（必填）。
 - **`run --output json --text-output`**：JSONL 快照流（见 [面向 Agent 的集成速览](#面向-agent-的集成速览)）。
 - **`task snapshot`**：每个 step 完成时写一条 snapshot（seq 递增），`show` 可回放任意 step 的输出；二进制输出以 `[binary N bytes]` 占位显示。
 - **`system prune`**：清理过期任务/快照/孤儿对象/悬空缓存；响应含 `snapshots_removed`；运行中任务永不被清理。

@@ -102,6 +102,16 @@ fn out(v: Value) -> Json<ToolOutput> {
     Json(ToolOutput { result: v })
 }
 
+/// MCP 客户端常把 object/array 参数序列化为 JSON 字符串送达（schema 为任意
+/// JSON 时尤其常见）。若是字符串且能解析为 JSON 则用之，否则原样保留
+/// （例如 push_routine 推送纯字符串元素的场景）。
+fn parse_maybe_json_string(v: Value) -> Value {
+    match v {
+        Value::String(ref s) => serde_json::from_str(s).unwrap_or(v),
+        other => other,
+    }
+}
+
 #[derive(Clone)]
 pub struct WeaveflowMcp {
     cfg: CliConfig,
@@ -215,7 +225,7 @@ impl WeaveflowMcp {
     ) -> Result<Json<ToolOutput>, String> {
         let body = serde_json::json!({
             "pipeline": p.name,
-            "inputs": p.inputs.unwrap_or(serde_json::json!({})),
+            "inputs": p.inputs.map(parse_maybe_json_string).unwrap_or(serde_json::json!({})),
         });
         let resp = client::post(&self.cfg, "/runs", body).await?;
         let wait = p.wait.unwrap_or(true);
@@ -255,14 +265,44 @@ impl WeaveflowMcp {
     }
 
     #[tool(description = "Get the pipeline's final output for a completed task \
-        (full output — may be large; only available for ~10 min after completion and until prune). \
+        (full output — may be large; embedded output only lives in tracker memory for ~10 min \
+        after completion, after that status still resolves correctly from the persisted record). \
+        Returns {status, output} on success, {status, error} on failure. \
         For step-level data prefer list_snapshots + get_snapshot with max_bytes.")]
     async fn get_task_result(
         &self,
         Parameters(p): Parameters<TaskParam>,
     ) -> Result<Json<ToolOutput>, String> {
         let v = client::get(&self.cfg, &format!("/runs/{}", p.task_id)).await?;
-        Ok(out(v))
+        let status = &v["progress"]["status"];
+        if let Some(output) = status.get("Completed") {
+            return Ok(out(serde_json::json!({
+                "task_id": p.task_id,
+                "status": "completed",
+                "output": output,
+            })));
+        }
+        if let Some(error) = status.get("Failed") {
+            return Ok(out(serde_json::json!({
+                "task_id": p.task_id,
+                "status": "failed",
+                "error": error,
+            })));
+        }
+        // tracker 已回收（终态 ~10min 后）时 progress 为 null：
+        // 回退到 DB 持久化的终态字符串，避免把 completed/failed 误报为 running。
+        if status.is_null() {
+            let db_status = v["status"].as_str().unwrap_or("unknown");
+            return Ok(out(serde_json::json!({
+                "task_id": p.task_id,
+                "status": db_status,
+                "note": "tracker snapshot 已回收，终态来自持久化记录；步骤输出仍可通过 list_snapshots/get_snapshot 获取",
+            })));
+        }
+        Ok(out(serde_json::json!({
+            "task_id": p.task_id,
+            "status": "running",
+        })))
     }
 
     #[tool(
@@ -329,13 +369,14 @@ impl WeaveflowMcp {
         &self,
         Parameters(p): Parameters<UpsertRoutineParam>,
     ) -> Result<Json<ToolOutput>, String> {
-        let name = p.def["name"]
+        let def = parse_maybe_json_string(p.def);
+        let name = def["name"]
             .as_str()
             .ok_or_else(|| "def.name is required".to_string())?
             .to_string();
         // 本地预校验，把配置错误挡在 daemon 之外
         let def: weaveflow::routine::RoutineDef =
-            serde_json::from_value(p.def).map_err(|e| format!("invalid routine def: {e}"))?;
+            serde_json::from_value(def).map_err(|e| format!("invalid routine def: {e}"))?;
         let errors = weaveflow::routine::validate_routine(&def);
         if !errors.is_empty() {
             return Err(format!("routine validation failed: {}", errors.join("; ")));
@@ -375,7 +416,7 @@ impl WeaveflowMcp {
         client::post(
             &self.cfg,
             &format!("/routines/{}/push", client::encode_segment(&p.name)),
-            p.items,
+            parse_maybe_json_string(p.items),
         )
         .await
         .map(out)
@@ -433,4 +474,38 @@ pub async fn run(cfg: CliConfig) -> Result<(), String> {
         .await
         .map_err(|e| format!("MCP server 运行错误: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_maybe_json_string_unwraps_stringified_json() {
+        assert_eq!(
+            parse_maybe_json_string(json!("{\"items\":[1,2,3]}")),
+            json!({"items": [1, 2, 3]})
+        );
+        assert_eq!(
+            parse_maybe_json_string(json!("[10, 20, 30]")),
+            json!([10, 20, 30])
+        );
+    }
+
+    #[test]
+    fn parse_maybe_json_string_keeps_plain_string() {
+        assert_eq!(parse_maybe_json_string(json!("hello")), json!("hello"));
+        assert_eq!(
+            parse_maybe_json_string(json!("{not json")),
+            json!("{not json")
+        );
+    }
+
+    #[test]
+    fn parse_maybe_json_string_passes_through_non_string() {
+        assert_eq!(parse_maybe_json_string(json!({"a": 1})), json!({"a": 1}));
+        assert_eq!(parse_maybe_json_string(json!(42)), json!(42));
+        assert_eq!(parse_maybe_json_string(Value::Null), Value::Null);
+    }
 }

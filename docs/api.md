@@ -233,6 +233,7 @@ curl -X POST http://127.0.0.1:9928/prune -H 'Content-Type: application/json' \
 | `pipeline` | string | — | 只清理指定 pipeline 的任务 |
 | `force` | bool | `false` | 忽略 `result_ttl`，清理所有终态任务 |
 | `dry_run` | bool | `false` | 只扫描不删除 |
+| `include_cache` | bool | `false` | 同时清空全部步骤缓存（CACHE 表 + 其独占 OBJECT） |
 
 响应：
 

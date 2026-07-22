@@ -2,7 +2,7 @@ use chrono::Utc;
 use std::sync::Arc;
 
 use serde_json::Value;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::dsl::{IterateConfig, StepDef};
 use crate::engine::step::{resolve_operator, retry_with_op};
@@ -43,7 +43,29 @@ pub async fn execute_iterate(
 
     let total_items = match &*over_ref {
         Value::Array(arr) => arr.len(),
-        _ => 1,
+        Value::Null => {
+            return Err((
+                WeaveflowError::BadRequest(format!(
+                    "步骤 {} 的 iterate.over 解析为 null（slot 未传或引用的字段不存在）",
+                    step.id
+                )),
+                0,
+            ));
+        }
+        other => {
+            warn!(
+                step = %step.id,
+                value_type = %match other {
+                    serde_json::Value::Bool(_) => "bool",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::String(_) => "string",
+                    serde_json::Value::Object(_) => "object",
+                    _ => "unknown",
+                },
+                "iterate.over 解析为非数组值，按单元素迭代"
+            );
+            1
+        }
     };
     let batched = cfg.batch.is_some();
     let batch_size = cfg.batch.as_ref().map(|b| b.size as usize);
@@ -292,5 +314,32 @@ mod tests {
         .await;
         let (err, _attempts) = result.expect_err("non-array chunk result must be rejected");
         assert!(err.to_string().contains("非数组"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn over_resolving_to_null_is_rejected() {
+        let slots = HashMap::new();
+        let mut scope = Scope::new(slots);
+        let tracker = TaskTracker::new();
+        let step = StepDef {
+            id: StepId::from("s"),
+            after: None,
+            iterate: Some(iterate_cfg(None)),
+            cache: None,
+            retry: None,
+            timeout_sec: None,
+            op: StepOp::Noop,
+        };
+        let cfg = step.iterate.clone().unwrap();
+        let result = execute_iterate(
+            &mut scope,
+            &step,
+            &cfg,
+            &TaskId(uuid::Uuid::new_v4()),
+            &tracker,
+        )
+        .await;
+        let (err, _attempts) = result.expect_err("null over must be rejected");
+        assert!(err.to_string().contains("null"), "err: {err}");
     }
 }

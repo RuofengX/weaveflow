@@ -82,12 +82,15 @@ fn run_in_new_runtime(script: &str, interrupted: Arc<AtomicBool>) -> WeaveflowRe
                 base64::engine::general_purpose::STANDARD.encode(&data)
             });
 
-            let atob_fn = rquickjs::Function::new(ctx.clone(), |s: String| -> Vec<u8> {
-                use base64::Engine;
-                base64::engine::general_purpose::STANDARD
-                    .decode(s.as_bytes())
-                    .expect("base64 decode failed")
-            });
+            let atob_fn =
+                rquickjs::Function::new(ctx.clone(), |s: String| -> rquickjs::Result<Vec<u8>> {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD
+                        .decode(s.as_bytes())
+                        .map_err(|e| {
+                            rquickjs::Error::new_from_js_message("atob", "base64", format!("{e}"))
+                        })
+                });
 
             let native = rquickjs::Object::new(ctx.clone()).map_err(|e| {
                 crate::error::WeaveflowError::Internal(format!("create __native__: {e}"))

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use crate::operator::builtin::resolve_nested;
+use crate::operator::builtin::resolve_nested_opt;
 use crate::operator::{Operator, OperatorError, OperatorSpec};
 
 pub struct DedupOperator;
@@ -42,16 +42,18 @@ impl Operator for DedupOperator {
         let mut result = Vec::new();
         let mut missing_field = 0usize;
         for item in arr {
-            if !field.is_empty() && resolve_nested(&item, &field).is_null() {
+            // 区分"字段缺失"（跳过判重直接保留）与"字段值为 null"（null 作为正常 key 参与去重）
+            let field_val = if field.is_empty() {
+                Some(&item)
+            } else {
+                resolve_nested_opt(&item, &field)
+            };
+            let Some(field_val) = field_val else {
                 missing_field += 1;
                 result.push(item);
                 continue;
-            }
-            let key = if field.is_empty() {
-                serde_json::to_string(&item).unwrap_or_default()
-            } else {
-                serde_json::to_string(resolve_nested(&item, &field)).unwrap_or_default()
             };
+            let key = serde_json::to_string(field_val).unwrap_or_default();
             if seen.insert(key) {
                 result.push(item);
             }
@@ -110,6 +112,24 @@ mod tests {
         });
         let out = op.run(inputs).await.expect("run");
         assert_eq!(out.as_array().expect("array").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn null_field_value_dedups_together() {
+        // 字段值显式为 null ≠ 字段缺失：null 作为正常 key 参与去重
+        let op = DedupOperator;
+        let inputs = json!({
+            "data": [
+                { "id": null, "v": 1 },
+                { "id": null, "v": 2 },
+                { "v": 3 }
+            ],
+            "field": "id"
+        });
+        let out = op.run(inputs).await.expect("run");
+        let arr = out.as_array().expect("array");
+        assert_eq!(arr.len(), 2, "两个 id:null 应去重为 1 条，缺失 id 的保留");
+        assert_eq!(arr[1]["v"], json!(3));
     }
 
     #[tokio::test]

@@ -71,6 +71,7 @@ pub async fn run_inner(
         "pipeline run started"
     );
 
+    let mut missing_required: Vec<&str> = Vec::new();
     for slot_def in &pipeline.slots {
         if !slots.contains_key(&slot_def.name) {
             match slot_def.schema.get("default") {
@@ -83,15 +84,18 @@ pub async fn run_inner(
                     slots.insert(slot_def.name.clone(), default_val.clone());
                 }
                 None => {
-                    warn!(
-                        "slot '{}' has no value and no default in schema",
-                        slot_def.name
-                    );
+                    missing_required.push(&slot_def.name);
                 }
             }
         } else {
             debug!("slot '{}' has user-provided value", slot_def.name);
         }
+    }
+    if !missing_required.is_empty() {
+        return Err(WeaveflowError::BadRequest(format!(
+            "缺少必填 slot（schema 无 default）: {}",
+            missing_required.join(", ")
+        )));
     }
 
     for slot_def in &pipeline.slots {
@@ -246,7 +250,14 @@ pub async fn run_inner(
     {
         // output 是任意 JSON + 内联 Ref 标签；in_literal=true 避免把用户数据里的
         // 单键 "Literal" 对象误当 RefValue serde 标签拆包（该约定只属于算子字段位）。
-        output_val = resolve_value_tree(&scope, &pipeline.output, None, None, false, true)?;
+        let mut resolved = resolve_value_tree(&scope, &pipeline.output, None, None, false, true)?;
+        // 最终 output 与快照同规脱敏：tracker 内存 / WS 广播 / get_task_result /
+        // routine 终态事件都消费这份值，不能携带 env 明文。
+        let secrets = scope.env_values();
+        if !secrets.is_empty() {
+            redact_env_values(&mut resolved, &secrets);
+        }
+        output_val = resolved;
         final_output = serde_json::to_vec(&output_val)
             .map_err(|e| WeaveflowError::Internal(format!("output serialize: {e}")))?;
     }

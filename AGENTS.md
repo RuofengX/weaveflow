@@ -4,9 +4,9 @@
 
 ```bash
 cargo build                    # compile
-cargo test --lib               # 227 unit tests (no external deps)
-cargo test --bins              # 41 bin tests (server + cli, incl. routine inbox/webhook, summary mode)
-cargo test --test '*'          # 31 integration test binaries (71 tests) — in-process
+cargo test --lib               # 244 unit tests (no external deps)
+cargo test --bins              # 48 bin tests (server + cli, incl. routine inbox/webhook, summary mode)
+cargo test --test '*'          # 32 integration test binaries (74 tests) — in-process
                                # Runner + temp redb, NO daemon/binary required
                                # (see tests/common/mod.rs)
 cargo test --test js_code_template   # single integration file
@@ -136,7 +136,7 @@ weaveflow task ls
 weaveflow task show <task_id> [--full]    # 默认 summary（GET /runs/:id?summary=1）
 weaveflow task snapshot list <task_id>
 weaveflow task snapshot show <task_id> <seq> [--max-bytes N] [--full]
-weaveflow system prune [--force] [--dry-run]   # output includes snapshots_removed
+weaveflow system prune [--force] [--dry-run] [--include-cache]   # --force 忽略 result_ttl；--include-cache 清空 CACHE 表+其独占 OBJECT；output includes snapshots_removed
 weaveflow system operators
 ```
 
@@ -239,6 +239,7 @@ Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field
 
 ## Engine behavior — gotchas
 
+- **必填 slot 缺失即失败**：slot 未提供且 schema 无 `default` → runner 启动即 `BadRequest("缺少必填 slot...")`（不再静默按 null 继续）；`schema.default` 在 validator 阶段即被 schema 自身校验（`invalid_slot_default`）。
 - **iterate `over` must include braces** (`over: "{slots.items}"`) — `raw.rs` rejects anything else with `ParseError::InvalidIterateOver`.
 - **iterate `as_name` is bound per chunk**: each chunk resolves inputs with `locals = (as_name, element)` — `{item}`/`{item.field}`/`{item.0.x}` are real refs in ANY operator field (drill-down shared with slots/step-output paths; array indices strict, missing fields → `Null`). There is no `"data"` auto-injection; js/filter/sort/dedup steps must write `data: "{item}"` explicitly. The resolver's no-locals path keeps as_name refs as `"{item}"` placeholder literals — used only for the iterate cache-key material. Validator rejects `as` values that are empty, non-`[A-Za-z0-9_]`, `slots`/`env`, or colliding with a step id, and warns (`iterate_element_unused`) when an iterate step never references its `as` name.
 - **iterate steps are retried per element** (`retry_with_op` wraps each chunk), not as a whole.
@@ -249,7 +250,7 @@ Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field
 ## Security posture
 
 - **No auth on any endpoint — by design (C6 wontfix, 2026-07-20 decision).** weaveflow is a localhost-only open service; authentication is the gateway/reverse-proxy layer's job. `--allow-remote` is required to bind non-loopback addresses and prints a loud startup warning — binding `0.0.0.0` is unauthenticated RCE via `command`/`file`; even on localhost, browser CSRF (simple POST, no preflight) can create+run pipelines. Treat the daemon as localhost-only.
-- `command` runs `sh -c` with `env_clear` + a minimal whitelist (PATH/HOME/LANG/LC_ALL/TZ); `file` canonicalizes both the target and each `WEAVEFLOW_FILE_ALLOW_ROOTS` root before the prefix check (empty segments filtered with a warn; unset → one `Once` warn and allow-all); `{env.KEY}` values are recorded and redacted in persisted snapshots (**子串替换**：快照序列化前对每个字符串做 `replace(secret, "***")`，长值优先——拼进更长串的 secret 也会被脱敏；<4 字符的 env 值不入库）。
+- `command` runs `sh -c` with `env_clear` + a minimal whitelist (PATH/HOME/LANG/LC_ALL/TZ); `file` canonicalizes both the target and each `WEAVEFLOW_FILE_ALLOW_ROOTS` root before the prefix check (empty segments filtered with a warn; unset → one `Once` warn and allow-all); `{env.KEY}` values are recorded and redacted in persisted snapshots **和 pipeline 最终 output**（tracker/WS/get_task_result/routine output_preview 消费的都是脱敏值；**子串替换**：序列化前对每个字符串做 `replace(secret, "***")`，长值优先——拼进更长串的 secret 也会被脱敏；<4 字符的 env 值不入库）。**已知残余：步骤级缓存 OBJECT 不脱敏**（用户决策接受，可用 `prune --include-cache` 清除）。
 - Shared HTTP client hardening: no redirects, per-DNS-result SSRF check (169.254.169.254 always blocked; IPv4-mapped IPv6 normalized before classification; `WEAVEFLOW_HTTP_BLOCK_PRIVATE=1` also covers 0.0.0.0, CGNAT 100.64/10, 198.18/15), 64MB streamed response cap. **No total/read timeout anywhere — execution timeouts exist ONLY at step level (`timeout_sec`, engine wraps `op.run`); the client never implicitly truncates long-running requests.** 10s connect_timeout is kept as a fast-fail floor for connection establishment only. **Known residual: DNS rebinding TOCTOU** — the pre-check and reqwest's connect each resolve DNS independently, so a low-TTL malicious domain can in principle pass the check and then resolve to a blocked IP (no resolve pinning with the shared client).
 - `js` sandbox: no fs/net, 256MB memory limit, 1MB stack; step timeout triggers real interruption via the drop-guard. `__native__.inflate` output is capped at 256MB on the Rust side (decompression bombs can't bypass the sandbox memory limit). **Without `step.timeout_sec`, a `while(1){}` still occupies a blocking thread indefinitely (design decision: timeouts live only at step layer).**
 
@@ -274,7 +275,7 @@ Plain `String` typed fields (`http.method`, `filter.field/operator`, `sort.field
 ## Routines（智能体委托的长驻任务岗）
 
 - **daemon 只接收 JSON**：`PUT /routines/:name` body = `RoutineDef`（serde，deny_unknown_fields）；TOML 是 CLI 侧业务载体（`routine apply -f x.toml` 本地解析+校验后 PUT）。类型/校验/调度计算在 lib 的 `src/routine/`，CLI 与 daemon 共用。
-- 两种类型：`stream`（push → 内存缓冲，按 `batch_size`/`flush_interval` 切微批，每批 = 一次 run，写入 `slot`）与 `cron`（`schedule` 5/6/7 段 cron 表达式或 `interval`，二选一）。
+- 两种类型：`stream`（push → 内存缓冲，按 `batch_size`/`flush_interval` 切微批，每批 = 一次 run，写入 `slot`；flush 窗口从**本批首个元素到达**起算，空闲期不会让首元素单飞）与 `cron`（`schedule` 5/6/7 段 cron 表达式或 `interval`，二选一）。
 - **统一提交路径**：`daemon.rs::submit_run`（HTTP /runs 与 worker 共用，自带 in_flight/draining 协议）；触发产生的微批是普通 task，快照/WS/TUI 观测零改动。
 - **终态反馈（智能体值班范式）**：submit_run 的三个终态收口点（runner 返回 / semaphore 关闭 / panic watcher）统一调 `routine::on_task_terminal`——routine 来源的 task 落 `task_completed`/`task_failed` 事件（附 `output_preview`，默认 2KB 截断）到**持久化收件箱**（ROUTINE_EVENT 表，EventKey = `[name_len u32 BE][name][seq u64 BE]`，每 routine 封顶 100 条，seq 由 `RoutineRow.event_seq` 单写事务分配）；`GET /routines/:name/events?after=<seq>` 增量回查，agent 跨会话续读。`notify.webhook_url` 配置后终态事件异步 POST 投递（共享加固 HTTP client，SSRF 策略同 operator，3 次指数退避、4xx 不重试），投递失败落 `notify_failed` 事件（不递归投递）。
 - 运行时状态持久化在 ROUTINE 表（`RoutineRow`：`last_fired_at`/`next_fire_at`/`total_fired`/`total_failed`/近期 20 个 task_id/`event_seq`）；daemon 启动时 `routine::start_all` 从 redb 恢复 worker。
@@ -307,8 +308,8 @@ Error mapping: `WeaveflowError::BadRequest`/`Parse` → 400, `NotFound` → 404,
 
 ## Tests
 
-- **227 lib tests** in-module (`#[cfg(test)]`) across dsl/engine/operator/store/tracker/vm/routine; **41 bin tests** under `src/server` + `src/cli` (not in lib) — incl. routine 收件箱终态事件/增量回查/删除清空、webhook 投递（本地接收端）、preview 截断、summary 模式 + snapshot max_bytes。
-- **31 integration test binaries** (71 tests) use `tests/common/mod.rs::run_yaml` — parse → validate → in-process `Runner` with a tempfile redb. No daemon, no network, no binary.
+- **244 lib tests** in-module (`#[cfg(test)]`) across dsl/engine/operator/store/tracker/vm/routine; **48 bin tests** under `src/server` + `src/cli` (not in lib) — incl. routine 收件箱终态事件/增量回查/删除清空、webhook 投递（本地接收端，含 seq 一致性）、preview 截断、summary 模式 + snapshot max_bytes、WS >16MiB 大帧、stream 删除 drain/flush_interval 空闲语义、pid basename 校验。
+- **32 integration test binaries** (74 tests) use `tests/common/mod.rs::run_yaml` — parse → validate → in-process `Runner` with a tempfile redb. No daemon, no network, no binary.
 - Coverage highlights: cache behavior (`tests/cache_control.rs`), retry/backoff/timeout (`tests/retry.rs`, `tests/step_timeout.rs`), env redaction, array index paths, merge deep, noop envelope (`tests/noop_output.rs`), v0 DB migration, Snapshot v2 layout roundtrip, prune max_seq guard, mark_interrupted, JS syntax sandbox (incl. `while(1){}` watchdog), `effective_max_workers`, command 10MB truncation, http_client split_url/SSRF, file allowlist edge cases, `wait_for_drain`, pidfile binary verification, `encode_segment`, log absolute offsets, `snapshot_and_subscribe` atomicity, `cleanup_stale`.
 
 ## Known bugs / open items

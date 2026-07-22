@@ -63,7 +63,9 @@ output: "{leak.output.value}"
         .block_on(runner.run(task_id, HashMap::new()))
         .expect("run");
     let output: Value = serde_json::from_slice(&result).expect("output json");
-    assert_eq!(output["api_key"], "sk-live-secret-12345");
+    // D2：最终 output 与快照同规脱敏（tracker / WS / routine 事件都消费这份值）
+    assert_eq!(output["api_key"], "***");
+    assert_eq!(output["note"], "plain");
 
     let snaps = db.load_snapshots(&task_id).expect("load snapshots");
     assert_eq!(snaps.len(), 1);

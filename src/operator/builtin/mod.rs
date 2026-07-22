@@ -35,6 +35,22 @@ pub(crate) fn resolve_nested<'a>(value: &'a Value, path: &str) -> &'a Value {
     current
 }
 
+/// 同 `resolve_nested`，但区分"路径缺失"（None）与"路径存在且值为 null"（Some(Null)）。
+pub(crate) fn resolve_nested_opt<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+    if path.is_empty() {
+        return Some(value);
+    }
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut current = value;
+    for part in parts {
+        current = match current {
+            Value::Array(arr) => part.parse::<usize>().ok().and_then(|i| arr.get(i))?,
+            _ => current.get(part)?,
+        };
+    }
+    Some(current)
+}
+
 /// 数字精确比较：整型对整型直接 cmp；混合 int/float 走精确比较
 /// （f64 舍入会在 ≥2^53 处破坏全序，sort 依赖全序）。filter 与 sort 共用。
 pub(crate) fn compare_json_numbers(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {

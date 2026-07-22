@@ -1410,10 +1410,17 @@ impl Database {
         drop(read_txn);
 
         let (dead_objects, freed_bytes, dangling_cache) = self.collect_object_garbage()?;
+        let live_cache = if options.include_cache {
+            self.collect_live_cache()?
+        } else {
+            Vec::new()
+        };
         Ok(PrunePlan {
             tasks,
             dead_objects,
             dangling_cache,
+            cache_bytes: live_cache.iter().map(|(_, _, n)| *n).sum(),
+            live_cache: live_cache.into_iter().map(|(k, d, _)| (k, d)).collect(),
             freed_bytes,
         })
     }
@@ -1430,11 +1437,19 @@ impl Database {
 
         if dry_run {
             report.tasks_removed = plan.tasks.len() as u64;
-            report.snapshots_removed = 0;
+            // 预估快照数：各 task seq 1..=max_seq 连续编号
+            report.snapshots_removed = plan.tasks.iter().map(|(_, max_seq)| *max_seq).sum();
+            report.cache_entries_removed += plan.live_cache.len() as u64;
+            report.objects_removed += plan.live_cache.len() as u64;
+            report.bytes_freed += plan.cache_bytes;
             return Ok(report);
         }
 
-        if plan.tasks.is_empty() && plan.dead_objects.is_empty() && plan.dangling_cache.is_empty() {
+        if plan.tasks.is_empty()
+            && plan.dead_objects.is_empty()
+            && plan.dangling_cache.is_empty()
+            && plan.live_cache.is_empty()
+        {
             return Ok(report);
         }
 
@@ -1529,6 +1544,30 @@ impl Database {
                         source: Box::new(e.into()),
                     })?;
             }
+            // include_cache：清空全部存活缓存行；其 OBJECT 仅被 CACHE 引用
+            // （OBJECT 表的唯一引用方），随之删除。
+            for (key, digest) in &plan.live_cache {
+                cache_table
+                    .remove(*key)
+                    .map_err(|e| WeaveflowError::Database {
+                        operation: "prune_execute live_cache_remove",
+                        source: Box::new(e.into()),
+                    })?;
+                if let Some(removed) =
+                    obj_table
+                        .remove(*digest)
+                        .map_err(|e| WeaveflowError::Database {
+                            operation: "prune_execute live_obj_remove",
+                            source: Box::new(e.into()),
+                        })?
+                {
+                    report.bytes_freed += serde_json::to_vec(&removed.value())
+                        .map(|b| b.len() as u64)
+                        .unwrap_or(0);
+                }
+                report.cache_entries_removed += 1;
+                report.objects_removed += 1;
+            }
 
             drop((snap_table, task_table, obj_table, cache_table));
             write_txn.commit().map_err(|e| WeaveflowError::Database {
@@ -1548,6 +1587,47 @@ impl Database {
     pub fn prune(&self, options: &PruneOptions) -> WeaveflowResult<PruneReport> {
         let plan = self.prune_scan(options)?;
         self.prune_execute(&plan, options.dry_run)
+    }
+
+    /// include_cache：列出全部存活缓存行及其 OBJECT digest 和估算字节数（execute 阶段删除）。
+    fn collect_live_cache(&self) -> WeaveflowResult<Vec<(CacheKey, ObjectDigest, u64)>> {
+        let g = self.db.read().unwrap_or_else(|e| e.into_inner());
+        let txn = g.begin_read().map_err(|e| WeaveflowError::Database {
+            operation: "live_cache begin_read",
+            source: Box::new(e.into()),
+        })?;
+        let cache_table = txn
+            .open_table(CACHE)
+            .map_err(|e| WeaveflowError::Database {
+                operation: "live_cache open_table",
+                source: Box::new(e.into()),
+            })?;
+        let obj_table = txn
+            .open_table(OBJECT)
+            .map_err(|e| WeaveflowError::Database {
+                operation: "live_cache open_obj_table",
+                source: Box::new(e.into()),
+            })?;
+        let mut out = Vec::new();
+        for result in cache_table.iter().map_err(|e| WeaveflowError::Database {
+            operation: "live_cache iter",
+            source: Box::new(e.into()),
+        })? {
+            let (k, v) = result.map_err(|e| WeaveflowError::Database {
+                operation: "live_cache read_row",
+                source: Box::new(e.into()),
+            })?;
+            let digest = v.value();
+            let size = obj_table
+                .get(digest)
+                .ok()
+                .flatten()
+                .and_then(|g| serde_json::to_vec(&g.value()).ok())
+                .map(|b| b.len() as u64)
+                .unwrap_or(0);
+            out.push((k.value(), digest, size));
+        }
+        Ok(out)
     }
 
     fn collect_object_garbage(&self) -> WeaveflowResult<(Vec<ObjectDigest>, u64, Vec<CacheKey>)> {
@@ -1654,6 +1734,9 @@ pub struct PruneOptions {
     pub force: bool,
     pub pipeline: Option<String>,
     pub skip_tasks: std::collections::HashSet<TaskId>,
+    /// 同时清空全部步骤缓存（CACHE 表 + 其独占引用的 OBJECT 行）。
+    /// 缓存是内容寻址的，清空后重跑仅回源重算，无正确性影响。
+    pub include_cache: bool,
 }
 
 /// prune_scan 的产出：待删 task 及判定时刻的 snapshot max_seq、待回收对象。
@@ -1661,6 +1744,10 @@ pub struct PrunePlan {
     pub tasks: Vec<(TaskMeta, u64)>,
     pub dead_objects: Vec<ObjectDigest>,
     pub dangling_cache: Vec<CacheKey>,
+    /// include_cache 时待清空的全部缓存行及其 OBJECT digest。
+    pub live_cache: Vec<(CacheKey, ObjectDigest)>,
+    /// live_cache 对应 OBJECT 的估算字节数（dry-run 报告用）。
+    pub cache_bytes: u64,
     pub freed_bytes: u64,
 }
 
@@ -1850,6 +1937,65 @@ mod tests {
 
         assert_eq!(report.objects_removed, 1);
         assert!(db.load_object(&dead).unwrap().is_some());
+    }
+
+    #[test]
+    fn prune_dry_run_estimates_snapshots() {
+        let (db, _dir) = temp_db();
+        let tid = db.create_task("p", serde_json::json!({}), 0).unwrap();
+        save_one_snapshot(&db, &tid);
+        save_one_snapshot(&db, &tid);
+
+        let report = db
+            .prune(&PruneOptions {
+                dry_run: true,
+                force: true,
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(report.tasks_removed, 1);
+        assert_eq!(report.snapshots_removed, 2, "dry-run 应预估快照数");
+        assert_eq!(db.load_snapshots(&tid).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn prune_include_cache_clears_live_cache() {
+        let (db, _dir) = temp_db();
+        db.set_cache_bytes(b"key-1", &serde_json::json!({"v": 1}))
+            .unwrap();
+        db.set_cache_bytes(b"key-2", &serde_json::json!({"v": 2}))
+            .unwrap();
+
+        // 默认不动存活缓存
+        let report = db.prune(&PruneOptions::default()).unwrap();
+        assert_eq!(report.cache_entries_removed, 0);
+        assert!(db.check_cache_bytes(b"key-1").unwrap().is_some());
+
+        // include_cache：清空缓存行及其独占 OBJECT
+        let report = db
+            .prune(&PruneOptions {
+                include_cache: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(report.cache_entries_removed, 2);
+        assert_eq!(report.objects_removed, 2);
+        assert!(db.check_cache_bytes(b"key-1").unwrap().is_none());
+        assert!(db.check_cache_bytes(b"key-2").unwrap().is_none());
+
+        // dry-run 也计入
+        db.set_cache_bytes(b"key-3", &serde_json::json!({"v": 3}))
+            .unwrap();
+        let report = db
+            .prune(&PruneOptions {
+                include_cache: true,
+                dry_run: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(report.cache_entries_removed, 1);
+        assert!(db.check_cache_bytes(b"key-3").unwrap().is_some());
     }
 
     #[test]

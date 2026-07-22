@@ -55,6 +55,21 @@ impl Operator for FilterOperator {
             )));
         }
         let ref_value = inputs.get("value").cloned().unwrap_or(Value::Null);
+        // 操作数类型前置校验：in 的 value 必须是数组、contains 的 value 必须是字符串，
+        // 否则 compare 恒为 None → 静默返回空数组（配置错误被吞 = 静默丢数据）。
+        match operator.as_str() {
+            "in" if !ref_value.is_array() => {
+                return Err(OperatorError::Config(
+                    "filter operator=in 要求 inputs.value 为数组".into(),
+                ));
+            }
+            "contains" if !ref_value.is_string() => {
+                return Err(OperatorError::Config(
+                    "filter operator=contains 要求 inputs.value 为字符串".into(),
+                ));
+            }
+            _ => {}
+        }
         let data = if let Value::Object(mut m) = inputs {
             match m.remove("data") {
                 Some(v) if !v.is_null() => v,
@@ -129,6 +144,27 @@ mod tests {
         });
         let out = op.run(inputs).await.expect("run");
         assert_eq!(out, json!([2.5, 3.5]));
+    }
+
+    #[tokio::test]
+    async fn in_with_non_array_value_returns_config_error() {
+        // 配置错误必须显式失败，而非静默返回空数组（ETL 静默丢数据）
+        let op = FilterOperator;
+        let err = op
+            .run(json!({ "data": [1, 2, 3], "operator": "in", "value": 2 }))
+            .await
+            .expect_err("must fail");
+        assert!(matches!(err, OperatorError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn contains_with_non_string_value_returns_config_error() {
+        let op = FilterOperator;
+        let err = op
+            .run(json!({ "data": ["ab"], "operator": "contains", "value": 1 }))
+            .await
+            .expect_err("must fail");
+        assert!(matches!(err, OperatorError::Config(_)));
     }
 
     #[tokio::test]

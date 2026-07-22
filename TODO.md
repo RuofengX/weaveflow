@@ -2,7 +2,7 @@
 
 > 本文件只记两件事：**待修改的开放项**（上半）与 **v1.0 已完成的修改**（下半）。
 > 行为与用法文档在 [docs/](docs/README.md)；工程约定在 [AGENTS.md](AGENTS.md)。
-> 质量基线：226 lib tests + 71 集成测试（31 个二进制）+ 37 bin tests 全绿，`cargo clippy --all-targets` 0 警告。
+> 质量基线：244 lib tests + 74 集成测试（32 个二进制）+ 48 bin tests 全绿，`cargo clippy --all-targets` 0 警告。
 
 ---
 
@@ -10,7 +10,7 @@
 
 ## A. 值得优先处理
 
-（暂无 —— 原 A 组 C6/L14/S5/Noop 已于 2026-07-20 全部处置，见下方"开放项处置决议"）
+（暂无）
 
 ## B. 低优先 / 已接受的残余风险
 
@@ -34,7 +34,19 @@
 | O8 | `operator/builtin/filter.rs` | eq/ne/in 是严格 JSON 相等（`1 ≠ 1.0`），与 gt/lt 的数值语义不一致 | 语义文档化，不改行为 |
 | — | `dsl/variable.rs` | `VariablePath::parse` 的 trim() 使首尾带空格的字面量被意外当 ref | 设计取舍，待文档化 |
 
+## D. 子代理深度测试发现（2026-07-22）— 待确认的设计项
+
+33 项发现中 29 项已修复（见下半"v1.0 已完成 → 子代理深度测试修复"），以下 4 项改动大或涉及设计理念，待确认后处理：
+
+| # | 位置 | 问题 | 待定方向 |
+|---|------|------|----------|
+| D12 | `server/routine.rs:533-544` | stream permit 释放依赖 1s 轮询 DB，快任务吞吐被钳制在 ~7 批/s/routine | 改 tracker 终态回调（架构改动） |
+| D24 | `dsl/parser.rs` | 解析错误泄露内部 Rust 类型名（`RawStepOp::Noop` 等） | 需错误消息映射层 |
+| D29 | `dsl/validator.rs` | `variable_ref_not_found`/`slot_not_found` 不定位到具体输入字段，多条错误按字段名字典序排列 | 需 refs 提取携带字段路径（validator 重构） |
+| D32 | cron 调度 | cron 无并发上限：`interval:1s` + 慢 pipeline 任务无限叠加（stream 有 max_in_flight，cron 无等价物） | 加 cron max_in_flight？或文档化 |
+
 ## 有意保留（非缺陷，勿"修复"）
+
 
 | 行为 | 理由 |
 |------|------|
@@ -63,6 +75,58 @@
 - 安全加固：共享 HTTP client（不跟 redirect、全 DNS SSRF 检查、64MB 流式限长、无隐式总超时）/ command env_clear+白名单+10MB 截断 / file 白名单+64MB / QuickJS 沙箱 256MB+1MB 栈+inflate 限长
 - `pipeline apply` 同名 upsert（单写事务原子）/ `run -i k=@file.json` 文件输入 / 任务失败退出码 1
 - 文档体系：docs/ 八篇分册 + agent SKILL
+
+## MCP 试用修复（2026-07-22）
+
+试用 17 个 MCP 工具发现 5 个问题，全部处置：
+
+| # | 问题 | 修复 |
+|---|------|------|
+| M1 | MCP `Value` 参数（run_pipeline.inputs / push_routine.items / upsert_routine.def）被客户端序列化成 JSON 字符串时不解析——push 场景把数组当单个字符串元素静默入库 | `mcp.rs::parse_maybe_json_string`：字符串且可解析为 JSON 则用之，否则原样保留（纯字符串元素仍可 push） |
+| M2 | iterate `over` 解析为 Null（slot 未传）时静默按 1 个元素迭代，产出垃圾输出且任务"成功" | `iterate.rs`：Null → BadRequest 硬错误；非数组非标量 → warn 日志按单元素迭代 |
+| M3 | `get_task_result` 描述说返回 final output，实际返回整个 task JSON（含 inputs 明文） | 改为提取 `progress.status`：Completed → `{status, output}`，Failed → `{status, error}` |
+| M4 | command 非零退出码步骤仍 Completed | 确认为有意（管道可消费预期非零退出，如 grep 无匹配），已在 docs/operators.md 文档化 |
+| M5 | validate 顶层类型错误行号恒为 1:1 | parser 错误消息后追加"顶层字段 X 应为…"提示 |
+
+验证：229 lib + 44 bin + 71 集成测试全绿，clippy 0 警告；MCP stdio 端到端复测 5 项全部通过。
+
+## 子代理深度测试修复（2026-07-22）
+
+5 个 QA 子代理并行深测发现 33 项（D1-D33），修复 29 项（D12/D24/D29/D32 待设计确认，留在开放项）；另修用户报告的 daemon 版本升级后无法 stop 的 bug：
+
+| # | 问题 | 修复 |
+|---|------|------|
+| D1 | 终态快照 >16MiB 时 `run` 误报失败（WS 单帧超 tungstenite 16MiB 默认上限，协议错误被吞成"连接丢失"） | daemon axum `max_frame_size`/`max_message_size` 与 CLI tungstenite 配置均放宽到 256MiB；WS 协议错误拼进渲染层错误消息（`（WebSocket: ...）`） |
+| D2+D33 | env 脱敏不覆盖最终 output：tracker/WS/get_task_result/routine `output_preview` 均带明文，且 preview 明文落盘 ROUTINE_EVENT | runner 在 `tracker.complete` 前对最终 output 走同一 `redact_env_values`，下游全部消费脱敏值 |
+| D3 | 缓存无法通过 prune 清除（env 明文 OBJECT 永久残留） | 用户决策：缓存明文可接受（用户不可直接访问，后续可做端到端加密存储）；`PruneOptions.include_cache` + CLI `prune --include-cache` + HTTP `include_cache`：清空 CACHE 表及其独占 OBJECT，dry-run 含字节预估 |
+| D4 | tracker 回收（10min）后 `get_task_result` 把终态任务误报 `running`（与 `get_task_status` 矛盾） | 非 summary 响应补 DB `status` 字段；MCP 在 progress 为 null 时回退 DB 终态 |
+| D5 | stream `flush_interval` 空闲期后失效（过期 tick Burst，首元素单飞） | `MissedTickBehavior::Delay` + 每批首元素 `reset()`：批次窗口从首元素到达起算 |
+| D6 | DELETE/热更新丢弃 channel 中已 accepted 元素 | 取消分支先 `rx.try_recv()` drain channel 再 flush 全部缓冲 |
+| D7 | 必填 slot（无 default）缺失静默变 null、跳过 schema 校验 | runner 启动即 `BadRequest("缺少必填 slot...")`（validator 是静态 YAML 校验，run inputs 只能运行时判） |
+| D8 | `with_type_hint` 把合法 `output`（任意 JSON）误判"应为字符串" | 移除 output 检查项 |
+| D9 | webhook payload `seq` 恒为 0（与收件箱不一致） | `emit` 返回分配 seq 后的记录，webhook 投递该记录 |
+| D10 | cron interval 锚点为 last_fired_at，逐周期漂移 | 锚点固定 created_at 网格；`missed_fire` 改为"最近网格点晚于 last_fired 即错过" |
+| D11 | `buffer_cap` 不含阻塞在信号量上的批次（429 偏松） | `buffered.fetch_sub` 移到 `acquire` 成功之后 |
+| D13 | `__native__.atob` 非法 base64 触发 Rust panic | 比照 `inflate` 返回 JS 异常 |
+| D14 | dedup 把"字段值为 null"误判"字段缺失"不去重 | 新增 `resolve_nested_opt` 区分缺失/显式 null；null 作为正常 key 参与去重 |
+| D15 | filter `in`/`contains` 操作数类型错静默返回空数组 | 运行前置 Config 错误（in 要求 value 数组、contains 要求 value 字符串） |
+| D16 | `check --output json` 解析失败不输出 JSON + 前缀重复 | 解析失败也输出结构化 JSON；不再重复包裹"YAML 解析失败:"前缀 |
+| D17 | 非 TTY 自动 `--text-output` 文档声称但未实现 | `run` 无 flag 且 stdout 非 TTY 时自动进入 watch 流式模式（失败 exit 1） |
+| D18 | base64 掩码按解码公式报告错误字节数 | 改为报告原始字符数（启发式本身保留，纯文本长串仍会命中） |
+| D19 | `prune --dry-run` 的 `snapshots_removed` 恒 0 | 按各 task max_seq 预估 |
+| D20 | `?max_bytes` 非法值静默忽略 | 非正整数 → 400 |
+| D21 | 大 YAML apply >2MiB 被 axum 默认 2MiB 限 413 | `DefaultBodyLimit::max(64MB)`（413 纯文本改结构化错误未做，影响小） |
+| D22 | `prune --force` 无 help 说明 | 补 doc comment（"忽略 result_ttl，删除所有终态任务"） |
+| D23 | `{env.KEY.多余段}` 静默忽略多余段 | validator 新增 `invalid_env_ref`：env 引用必须恰好两段 |
+| D25 | slot `schema.default` 不做静态校验 | validator 用编译后的 schema 校验 default（`invalid_slot_default`） |
+| D26 | filter/sort/dedup/base64 缺 `data`、file 无 `path`/`url` 运行时必炸但 check 不报 | validator 新增 `missing_required_input` 静态检查 |
+| D27 | `no_upstream_deps` 对只引用 as 名的 iterate 步骤假阴性 | 依赖收集排除 as_name 前缀 |
+| D28 | `cycle_detected` 不指出环成员 | Kahn 剩余节点列入消息 |
+| D30 | `pipeline apply` 静默丢弃 warnings | apply 响应带 `warnings`，CLI 回显 |
+| D31 | `iterate.batch.size` 无上限、`as` 允许纯数字 | batch.size ≤ 1048576；as 首字符禁数字 |
+| — | **新 CLI 无法 stop 旧 daemon**（升级后 `verify_pid_binary` 全路径不等 → 误判 PID 复用，拒绝 kill 还误删 pidfile，只能手动 sudo kill） | `verify_pid_binary` 改为比较 exe **文件名**（剥离 " (deleted)" 后缀），升级场景同名即视为同一 daemon，异名仍挡 PID 复用 |
+
+验证：244 lib + 48 bin + 74 集成测试全绿（新增 17 个测试覆盖上述修复），clippy 0 警告；daemon 实机复测 D1（17MB 输出 run 成功）/D7（缺 slot 明确报错）/D17（非 TTY 自动流式）/D20（400）/D30（warnings 回显）/prune --include-cache（dry-run 字节预估、缓存清除后不再 ♻）全部通过。
 
 ## 三轮审计汇总
 

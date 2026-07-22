@@ -190,6 +190,26 @@ output: "{r.output}"
 }
 
 #[test]
+fn js_native_atob_invalid_base64_is_js_error_not_panic() {
+    let yaml = r#"
+name: js_atob_invalid
+steps:
+  - id: r
+    type: js
+    inputs:
+      code: |
+        function run() { return __native__.atob("!!!"); }
+output: "{r.output}"
+"#;
+    let err = run_yaml(yaml, HashMap::new()).expect_err("must fail");
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("panicked"),
+        "不应暴露 Rust panic，实际: {msg}"
+    );
+}
+
+#[test]
 fn js_infinite_loop_is_interrupted_by_step_timeout() {
     // JS inputs 不再接受 timeout 字段；超时由 step.timeout_sec 控制。
     let yaml = r#"

@@ -15,10 +15,41 @@ use tracing::debug;
 ///
 /// `rust_yaml` 的解析错误（含行号、上下文）直接透传到 `ParseError` 返回给调用方。
 pub fn parse(yaml: &str) -> Result<PipelineDef, ParseError> {
-    let raw: RawPipelineDef = rust_yaml::from_str(yaml)?;
+    let raw: RawPipelineDef =
+        rust_yaml::from_str(yaml).map_err(|e| ParseError::Yaml(with_type_hint(yaml, &e)))?;
     let pipeline = PipelineDef::try_from(raw)?;
     debug!(name = %pipeline.name, steps = pipeline.steps.len(), "pipeline parsed");
     Ok(pipeline)
+}
+
+/// rust_yaml 对顶层字段类型错误的定位恒为 1:1；逐个检查顶层字段类型，
+/// 在错误消息后补上当个出错字段的提示。
+fn with_type_hint(yaml: &str, e: &rust_yaml::Error) -> String {
+    let msg = e.to_string();
+    let Ok(value) = rust_yaml::from_str::<rust_yaml::Value>(yaml) else {
+        return msg;
+    };
+    let Some(map) = value.as_mapping() else {
+        return msg;
+    };
+    type FieldCheck = (&'static str, &'static str, fn(&rust_yaml::Value) -> bool);
+    let checks: [FieldCheck; 4] = [
+        ("name", "字符串", |v| v.as_str().is_some()),
+        ("slots", "列表（如 slots: [{name: items}]）", |v| {
+            v.as_sequence().is_some()
+        }),
+        ("steps", "列表", |v| v.as_sequence().is_some()),
+        ("storage", "映射", |v| v.as_mapping().is_some()),
+    ];
+    for (field, expect, ok) in checks {
+        let key = rust_yaml::Value::from(field);
+        if let Some(v) = map.get(&key)
+            && !ok(v)
+        {
+            return format!("{msg}（提示：顶层字段 `{field}` 应为{expect}）");
+        }
+    }
+    msg
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +149,23 @@ output: "{s1.output}"
     fn parse_invalid_yaml() {
         let result = parse("name: \nsteps: [invalid");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_slots_map_gets_field_hint() {
+        let yaml = r#"
+name: bad_slots
+slots:
+  items:
+    type: array
+steps:
+  - id: s
+    type: noop
+output: "{s.output}"
+"#;
+        let err = parse(yaml).unwrap_err().to_string();
+        assert!(err.contains("slots"), "err: {err}");
+        assert!(err.contains("列表"), "err: {err}");
     }
 
     #[test]

@@ -405,8 +405,8 @@ pub fn missed_fire(row: &RoutineRow, now: DateTime<Utc>) -> Option<DateTime<Utc>
         return None;
     };
     let c = row.def.cron.as_ref()?;
-    let base = row.last_fired_at.unwrap_or(row.created_at);
     if let Some(expr) = &c.schedule {
+        let base = row.last_fired_at.unwrap_or(row.created_at);
         let sched = parse_cron(expr)?;
         let missed = sched.after(&base).next()?;
         if missed <= now { Some(missed) } else { None }
@@ -416,8 +416,16 @@ pub fn missed_fire(row: &RoutineRow, now: DateTime<Utc>) -> Option<DateTime<Utc>
         if iv_ms <= 0 {
             return None;
         }
-        let missed = base.checked_add_signed(chrono::Duration::milliseconds(iv_ms))?;
-        if missed <= now { Some(missed) } else { None }
+        // interval 以 created_at 为锚点：最近的网格点晚于 last_fired_at 才算错过
+        let created = row.created_at;
+        let elapsed = (now - created).num_milliseconds().max(0);
+        let k = elapsed / iv_ms;
+        if k < 1 {
+            return None;
+        }
+        let grid = created.checked_add_signed(chrono::Duration::milliseconds(k * iv_ms))?;
+        let last_fired = row.last_fired_at.unwrap_or(created);
+        if grid > last_fired { Some(grid) } else { None }
     }
 }
 
@@ -667,6 +675,25 @@ mod tests {
     }
 
     #[test]
+    fn next_fire_interval_stays_on_created_grid() {
+        // D10：以 created_at 为锚点——调度延迟不累进锚点，间隔不漂移
+        let c = CronConfig {
+            schedule: None,
+            interval: Some("1s".into()),
+            misfire: MisfirePolicy::Skip,
+            inputs: HashMap::new(),
+        };
+        let created = Utc::now() - chrono::Duration::seconds(10);
+        // 每次实际触发都比网格晚 ~16ms，但下一次触发仍落在整秒网格上
+        let now = created + chrono::Duration::milliseconds(10_016);
+        let next = next_fire_after(&c, created, now).unwrap();
+        assert_eq!(next, created + chrono::Duration::seconds(11));
+        let now2 = created + chrono::Duration::milliseconds(11_033);
+        let next2 = next_fire_after(&c, created, now2).unwrap();
+        assert_eq!(next2, created + chrono::Duration::seconds(12));
+    }
+
+    #[test]
     fn next_fire_cron_schedule() {
         let c = CronConfig {
             schedule: Some("0 3 * * *".into()),
@@ -692,8 +719,12 @@ mod tests {
         // 模拟 created_at 在 10 分钟前
         row.created_at = Utc::now() - chrono::Duration::minutes(10);
         assert!(missed_fire(&row, Utc::now()).is_some());
-        // last_fired 在 1 分钟前 → 无 missed
+        // interval 以 created_at 为锚点对齐：网格点为 now-5m / now，
+        // 最近网格点晚于 last_fired 即视为错过（到点未触发，catch_up 立即补）
         row.last_fired_at = Some(Utc::now() - chrono::Duration::minutes(1));
+        assert!(missed_fire(&row, Utc::now()).is_some());
+        // 刚触发过当前网格点 → 无 missed
+        row.last_fired_at = Some(Utc::now());
         assert!(missed_fire(&row, Utc::now()).is_none());
     }
 
