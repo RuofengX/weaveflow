@@ -166,7 +166,12 @@ async fn deliver_webhook(url: &str, event: &RoutineEventRecord) -> Result<(), St
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(1 << (attempt - 1))).await;
         }
-        match http_client::http_client().post(url).json(event).send().await {
+        match http_client::http_client()
+            .post(url)
+            .json(event)
+            .send()
+            .await
+        {
             Ok(resp) if resp.status().is_success() => return Ok(()),
             Ok(resp) => {
                 last_err = format!("HTTP {}", resp.status());
@@ -1168,10 +1173,7 @@ output: "{s.output}"
         assert_eq!(resp.status(), 200);
         let events: Value = resp.json().await.unwrap();
         let events = events.as_array().unwrap();
-        let kinds: Vec<&str> = events
-            .iter()
-            .map(|e| e["kind"].as_str().unwrap())
-            .collect();
+        let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
         assert!(
             kinds.contains(&"fired") && kinds.contains(&"task_completed"),
             "events: {kinds:?}"
@@ -1213,11 +1215,7 @@ output: "{s.output}"
         let events: Value = resp.json().await.unwrap();
         let events = events.as_array().unwrap();
         assert!(!events.is_empty());
-        assert!(
-            events
-                .iter()
-                .all(|e| e["seq"].as_u64().unwrap() > max_seq)
-        );
+        assert!(events.iter().all(|e| e["seq"].as_u64().unwrap() > max_seq));
 
         // 不存在 routine 的 events → 404
         let resp = client
@@ -1233,13 +1231,7 @@ output: "{s.output}"
             .send()
             .await
             .unwrap();
-        assert!(
-            state
-                .db
-                .list_routine_events("s1", 0, 0)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(state.db.list_routine_events("s1", 0, 0).unwrap().is_empty());
 
         handle.abort();
     }
@@ -1292,10 +1284,18 @@ output: "{s.output}"
         // 等 flush + task 完成 + webhook 投递
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if received.lock().unwrap().iter().any(|e| e["kind"] == "task_completed") {
+            if received
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e["kind"] == "task_completed")
+            {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "webhook 未收到终态事件");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "webhook 未收到终态事件"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         let events = received.lock().unwrap();

@@ -172,26 +172,34 @@ impl WeaveflowMcp {
         &self,
         Parameters(p): Parameters<NameParam>,
     ) -> Result<Json<ToolOutput>, String> {
-        client::get(&self.cfg, &format!("/pipelines/{}", client::encode_segment(&p.name)))
-            .await
-            .map(out)
+        client::get(
+            &self.cfg,
+            &format!("/pipelines/{}", client::encode_segment(&p.name)),
+        )
+        .await
+        .map(out)
     }
 
-    #[tool(description = "Delete a pipeline by name. Routines referencing it will fail on next fire.")]
+    #[tool(
+        description = "Delete a pipeline by name. Routines referencing it will fail on next fire."
+    )]
     async fn delete_pipeline(
         &self,
         Parameters(p): Parameters<NameParam>,
     ) -> Result<Json<ToolOutput>, String> {
-        client::delete(&self.cfg, &format!("/pipelines/{}", client::encode_segment(&p.name)))
-            .await
-            .map(out)
+        client::delete(
+            &self.cfg,
+            &format!("/pipelines/{}", client::encode_segment(&p.name)),
+        )
+        .await
+        .map(out)
     }
 
-    #[tool(description = "List builtin step operators (type names + descriptions) for writing pipeline YAML.")]
+    #[tool(
+        description = "List builtin step operators (type names + descriptions) for writing pipeline YAML."
+    )]
     async fn list_operators(&self) -> Result<Json<ToolOutput>, String> {
-        client::get(&self.cfg, "/system/operators")
-            .await
-            .map(out)
+        client::get(&self.cfg, "/system/operators").await.map(out)
     }
 
     // ── run / task ──
@@ -246,11 +254,9 @@ impl WeaveflowMcp {
         self.task_summary(&p.task_id).await.map(out)
     }
 
-    #[tool(
-        description = "Get the pipeline's final output for a completed task \
+    #[tool(description = "Get the pipeline's final output for a completed task \
         (full output — may be large; only available for ~10 min after completion and until prune). \
-        For step-level data prefer list_snapshots + get_snapshot with max_bytes."
-    )]
+        For step-level data prefer list_snapshots + get_snapshot with max_bytes.")]
     async fn get_task_result(
         &self,
         Parameters(p): Parameters<TaskParam>,
@@ -297,14 +303,19 @@ impl WeaveflowMcp {
         client::get(&self.cfg, "/routines").await.map(out)
     }
 
-    #[tool(description = "Get one routine's definition + runtime state (including stream buffer size).")]
+    #[tool(
+        description = "Get one routine's definition + runtime state (including stream buffer size)."
+    )]
     async fn inspect_routine(
         &self,
         Parameters(p): Parameters<NameParam>,
     ) -> Result<Json<ToolOutput>, String> {
-        client::get(&self.cfg, &format!("/routines/{}", client::encode_segment(&p.name)))
-            .await
-            .map(out)
+        client::get(
+            &self.cfg,
+            &format!("/routines/{}", client::encode_segment(&p.name)),
+        )
+        .await
+        .map(out)
     }
 
     #[tool(
@@ -339,17 +350,24 @@ impl WeaveflowMcp {
         .map(out)
     }
 
-    #[tool(description = "Delete a routine (stops its worker, flushes stream buffer, clears its event inbox).")]
+    #[tool(
+        description = "Delete a routine (stops its worker, flushes stream buffer, clears its event inbox)."
+    )]
     async fn delete_routine(
         &self,
         Parameters(p): Parameters<NameParam>,
     ) -> Result<Json<ToolOutput>, String> {
-        client::delete(&self.cfg, &format!("/routines/{}", client::encode_segment(&p.name)))
-            .await
-            .map(out)
+        client::delete(
+            &self.cfg,
+            &format!("/routines/{}", client::encode_segment(&p.name)),
+        )
+        .await
+        .map(out)
     }
 
-    #[tool(description = "Push elements into a stream routine's buffer (micro-batched into pipeline runs).")]
+    #[tool(
+        description = "Push elements into a stream routine's buffer (micro-batched into pipeline runs)."
+    )]
     async fn push_routine(
         &self,
         Parameters(p): Parameters<PushRoutineParam>,

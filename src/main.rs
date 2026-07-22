@@ -481,7 +481,12 @@ async fn main() {
         Commands::Task(TaskCmd::Snapshot(SnapshotCmd::List { task_id })) => {
             exit_on_err(cli::client::snapshot_list(&cfg, &task_id).await);
         }
-        Commands::Task(TaskCmd::Snapshot(SnapshotCmd::Show { task_id, seq, full, max_bytes })) => {
+        Commands::Task(TaskCmd::Snapshot(SnapshotCmd::Show {
+            task_id,
+            seq,
+            full,
+            max_bytes,
+        })) => {
             exit_on_err(cli::client::snapshot_show(&cfg, &task_id, seq, full, max_bytes).await);
         }
         Commands::System(SystemCmd::Prune { force, dry_run }) => {

@@ -4,11 +4,11 @@ use std::cmp::Ordering;
 
 use crate::dsl::PipelineDef;
 use crate::dsl::StepId;
+use crate::routine::{RoutineEventRecord, RoutineRow};
 use crate::store::object::ObjectDigest;
 use crate::store::object::ObjectValue;
 use crate::tracker::snapshot::{Snapshot, SnapshotKey};
 use crate::tracker::{PipelineId, TaskId, TaskMeta};
-use crate::routine::{RoutineEventRecord, RoutineRow};
 use uuid::Uuid;
 
 // ── TaskId（UUID v4，定长 16 字节） ───────────────────────────────────
@@ -500,8 +500,9 @@ impl RedbValue for EventKey {
     where
         Self: 'a,
     {
-        let name_len = u32::from_be_bytes(data[..4].try_into().expect("EventKey: 需要 4 字节长度前缀"))
-            as usize;
+        let name_len =
+            u32::from_be_bytes(data[..4].try_into().expect("EventKey: 需要 4 字节长度前缀"))
+                as usize;
         let name_end = 4 + name_len;
         let name =
             String::from_utf8(data[4..name_end].to_vec()).expect("EventKey: routine 名不是 UTF-8");
@@ -510,10 +511,7 @@ impl RedbValue for EventKey {
                 .try_into()
                 .expect("EventKey: 需要 8 字节 seq"),
         );
-        EventKey {
-            routine: name,
-            seq,
-        }
+        EventKey { routine: name, seq }
     }
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where

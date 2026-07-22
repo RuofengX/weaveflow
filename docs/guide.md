@@ -60,15 +60,23 @@ weaveflow daemon stop [--timeout 35s]
 weaveflow daemon restart [...start opts] [--stop-timeout 35s]
 weaveflow daemon log [-f]
 weaveflow serve --bind ...                        # hidden；daemon start 的前台等价物
+weaveflow mcp                                     # MCP stdio server（AI agent 接入）
 weaveflow pipeline apply -f <file.yml> | -d '<yaml>'   # -f / -d 是 flag，不是位置参数
 weaveflow pipeline ls                             # alias: list
 weaveflow pipeline inspect <name>
 weaveflow pipeline delete <name>
+weaveflow routine apply -f <file.toml>            # TOML（CLI 本地解析）→ PUT JSON；幂等热更新
+weaveflow routine ls                              # alias: list；含 total_fired/next_fire_at 等运行时状态
+weaveflow routine inspect <name>
+weaveflow routine delete <name>
+weaveflow routine push <name> -d '[...]'          # stream 型；单对象自动包一层数组
+weaveflow routine events <name> [--after N]       # 事件收件箱增量回查（智能体值班回查通道）
 weaveflow run <name> [-i k=v] [-i k=@file.json] [--watch | --text-output]   # 两者互斥
 weaveflow check -f <file.yml> [--output json]     # 纯本地校验，无需 daemon
 weaveflow task ls
+weaveflow task show <task_id> [--full]            # 默认 summary（省 token）
 weaveflow task snapshot list <task_id>
-weaveflow task snapshot show <task_id> <seq>
+weaveflow task snapshot show <task_id> <seq> [--max-bytes N] [--full]
 weaveflow system prune [--force] [--dry-run]
 weaveflow system operators
 ```
@@ -130,11 +138,17 @@ Daemon 侧 env：`WEAVEFLOW_BIND`、`WEAVEFLOW_MAX_CONCURRENT_TASKS`、`WEAVEFLO
 | Method | Path | 说明 |
 |--------|------|------|
 | POST | `/runs` | 提交任务 → `{task_id, ...}`（异步；draining 时 **503**） |
-| GET | `/runs/:task_id` | 任务状态 + 进度 |
+| GET | `/runs/:task_id` | 任务状态 + 进度（`?summary=1` = token 友好模式：不带 inputs、不内嵌最终输出） |
 | WS | `/runs/:task_id/ws` | 实时进度推送（TaskSnapshot JSON） |
-| GET | `/runs/:task_id/snapshots` · `/:seq` | 快照列表 / 单条 |
+| GET | `/runs/:task_id/snapshots` · `/:seq` | 快照列表 / 单条（`?max_bytes=N` 截断超长输出） |
 | POST/GET | `/pipelines` | 创建（YAML body）/ 列表 |
 | GET/DELETE | `/pipelines/:name` | 查看 / 删除 |
+| PUT | `/routines/:name` | 创建/更新 routine（JSON body；幂等热更新 worker） |
+| GET | `/routines` · `/routines/:name` | routine 列表（含运行时状态）/ 详情（含 buffered） |
+| DELETE | `/routines/:name` | 删除 routine（停 worker + 清空收件箱） |
+| POST | `/routines/:name/push` | stream 入口；缓冲满 → 429 |
+| GET | `/routines/:name/events?after=&limit=` | 事件收件箱增量回查（智能体值班回查通道） |
+| WS | `/routines/:name/ws` | routine 实时事件流 |
 | GET | `/tasks` | 任务列表 |
 | POST | `/prune` | 清理（响应含 `snapshots_removed`） |
 | GET | `/system/operators` · `/system/logs` · `/system/version` | 算子清单 / daemon 日志（绝对 offset） / 版本信息 `{version, build_code}`（CLI 构建码不一致时告警，识别旧版 daemon 残留） |
@@ -143,21 +157,30 @@ Daemon 侧 env：`WEAVEFLOW_BIND`、`WEAVEFLOW_MAX_CONCURRENT_TASKS`、`WEAVEFLO
 
 ## 面向 Agent 的集成速览
 
-> 完整模式、排错顺序与写 YAML 的常见坑见 [agent.md](agent.md)。
+> 完整模式、MCP 接入、routine 值班范式与写 YAML 的常见坑见 [agent.md](agent.md)。
+
+**首选 MCP**：`weaveflow mcp` 是标准 MCP stdio server（17 个 tools），在 Claude Code / opencode 注册即可：
+
+```json
+{ "mcpServers": { "weaveflow": { "command": "weaveflow", "args": ["mcp"] } } }
+```
+
+CLI 等价路径：
 
 ```bash
 weaveflow check -f p.yml --output json                       # 预检（无需 daemon）
 weaveflow pipeline apply -f p.yml --output json              # 注册
 weaveflow run p -i k=v --text-output --output json           # JSONL 快照流
 #   每行一个 TaskSnapshot，最后一行 status.Completed 即结果；Failed → 退出码 1
-weaveflow task snapshot show <task_id> <seq> --output json   # 回放某 step 输出
+weaveflow task show <task_id> --output json                  # summary（省 token）
+weaveflow task snapshot show <task_id> <seq> --max-bytes 2000 --output json
 ```
 
-要点：全程 `--output json`（单行紧凑，jq 友好）；非 TTY 自动回退 `--text-output`，不会卡 TUI；`run` 退出码即成败。
+要点：全程 `--output json`（单行紧凑，jq 友好）；非 TTY 自动回退 `--text-output`，不会卡 TUI；`run` 退出码即成败；task/snapshot 默认走省 token 模式。
 
 ## 存储与数据目录
 
-- 内嵌 redb，位置 `WEAVEFLOW_DATA`（默认 `~/.weaveflow`），含 PIPELINE / TASK / SNAPSHOT / OBJECT / CACHE 五张表。
+- 内嵌 redb，位置 `WEAVEFLOW_DATA`（默认 `~/.weaveflow`），含 PIPELINE / TASK / SNAPSHOT / OBJECT / CACHE / ROUTINE / ROUTINE_EVENT 七张表（旧 trigger 表打开时自动迁移为 routine 表）。
 - 所有值内联存储，无外部 spill 文件；schema 以类型名版本化（`::v1`、Snapshot `::v2`），v0 库打开时自动迁移（先备份 `.v0.bak`）。
 - `storage.result_ttl` 控制任务结果保留时长（默认 3600s，下限 60s）；过期由 `system prune` 清理。
 - 快照编码：`seq(8B BE) | step_id_len(4B BE) | step_id | output`。

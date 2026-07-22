@@ -11,6 +11,7 @@ use tracing::debug;
 
 use crate::dsl::{PipelineDef, StepId};
 use crate::error::{WeaveflowError, WeaveflowResult};
+use crate::routine::{EVENT_INBOX_CAP, RoutineEventRecord, RoutineRow};
 use crate::store::database::{
     CACHE, EventKey, LEGACY_TRIGGER, OBJECT, PIPELINE, ROUTINE, ROUTINE_EVENT, SNAPSHOT,
     SNAPSHOT_HEADER, TASK, V0_PIPELINE, V0_TASK, V1_PIPELINE, V1_TASK,
@@ -18,7 +19,6 @@ use crate::store::database::{
 use crate::tracker::meta::TASK_STATUS_RUNNING;
 use crate::tracker::snapshot::{Snapshot, SnapshotKey};
 use crate::tracker::{PipelineId, TaskId, TaskMeta};
-use crate::routine::{EVENT_INBOX_CAP, RoutineEventRecord, RoutineRow};
 
 /// weaveflow 数据层入口。封装 redb。
 #[derive(Debug)]
@@ -113,7 +113,7 @@ impl Database {
                 return Err(WeaveflowError::Database {
                     operation: "migrate_legacy_triggers open legacy",
                     source: Box::new(e.into()),
-                })
+                });
             }
         };
         let mut rows: Vec<(String, RoutineRow)> = Vec::new();
@@ -132,10 +132,12 @@ impl Database {
         }
         drop(legacy);
         {
-            let mut table = txn.open_table(ROUTINE).map_err(|e| WeaveflowError::Database {
-                operation: "migrate_legacy_triggers open routine",
-                source: Box::new(e.into()),
-            })?;
+            let mut table = txn
+                .open_table(ROUTINE)
+                .map_err(|e| WeaveflowError::Database {
+                    operation: "migrate_legacy_triggers open routine",
+                    source: Box::new(e.into()),
+                })?;
             for (name, row) in &rows {
                 table
                     .insert(name.as_str(), row)
@@ -630,12 +632,12 @@ impl Database {
             source: Box::new(e.into()),
         })?;
         let seq = {
-            let mut routine_table = txn.open_table(ROUTINE).map_err(|e| {
-                WeaveflowError::Database {
-                    operation: "append_routine_event open routine",
-                    source: Box::new(e.into()),
-                }
-            })?;
+            let mut routine_table =
+                txn.open_table(ROUTINE)
+                    .map_err(|e| WeaveflowError::Database {
+                        operation: "append_routine_event open routine",
+                        source: Box::new(e.into()),
+                    })?;
             let existing: Option<RoutineRow> = routine_table
                 .get(name.as_str())
                 .map_err(|e| WeaveflowError::Database {
@@ -655,12 +657,12 @@ impl Database {
                     source: Box::new(e.into()),
                 })?;
             record.seq = seq;
-            let mut event_table = txn.open_table(ROUTINE_EVENT).map_err(|e| {
-                WeaveflowError::Database {
-                    operation: "append_routine_event open events",
-                    source: Box::new(e.into()),
-                }
-            })?;
+            let mut event_table =
+                txn.open_table(ROUTINE_EVENT)
+                    .map_err(|e| WeaveflowError::Database {
+                        operation: "append_routine_event open events",
+                        source: Box::new(e.into()),
+                    })?;
             event_table
                 .insert(
                     EventKey {
@@ -694,10 +696,12 @@ impl Database {
                     .map(|(k, _)| k.value())
                     .collect();
                 for k in stale {
-                    event_table.remove(k).map_err(|e| WeaveflowError::Database {
-                        operation: "append_routine_event evict remove",
-                        source: Box::new(e.into()),
-                    })?;
+                    event_table
+                        .remove(k)
+                        .map_err(|e| WeaveflowError::Database {
+                            operation: "append_routine_event evict remove",
+                            source: Box::new(e.into()),
+                        })?;
                 }
             }
             seq

@@ -104,6 +104,8 @@ curl -X POST http://127.0.0.1:9928/runs \
 
 结果取值：`progress.status.Completed` 即 pipeline 最终输出；任务被回收（终态 10 分钟后）后，用 snapshots 接口取各 step 输出。
 
+**`?summary=1`（token 友好模式，面向 LLM 消费者）**：不返回 `inputs`；`progress.status.Completed` 内嵌的完整输出替换为 `true`；额外返回持久化的 `status` 字符串（`running`/`completed`/`failed`）。结果细节按需走 snapshots 端点。
+
 ### `WS /runs/:task_id/ws` — 实时进度推送
 
 连接后立即推送一帧当前 `TaskSnapshot`（`snapshot_and_subscribe` 单次加锁，无 get-then-subscribe 竞态），之后每次状态变化推一帧。任务终态后连接由服务端关闭。task 不存在 → 升级前返回 404。
@@ -127,6 +129,76 @@ curl -X POST http://127.0.0.1:9928/runs \
 - 正常：step 输出的 JSON 值。
 - 输出不是合法 JSON（二进制）：`{"_binary": true, "_size": N, "_base64": "..."}`。
 - 输出是 JSON `null` 但原始 bytes 非空（异常信号）：`{"_anomalous_null": true, "_notice": "...", "_raw_size": N, "_raw_hex": "..."}`。
+
+**`?max_bytes=N`（token 友好截断）**：`output` 紧凑序列化超过 N 字节时，替换为头部预览字符串（`"…[truncated, M bytes total]"`，M 为总字节数）。http/file/command 步骤的输出可能几十 KB，agent 应始终带此参数。
+
+---
+
+## Routines（智能体委托的长驻任务岗）
+
+routine 引用已注册的 pipeline，把「定时」（cron）与「流式微批」（stream）两类触发转化为普通 pipeline run；任务终态事件写入**持久化收件箱**并可选 webhook 推送——agent 无需长连接守候，下次会话用 seq 游标增量回查（智能体值班范式）。
+
+### `PUT /routines/:name` — 创建/更新（幂等，热更新 worker）
+
+```json
+{
+  "name": "watch-feed",
+  "pipeline": "etl_demo",
+  "type": "cron",
+  "cron": { "interval": "5m", "inputs": { "source_url": "https://example.com/d.json" }, "misfire": "skip" },
+  "notify": { "webhook_url": "http://127.0.0.1:8800/wake", "preview_bytes": 2048 }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `type` | `"cron"` 或 `"stream"`，与 `cron`/`stream` 配置段二选一对应 |
+| `cron.schedule` | 5/6/7 段 cron 表达式（与 `interval` 二选一） |
+| `cron.interval` | 固定间隔 `"30s"/"5m"/"1h"`（≥ 1s，以 created_at 为锚点，重启不漂移） |
+| `cron.misfire` | `catch_up`（补最近一次）/ `skip`（默认） |
+| `cron.inputs` | 每次触发作为 slots 提交的静态输入 |
+| `stream.batch_size` | 凑够 N 条 flush 一批（默认 100） |
+| `stream.flush_interval` | 距上一条到达超过该时长即 flush（可选） |
+| `stream.slot` | 微批数组写入的 slot 名（默认 `"items"`） |
+| `stream.max_in_flight` | 同时运行的微批 task 上限（默认 4） |
+| `stream.buffer_cap` | 缓冲元素上限，到顶 push 返回 429（默认 100000） |
+| `notify.webhook_url` | 终态事件 POST 到该 URL（可选；SSRF 策略同 http 算子；3 次指数退避，4xx 不重试；投递失败落 `notify_failed` 事件） |
+| `notify.preview_bytes` | 终态事件 `output_preview` 字节上限（默认 2048，最大 65536） |
+
+校验失败（`deny_unknown_fields`、段不匹配、pipeline 不存在等）→ 400。daemon 只接收 JSON；TOML 是 CLI 侧的本地载体（`weaveflow routine apply -f x.toml`）。
+
+### `GET /routines` / `GET /routines/:name` — 列表 / 详情
+
+列表项：`{name, pipeline, type, created_at, last_fired_at, next_fire_at, total_fired, total_failed}`。详情为完整 `RoutineRow`（含 def 与运行时状态）外加实时 `buffered`（stream 缓冲中的元素数）。
+
+### `DELETE /routines/:name` — 删除
+
+停 worker（stream worker 先 flush 剩余缓冲再退出），并清空该 routine 的事件收件箱。
+
+### `POST /routines/:name/push` — stream 入口
+
+body 为 JSON 数组（单值自动包一层）。响应 `{"accepted": N, "buffered": M}`；缓冲满 → 429。缓冲纯内存，重启丢弃未 flush 数据。
+
+### `GET /routines/:name/events?after=<seq>&limit=<n>` — 事件收件箱（智能体回查）
+
+返回 `seq > after` 的事件（升序，limit 默认全部，建议 ≤ 50）。每个 routine 保留最近 100 条。**用法：agent 持久化已读到的最大 seq，下次会话作为 `after` 传入即拿到跨会话的完整反馈历史。**
+
+```json
+[{
+  "seq": 7,
+  "routine": "watch-feed",
+  "kind": "task_completed",
+  "task_id": "b21c...",
+  "output_preview": { "...": "截断到 preview_bytes 的 pipeline 最终输出" },
+  "at": "2026-07-21T10:00:00Z"
+}]
+```
+
+`kind` 取值：`fired`（产生 task）/ `failed`（提交失败）/ `dropped`（draining 丢弃）/ `task_completed` / `task_failed`（附 `error`）/ `notify_failed`（webhook 投递失败）。
+
+### `WS /routines/:name/ws` — 实时事件流
+
+与收件箱同源的事件（JSON 帧），按 routine 名过滤，适合实时观察；可靠回查请用收件箱端点。
 
 ---
 
